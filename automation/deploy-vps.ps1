@@ -20,7 +20,7 @@ try {
     & scp -r "calories_bot" "requirements.txt" "${SshHost}:$RemotePath/"
     if ($LASTEXITCODE -ne 0) { throw "Could not copy application files to the VPS." }
 
-    $prepareCommand = "set -e; cd '$RemotePath'; test -f calories_bot/main.py; test -f requirements.txt; test -x .venv/bin/python; .venv/bin/python -m pip install -r requirements.txt; PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m compileall -q calories_bot"
+    $prepareCommand = "set -e; cd '$RemotePath'; test -f calories_bot/main.py; test -f requirements.txt; test -x .venv/bin/python; .venv/bin/python -m pip install -r requirements.txt"
     & ssh $SshHost $prepareCommand
     if ($LASTEXITCODE -ne 0) { throw "VPS preparation failed." }
 
