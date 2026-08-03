@@ -143,13 +143,13 @@ PowerShell-скрипти для першої ініціалізації Git/Git
 деплою на `hetzner` знаходяться в каталозі `automation`.
 
 ```powershell
-.\automation\init-git.ps1 -RemoteUrl "git@github.com:YOUR_USER/calories-bot.git"
-.\automation\save-version.ps1 -Message "Describe the change"
-.\automation\deploy-vps.ps1
+.\automation\init-git.ps1 -RemoteUrl "git@github.com:YOUR_USER/calories_bot.git"
+.\automation\publish.ps1 -Message "Describe the change"
 ```
 
-Перший крок виконується один раз. Деталі та короткий перелік ручних дій наведені
-в `automation/README.md`.
+Перший крок виконується один раз. `publish.ps1` зберігає версію в GitHub,
+копіює застосунок на VPS і перезапускає сервіс. Локальні тести він не запускає.
+Деталі наведені в `automation/README.md`.
 
 ## Перевірки
 

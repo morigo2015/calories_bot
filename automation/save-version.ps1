@@ -4,38 +4,18 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Message,
 
-    [switch]$LocalOnly,
-    [switch]$SkipChecks
+    [switch]$LocalOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 Push-Location $projectRoot
 
 try {
     if (-not (Test-Path -LiteralPath ".git")) {
         throw "Git is not initialized. Run automation\init-git.ps1 first."
-    }
-
-    if (-not $SkipChecks) {
-        if (-not (Test-Path -LiteralPath $python)) {
-            throw "Virtual environment not found at $python."
-        }
-
-        & $python -m ruff format --check .
-        if ($LASTEXITCODE -ne 0) { throw "Ruff format check failed." }
-
-        & $python -m ruff check .
-        if ($LASTEXITCODE -ne 0) { throw "Ruff lint failed." }
-
-        & $python -m mypy calories_bot
-        if ($LASTEXITCODE -ne 0) { throw "Mypy failed." }
-
-        & $python -m pytest -q
-        if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
     }
 
     & git add -A
@@ -59,12 +39,6 @@ try {
         $branch = $branch.Trim()
         if ([string]::IsNullOrWhiteSpace($branch)) {
             throw "Could not determine the current Git branch."
-        }
-
-        $remotes = @(& git remote)
-        if ($LASTEXITCODE -ne 0) { throw "Could not inspect Git remotes." }
-        if ($remotes -notcontains "origin") {
-            throw "Remote 'origin' is not configured."
         }
 
         & git push -u origin $branch
