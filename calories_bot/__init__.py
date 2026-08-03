@@ -1,0 +1,1 @@
+"""Minimal Telegram calorie tracker."""

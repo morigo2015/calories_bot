@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+my_notes.txt
+.venv/
+service-account.json
+*.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+data/photos/
