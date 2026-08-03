@@ -1,0 +1,54 @@
+CALORIES BOT — VPS / SYSTEMD
+DIR:  ~/calories-bot
+UNIT: calories-bot
+
+=== НАЙЧАСТІШЕ =================================================
+
+Статус       sudo systemctl status --no-pager calories-bot
+Активний?    sudo systemctl is-active calories-bot
+Логи (100)   sudo journalctl -u calories-bot -n 100 --no-pager
+Логи наживо  sudo journalctl -u calories-bot -f
+Перезапуск   sudo systemctl restart calories-bot
+Зупинка      sudo systemctl stop calories-bot
+Запуск       sudo systemctl start calories-bot
+
+Вийти з логів наживо: Ctrl+C
+
+=== АВТОЗАПУСК ==================================================
+
+Увімкнути    sudo systemctl enable calories-bot
+Вимкнути     sudo systemctl disable calories-bot
+Увімкнути
+і запустити  sudo systemctl enable --now calories-bot
+
+=== ОНОВЛЕННЯ КОДУ ==============================================
+
+1. sudo systemctl stop calories-bot
+2. Скопіювати calories_bot/ і requirements.txt у ~/calories-bot/
+3. cd ~/calories-bot
+4. .venv/bin/python -m pip install -r requirements.txt
+5. sudo systemctl start calories-bot
+6. sudo systemctl status --no-pager calories-bot
+
+=== НАЛАШТУВАННЯ ================================================
+
+Редагувати:
+nano ~/calories-bot/.env
+
+Застосувати:
+sudo systemctl restart calories-bot
+
+=== SYSTEMD UNIT =================================================
+
+Після зміни /etc/systemd/system/calories-bot.service:
+
+sudo systemctl daemon-reload
+sudo systemctl restart calories-bot
+sudo systemctl status --no-pager calories-bot
+
+=== КОПІЮВАННЯ З MICRO ==========================================
+
+Утримувати Shift → виділити мишкою → Ctrl+Shift+C
+Вставити в термінал або іншу програму: Ctrl+Shift+V
+
+Звичайний Ctrl+C у micro копіює лише у внутрішній буфер редактора.
