@@ -1,8 +1,11 @@
 import logging
-from datetime import time
+from datetime import UTC, datetime, time
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+from telegram import Chat, Message, Update, User
+from telegram.constants import ChatType
 
 from calories_bot import main as main_module
 from calories_bot.analyzer import ModelPricing
@@ -52,6 +55,8 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     handlers = SimpleNamespace(
         start=lambda: None,
         help=lambda: None,
+        day=lambda: None,
+        delete=lambda: None,
         text=lambda: None,
         photo=lambda: None,
     )
@@ -89,5 +94,15 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 4
+    assert len(app.handlers) == 6
     assert app.polling == {"drop_pending_updates": False}
+
+    message = Message(
+        message_id=1,
+        date=datetime(2026, 8, 2, tzinfo=UTC),
+        chat=Chat(-1001, ChatType.SUPERGROUP),
+        from_user=User(123, "Igor", False),
+        text="сир 50",
+    )
+    assert app.handlers[-1].check_update(Update(1, message=message))
+    assert not app.handlers[-1].check_update(Update(2, edited_message=message))

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from .analyzer import OpenAIAnalyzer
 from .bot import CaloriesService, TelegramHandlers
@@ -60,9 +66,18 @@ def main() -> None:
     )
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("help", handlers.help))
-    application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
+    application.add_handler(CommandHandler("day", handlers.day))
     application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.text)
+        CallbackQueryHandler(handlers.delete, pattern=r"^delete:\d+:\d{4}-\d{2}-\d{2}$")
+    )
+    application.add_handler(
+        MessageHandler(filters.UpdateType.MESSAGE & filters.PHOTO, handlers.photo)
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND,
+            handlers.text,
+        )
     )
     application.run_polling(drop_pending_updates=False)
 

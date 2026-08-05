@@ -97,7 +97,10 @@ class Analyzer(Protocol):
 _DECIMAL = re.compile(r"\d+[.,]\d+")
 _HASH_MARKER = re.compile(r"(?<![\w#])(?:#(?P<prefix>\d+)|(?P<suffix>\d+)#)(?![\w#])")
 _KCAL_UNIT = r"(?:[кk][кk]|[кk][кk][аa]л|kcal)"
-_WEIGHT_UNIT = r"(?:гр|г|gr|g)"
+_WEIGHT_UNIT = (
+    r"(?:граммів|граммов|граммами|граммы|грамми|грамма|грамм|"
+    r"грамів|грамами|грамом|грами|грама|граму|грам|гр|г|grams|gram|gr|g)"
+)
 _TEXT_KCAL = re.compile(
     rf"(?<!\w)(?P<value>\d+)\s*{_KCAL_UNIT}\s*/\s*100\s*{_WEIGHT_UNIT}?(?!\w)",
     re.IGNORECASE,

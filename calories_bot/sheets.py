@@ -22,7 +22,7 @@ from .models import (
 
 LOGGER = logging.getLogger(__name__)
 
-HEADERS = [
+LEGACY_HEADERS = [
     "timestamp",
     "meal_name",
     "total_weight_g",
@@ -40,6 +40,25 @@ HEADERS = [
     "output_tokens",
     "llm_cost_usd",
 ]
+HEADERS = ["timestamp", "day", *LEGACY_HEADERS[1:]]
+
+TIMESTAMP_COLUMN = 0
+DAY_COLUMN = 1
+MEAL_NAME_COLUMN = 2
+TOTAL_WEIGHT_COLUMN = 3
+MEAL_KCAL_COLUMN = 4
+KCAL_PER_100G_COLUMN = 5
+MESSAGE_ID_COLUMN = 6
+NORMALIZED_REQUEST_COLUMN = 7
+REQUEST_COLUMN = 8
+PHOTO_PATH_COLUMN = 9
+ITEMS_JSON_COLUMN = 10
+ESTIMATED_COLUMN = 11
+MODEL_COLUMN = 12
+EFFORT_COLUMN = 13
+INPUT_TOKENS_COLUMN = 14
+OUTPUT_TOKENS_COLUMN = 15
+LLM_COST_COLUMN = 16
 
 _SHEETS_EPOCH = datetime(1899, 12, 30)
 
@@ -70,8 +89,28 @@ class SheetState:
     existing: StoredMeal | None
 
 
+@dataclass(frozen=True)
+class DayMeal:
+    meal_name: str
+    meal_kcal: int
+
+
+@dataclass(frozen=True)
+class MealDeletion:
+    accounting_day: date
+    day_total: int
+    photo_path: str | None
+    deleted: bool
+
+
 class MealStore(Protocol):
     def get_state(self, day: date, telegram_message_id: int) -> SheetState: ...
+
+    def get_day_meals(self, day: date) -> list[DayMeal]: ...
+
+    def delete_meal(
+        self, telegram_message_id: int, fallback_day: date
+    ) -> MealDeletion: ...
 
     def append_meal(
         self,
@@ -122,30 +161,40 @@ def _datetime_from_sheet_serial(value: object, timezone: ZoneInfo) -> datetime:
     return (_SHEETS_EPOCH + timedelta(days=float(value))).replace(tzinfo=timezone)
 
 
+def _date_to_sheet_serial(value: date) -> int:
+    return (datetime.combine(value, time()) - _SHEETS_EPOCH).days
+
+
+def _date_from_sheet_serial(value: object) -> date:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("Google Sheets day must be numeric")
+    return (_SHEETS_EPOCH + timedelta(days=float(value))).date()
+
+
 def _meal_from_row(row: list[object]) -> StoredMeal:
     padded = row + [""] * (len(HEADERS) - len(row))
-    items_data = json.loads(str(padded[9]))
+    items_data = json.loads(str(padded[ITEMS_JSON_COLUMN]))
     items = [CalculatedFoodItem.model_validate(item) for item in items_data]
     meal = MealResult(
-        meal_name=str(padded[1]),
+        meal_name=str(padded[MEAL_NAME_COLUMN]),
         items=items,
-        total_weight_g=float(str(padded[2])),
-        kcal_per_100g=float(str(padded[4])),
-        meal_kcal=float(str(padded[3])),
-        estimated=_parse_bool(padded[10]),
+        total_weight_g=float(str(padded[TOTAL_WEIGHT_COLUMN])),
+        kcal_per_100g=float(str(padded[KCAL_PER_100G_COLUMN])),
+        meal_kcal=float(str(padded[MEAL_KCAL_COLUMN])),
+        estimated=_parse_bool(padded[ESTIMATED_COLUMN]),
     )
     metadata = LLMMetadata(
-        model=str(padded[11]),
-        effort=str(padded[12]),
-        input_tokens=_optional_int(padded[13]),
-        output_tokens=_optional_int(padded[14]),
-        llm_cost_usd=_optional_decimal(padded[15]),
+        model=str(padded[MODEL_COLUMN]),
+        effort=str(padded[EFFORT_COLUMN]),
+        input_tokens=_optional_int(padded[INPUT_TOKENS_COLUMN]),
+        output_tokens=_optional_int(padded[OUTPUT_TOKENS_COLUMN]),
+        llm_cost_usd=_optional_decimal(padded[LLM_COST_COLUMN]),
     )
     return StoredMeal(
-        normalized_request=str(padded[6]),
+        normalized_request=str(padded[NORMALIZED_REQUEST_COLUMN]),
         meal=meal,
         metadata=metadata,
-        photo_path=str(padded[8]) or None,
+        photo_path=str(padded[PHOTO_PATH_COLUMN]) or None,
     )
 
 
@@ -169,19 +218,51 @@ class GoogleSheetsStore:
                 title=worksheet_name, rows=1000, cols=len(HEADERS)
             )
         self._ensure_headers()
-        self._format_timestamp_column()
+        self._format_date_columns()
 
     def _ensure_headers(self) -> None:
-        rows = self._worksheet.get_all_values()
+        rows = self._worksheet.get_all_values(
+            value_render_option=ValueRenderOption.unformatted
+        )
         if not rows or not any(str(cell).strip() for row in rows for cell in row):
             self._worksheet.append_row(HEADERS, value_input_option=ValueInputOption.raw)
             return
+        if rows[0] == LEGACY_HEADERS:
+            self._worksheet.insert_cols(
+                [["day"]], col=2, value_input_option=ValueInputOption.raw
+            )
+            rows = self._worksheet.get_all_values(
+                value_render_option=ValueRenderOption.unformatted
+            )
         if rows[0] != HEADERS:
             raise SheetSchemaError(
                 "Worksheet headers are incompatible. Expected: " + ", ".join(HEADERS)
             )
+        self._backfill_days(rows[1:])
 
-    def _format_timestamp_column(self) -> None:
+    def _backfill_days(self, rows: list[list[object]]) -> None:
+        updates: list[dict[str, object]] = []
+        for row_number, row in enumerate(rows, start=2):
+            padded = row + [""] * (len(HEADERS) - len(row))
+            if str(padded[DAY_COLUMN]).strip():
+                continue
+            try:
+                timestamp = _datetime_from_sheet_serial(
+                    padded[TIMESTAMP_COLUMN], self._timezone
+                )
+                day = accounting_date(timestamp, self._timezone, self._day_start_time)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Could not backfill day for malformed Google Sheets row: %r", row
+                )
+                continue
+            updates.append(
+                {"range": f"B{row_number}", "values": [[_date_to_sheet_serial(day)]]}
+            )
+        if updates:
+            self._worksheet.batch_update(updates, raw=True)
+
+    def _format_date_columns(self) -> None:
         self._worksheet.format(
             "A2:A",
             {
@@ -190,6 +271,10 @@ class GoogleSheetsStore:
                     "pattern": "yyyy-mm-dd hh:mm:ss",
                 }
             },
+        )
+        self._worksheet.format(
+            "B2:B",
+            {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}},
         )
 
     def _data_rows(self) -> list[list[object]]:
@@ -204,12 +289,30 @@ class GoogleSheetsStore:
 
     @staticmethod
     def _message_id(row: list[object]) -> int | None:
-        if len(row) < 6:
+        if len(row) <= MESSAGE_ID_COLUMN:
             return None
         try:
-            return int(str(row[5]))
+            return int(str(row[MESSAGE_ID_COLUMN]))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _row_day(row: list[object]) -> date:
+        if len(row) <= DAY_COLUMN:
+            raise ValueError("Google Sheets row has no day")
+        return _date_from_sheet_serial(row[DAY_COLUMN])
+
+    def _day_total(self, rows: list[list[object]], day: date) -> int:
+        total = 0.0
+        for row in rows:
+            if len(row) <= MEAL_KCAL_COLUMN:
+                continue
+            try:
+                if self._row_day(row) == day:
+                    total += float(str(row[MEAL_KCAL_COLUMN]))
+            except (TypeError, ValueError):
+                LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+        return round_whole(total)
 
     def _find_by_message_id(
         self, rows: list[list[object]], telegram_message_id: int
@@ -228,22 +331,95 @@ class GoogleSheetsStore:
         try:
             rows = self._data_rows()
             existing = self._find_by_message_id(rows, telegram_message_id)
-            total = 0.0
-            for row in rows:
-                if len(row) < 4:
-                    continue
-                try:
-                    timestamp = _datetime_from_sheet_serial(row[0], self._timezone)
-                    if (
-                        accounting_date(timestamp, self._timezone, self._day_start_time)
-                        == day
-                    ):
-                        total += float(str(row[3]))
-                except (TypeError, ValueError):
-                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
-            return SheetState(today_total=round_whole(total), existing=existing)
+            return SheetState(today_total=self._day_total(rows, day), existing=existing)
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_day_meals(self, day: date) -> list[DayMeal]:
+        try:
+            meals: list[DayMeal] = []
+            for row in self._data_rows():
+                if len(row) <= MEAL_KCAL_COLUMN:
+                    continue
+                try:
+                    if self._row_day(row) != day:
+                        continue
+                    meal_name = str(row[MEAL_NAME_COLUMN]).strip()
+                    if not meal_name:
+                        raise ValueError("Meal name is empty")
+                    meals.append(
+                        DayMeal(
+                            meal_name=meal_name,
+                            meal_kcal=round_whole(float(str(row[MEAL_KCAL_COLUMN]))),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+            return meals
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def delete_meal(self, telegram_message_id: int, fallback_day: date) -> MealDeletion:
+        try:
+            rows = self._data_rows()
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+        target_index: int | None = None
+        for index, row in enumerate(rows):
+            if self._message_id(row) == telegram_message_id:
+                target_index = index
+                break
+
+        if target_index is None:
+            return MealDeletion(
+                accounting_day=fallback_day,
+                day_total=self._day_total(rows, fallback_day),
+                photo_path=None,
+                deleted=False,
+            )
+
+        target = rows[target_index]
+        try:
+            day = self._row_day(target)
+        except (TypeError, ValueError):
+            day = fallback_day
+        photo_path = (
+            str(target[PHOTO_PATH_COLUMN]) or None
+            if len(target) > PHOTO_PATH_COLUMN
+            else None
+        )
+
+        try:
+            self._worksheet.delete_rows(target_index + 2)
+        except Exception as delete_error:
+            try:
+                verified_rows = self._data_rows()
+            except Exception as verify_error:
+                raise SheetsWriteUncertainError(
+                    "Could not verify whether Google Sheets deleted the row"
+                ) from verify_error
+            if any(
+                self._message_id(row) == telegram_message_id for row in verified_rows
+            ):
+                raise SheetsWriteError(
+                    "Google Sheets did not delete the row"
+                ) from delete_error
+            rows = verified_rows
+        else:
+            try:
+                rows = self._data_rows()
+            except Exception as verify_error:
+                raise SheetsWriteUncertainError(
+                    "The row was deleted but the new daily total could not be read"
+                ) from verify_error
+
+        return MealDeletion(
+            accounting_day=day,
+            day_total=self._day_total(rows, day),
+            photo_path=photo_path,
+            deleted=True,
+        )
 
     def append_meal(
         self,
@@ -269,6 +445,9 @@ class GoogleSheetsStore:
             )
         row: list[str | int | float | bool] = [
             _datetime_to_sheet_serial(timestamp, self._timezone),
+            _date_to_sheet_serial(
+                accounting_date(timestamp, self._timezone, self._day_start_time)
+            ),
             meal.meal_name,
             round_whole(meal.total_weight_g),
             round_whole(meal.meal_kcal),

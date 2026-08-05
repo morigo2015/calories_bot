@@ -44,6 +44,46 @@ def test_normative_normalization_examples(source: str, expected: str) -> None:
 @pytest.mark.parametrize(
     "unit",
     [
+        "г",
+        "гр",
+        "грам",
+        "грама",
+        "грами",
+        "грамів",
+        "грамами",
+        "грамм",
+        "грамма",
+        "граммы",
+        "граммов",
+        "граммів",
+        "g",
+        "gr",
+        "gram",
+        "grams",
+        "GRAMS",
+    ],
+)
+def test_spoken_weight_units_are_normalized(unit: str) -> None:
+    normalized = normalize_input(f"сир 50 {unit}")
+    assert normalized.text == "сир 50 гр"
+    assert [(value.kind, value.value) for value in normalized.explicit_values] == [
+        ("weight", 50)
+    ]
+
+
+@pytest.mark.parametrize("unit", ["грамів", "граммів", "gram", "grams"])
+def test_spoken_weight_units_work_in_kcal_per_100g(unit: str) -> None:
+    normalized = normalize_input(f"сир 50 грамів 120 кк/100 {unit}")
+    assert normalized.text == "сир 50 гр 120 ккал/100г"
+
+
+def test_weight_units_are_not_matched_inside_words() -> None:
+    assert normalize_input("телеграма").text == "телеграма"
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
         "кк",
         "kk",
         "кk",
