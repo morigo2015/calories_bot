@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
@@ -135,6 +136,11 @@ class CaloriesService:
         self._day_start_time = day_start_time
         self._photo_storage_dir = photo_storage_dir.resolve()
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
+        # A message analysis can take long enough for a deletion callback to be
+        # handled in between its first read and the eventual append.  Keep the
+        # read/append and deletion operations mutually exclusive, while doing
+        # the expensive analysis outside the lock.
+        self._store_lock = threading.RLock()
 
     def get_day_summary(self, timestamp: datetime) -> str:
         if timestamp.tzinfo is None:
@@ -162,51 +168,73 @@ class CaloriesService:
         timestamp = timestamp.astimezone(self._timezone)
 
         day = accounting_date(timestamp, self._timezone, self._day_start_time)
-        state = self._store.get_state(day, telegram_message_id)
-        if state.existing is not None:
-            display_request = (
-                state.existing.normalized_request or state.existing.meal.meal_name
-            )
-            return MealReply(
-                text=format_reply(
-                    state.existing.meal,
-                    state.today_total,
-                    display_request,
-                ),
-                telegram_message_id=telegram_message_id,
-                accounting_day=day,
-            )
+        with self._store_lock:
+            state = self._store.get_state(day, telegram_message_id)
+            if state.existing is not None:
+                display_request = (
+                    state.existing.normalized_request
+                    or state.existing.meal.meal_name
+                )
+                return MealReply(
+                    text=format_reply(
+                        state.existing.meal,
+                        state.today_total,
+                        display_request,
+                    ),
+                    telegram_message_id=telegram_message_id,
+                    accounting_day=day,
+                )
 
         result = self._analyzer.analyze(normalized, image_bytes)
         if not result.analysis.is_food:
             raise NotFoodError
         meal = calculate_meal(result.analysis)
-        photo_path: str | None = None
-        if image_bytes is not None:
-            photo_file = self._photo_storage_dir / f"{telegram_message_id}.jpg"
-            photo_file.write_bytes(image_bytes)
-            photo_path = str(photo_file)
-        stored = self._store.append_meal(
-            timestamp,
-            telegram_message_id,
-            text,
-            normalized.text,
-            photo_path,
-            meal,
-            result.metadata,
-        )
-        today_total = state.today_total + round_whole(stored.meal.meal_kcal)
-        display_request = stored.normalized_request or stored.meal.meal_name
-        return MealReply(
-            text=format_reply(stored.meal, today_total, display_request),
-            telegram_message_id=telegram_message_id,
-            accounting_day=day,
-        )
+        with self._store_lock:
+            # Refresh after analysis: a deletion may have completed while the
+            # model was working, so the earlier daily total is no longer valid.
+            state = self._store.get_state(day, telegram_message_id)
+            if state.existing is not None:
+                display_request = (
+                    state.existing.normalized_request
+                    or state.existing.meal.meal_name
+                )
+                return MealReply(
+                    text=format_reply(
+                        state.existing.meal,
+                        state.today_total,
+                        display_request,
+                    ),
+                    telegram_message_id=telegram_message_id,
+                    accounting_day=day,
+                )
+
+            photo_path: str | None = None
+            if image_bytes is not None:
+                photo_file = self._photo_storage_dir / f"{telegram_message_id}.jpg"
+                photo_file.write_bytes(image_bytes)
+                photo_path = str(photo_file)
+            stored = self._store.append_meal(
+                timestamp,
+                telegram_message_id,
+                text,
+                normalized.text,
+                photo_path,
+                meal,
+                result.metadata,
+            )
+            today_total = state.today_total + round_whole(stored.meal.meal_kcal)
+            display_request = stored.normalized_request or stored.meal.meal_name
+            return MealReply(
+                text=format_reply(stored.meal, today_total, display_request),
+                telegram_message_id=telegram_message_id,
+                accounting_day=day,
+            )
 
     def delete_message(
         self, telegram_message_id: int, fallback_day: date
     ) -> MealDeletion:
-        deletion = self._store.delete_meal(telegram_message_id, fallback_day)
+        with self._store_lock:
+            deletion = self._store.delete_meal(telegram_message_id, fallback_day)
         if deletion.photo_path:
             self._delete_photo(deletion.photo_path)
         elif not deletion.deleted:

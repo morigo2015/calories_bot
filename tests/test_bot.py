@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -175,6 +176,55 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
     assert reply.accounting_day == date(2026, 8, 2)
     assert store.appended[0][3] == "сир 50 гр"
     assert analyzer.normalized.text == "сир 50 гр"
+
+
+def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> None:
+    class BlockingAnalyzer(FakeAnalyzer):
+        def __init__(self) -> None:
+            super().__init__(food_analysis())
+            self.started = threading.Event()
+            self.resume = threading.Event()
+
+        def analyze(self, normalized, image_bytes=None):
+            self.started.set()
+            assert self.resume.wait(timeout=1)
+            return super().analyze(normalized, image_bytes)
+
+    class DeletionAwareStore(FakeStore):
+        def __init__(self) -> None:
+            super().__init__(SheetState(today_total=570, existing=None))
+            self.total = 570
+
+        def get_state(self, day, telegram_message_id):
+            del day, telegram_message_id
+            return SheetState(today_total=self.total, existing=None)
+
+        def delete_meal(self, telegram_message_id, fallback_day):
+            del telegram_message_id
+            self.total = 274
+            return MealDeletion(fallback_day, self.total, None, True)
+
+    analyzer = BlockingAnalyzer()
+    store = DeletionAwareStore()
+    service = build_service(analyzer, store, tmp_path)
+    result: list[MealReply] = []
+
+    worker = threading.Thread(
+        target=lambda: result.append(
+            service.process_message(
+                "сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ)
+            )
+        )
+    )
+    worker.start()
+    assert analyzer.started.wait(timeout=1)
+
+    service.delete_message(7, date(2026, 8, 2))
+    analyzer.resume.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert result[0].text.endswith("=== 334 кк")
 
 
 def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
