@@ -145,7 +145,9 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
         ]
     )
 
-    assert reply == ("=== 810 кк\n350 кк вівсянка з бананом — ×2\n460 кк курка з рисом")
+    assert reply == (
+        "=== 810 кк\n• 350 кк вівсянка з бананом — ×2\n• 460 кк курка з рисом"
+    )
 
 
 def test_format_day_reply_handles_empty_day() -> None:
@@ -162,7 +164,7 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 0, 30, tzinfo=TZ))
 
     assert store.day.isoformat() == "2026-08-01"
-    assert reply == "=== 60 кк\n60 кк сир"
+    assert reply == "=== 60 кк\n• 60 кк сир"
 
 
 def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> None:
@@ -211,9 +213,7 @@ def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> Non
 
     worker = threading.Thread(
         target=lambda: result.append(
-            service.process_message(
-                "сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ)
-            )
+            service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
         )
     )
     worker.start()
@@ -441,6 +441,7 @@ def test_handler_passes_telegram_message_date() -> None:
     assert service.args[2] == message.date
     assert message.replies == ["reply"]
     assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
+    assert message.reply_kwargs[0]["do_quote"] is False
     button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
     assert button.text == "Видалити"
     assert button.callback_data == "delete:1:2026-08-02"
@@ -453,7 +454,7 @@ def test_day_handler_passes_telegram_message_date() -> None:
 
         def get_day_summary(self, timestamp):
             self.timestamp = timestamp
-            return "=== 60 кк\n60 кк сир"
+            return "=== 60 кк\n• 60 кк сир"
 
     service = FakeService()
     handlers = TelegramHandlers(123, -1001, service)
@@ -462,7 +463,8 @@ def test_day_handler_passes_telegram_message_date() -> None:
     asyncio.run(handlers.day(update, None))
 
     assert service.timestamp == message.date
-    assert message.replies == ["=== 60 кк\n60 кк сир"]
+    assert message.replies == ["=== 60 кк\n• 60 кк сир"]
+    assert message.reply_kwargs == [{"do_quote": False}]
 
 
 def test_day_handler_maps_read_error_to_user_message() -> None:
@@ -675,3 +677,7 @@ def test_start_and_help_share_help_text() -> None:
     asyncio.run(handlers.help(update, None))
     assert len(message.replies) == 2
     assert message.replies[0] == message.replies[1]
+    assert message.reply_kwargs == [
+        {"do_quote": False},
+        {"do_quote": False},
+    ]

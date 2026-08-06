@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import UTC, datetime, time
 from pathlib import Path
@@ -80,12 +81,20 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     app = FakeApplication()
 
     class FakeBuilder:
+        def __init__(self):
+            self.post_init_callback = None
+
         def token(self, value):
             assert value == "token"
             return self
 
         def concurrent_updates(self, value):
             assert value is False
+            return self
+
+        def post_init(self, callback):
+            self.post_init_callback = callback
+            created["post_init"] = callback
             return self
 
         def build(self):
@@ -96,6 +105,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     main_module.main()
     assert len(app.handlers) == 6
     assert app.polling == {"drop_pending_updates": False}
+    assert created["post_init"] is main_module.configure_bot_commands
 
     message = Message(
         message_id=1,
@@ -106,3 +116,20 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     )
     assert app.handlers[-1].check_update(Update(1, message=message))
     assert not app.handlers[-1].check_update(Update(2, edited_message=message))
+
+
+def test_configure_bot_commands_registers_day_and_help() -> None:
+    class FakeBot:
+        def __init__(self):
+            self.commands = None
+
+        async def set_my_commands(self, commands):
+            self.commands = commands
+
+    bot = FakeBot()
+    asyncio.run(main_module.configure_bot_commands(SimpleNamespace(bot=bot)))
+
+    assert [(command.command, command.description) for command in bot.commands] == [
+        ("day", "показати прийоми їжі за сьогодні"),
+        ("help", "показати довідку"),
+    ]

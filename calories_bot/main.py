@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -14,6 +16,17 @@ from .analyzer import OpenAIAnalyzer
 from .bot import CaloriesService, TelegramHandlers
 from .config import Settings
 from .sheets import GoogleSheetsStore
+
+
+async def configure_bot_commands(
+    application: Application[Any, Any, Any, Any, Any, Any],
+) -> None:
+    await application.bot.set_my_commands(
+        [
+            BotCommand("day", "показати прийоми їжі за сьогодні"),
+            BotCommand("help", "показати довідку"),
+        ]
+    )
 
 
 def configure_logging() -> None:
@@ -62,6 +75,7 @@ def main() -> None:
         Application.builder()
         .token(settings.telegram_bot_token)
         .concurrent_updates(False)
+        .post_init(configure_bot_commands)
         .build()
     )
     application.add_handler(CommandHandler("start", handlers.start))

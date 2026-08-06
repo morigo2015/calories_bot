@@ -117,7 +117,7 @@ def format_day_reply(meals: list[DayMeal]) -> str:
     lines = [f"=== {sum(meal.meal_kcal for meal in meals)} кк"]
     for meal_name, meal_kcal, count in grouped.values():
         count_suffix = f" — ×{count}" if count > 1 else ""
-        lines.append(f"{meal_kcal} кк {meal_name}{count_suffix}")
+        lines.append(f"• {meal_kcal} кк {meal_name}{count_suffix}")
     return "\n".join(lines)
 
 
@@ -172,8 +172,7 @@ class CaloriesService:
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
                 display_request = (
-                    state.existing.normalized_request
-                    or state.existing.meal.meal_name
+                    state.existing.normalized_request or state.existing.meal.meal_name
                 )
                 return MealReply(
                     text=format_reply(
@@ -195,8 +194,7 @@ class CaloriesService:
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
                 display_request = (
-                    state.existing.normalized_request
-                    or state.existing.meal.meal_name
+                    state.existing.normalized_request or state.existing.meal.meal_name
                 )
                 return MealReply(
                     text=format_reply(
@@ -277,7 +275,7 @@ class TelegramHandlers:
         del context
         if not self._is_allowed(update) or update.effective_message is None:
             return
-        await update.effective_message.reply_text(HELP_TEXT)
+        await update.effective_message.reply_text(HELP_TEXT, do_quote=False)
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.start(update, context)
@@ -299,7 +297,7 @@ class TelegramHandlers:
         except Exception:
             LOGGER.exception("Unexpected error while handling /day")
             reply = READ_ERROR_TEXT
-        await message.reply_text(reply)
+        await message.reply_text(reply, do_quote=False)
 
     async def delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -377,7 +375,7 @@ class TelegramHandlers:
             image_bytes = bytes(await telegram_file.download_as_bytearray())
         except Exception:
             LOGGER.exception("Could not download the Telegram photo")
-            await message.reply_text(ANALYSIS_ERROR_TEXT)
+            await message.reply_text(ANALYSIS_ERROR_TEXT, do_quote=False)
             return
 
         await self._process(message, message.caption or "", image_bytes)
@@ -424,9 +422,10 @@ class TelegramHandlers:
                 result.text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
+                do_quote=False,
             )
             return
-        await message.reply_text(reply)
+        await message.reply_text(reply, do_quote=False)
 
     @staticmethod
     def _parse_delete_callback(data: str | None) -> tuple[int, date]:
