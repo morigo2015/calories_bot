@@ -1,45 +1,22 @@
 #!/usr/bin/env bash
-# Commit and publish safe source changes, then restart the production bot.
-
 set -euo pipefail
 
-if [[ $# -ne 1 || -z "${1// }" ]]; then
+if [[ $# -ne 1 ]]; then
     echo "Usage: $0 \"Commit message\"" >&2
     exit 2
 fi
 
-project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-commit_message="$1"
+cd "$(dirname "$0")"
 
-cd "$project_dir"
-
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "Not a Git repository: $project_dir" >&2
-    exit 1
-fi
-
-# Do not publish runtime secrets, user data, or local spreadsheet exports.
-git add -u -- . \
-    ':!*.env' \
-    ':!service-account.json' \
-    ':!data/' \
-    ':!*.xlsx'
-
-# Include new source and project configuration files, but never arbitrary
-# untracked files. This keeps accidental exports and attachments out of Git.
-while IFS= read -r path; do
-    case "$path" in
-        calories_bot/*.py|tests/*.py|scripts/*.py|deploy/*|docs/*.md|\
-        *.md|pyproject.toml|requirements*.txt|run_update.sh|.gitignore)
-            git add -- "$path"
-            ;;
-    esac
-done < <(git ls-files --others --exclude-standard)
+git add \
+    AGENTS.md VPS_HELP.txt .env.example .gitignore \
+    pyproject.toml requirements.txt requirements-dev.txt run_update.sh \
+    calories_bot tests docs deploy scripts
 
 if git diff --cached --quiet; then
-    echo "No publishable changes to commit."
+    echo "No changes to commit."
 else
-    git commit -m "$commit_message"
+    git commit -m "$1"
 fi
 
 git push origin HEAD
