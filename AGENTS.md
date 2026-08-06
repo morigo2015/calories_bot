@@ -19,3 +19,5 @@ Apply these rules when deploying to the VPS:
 - Project directory: `/home/igor/calories-bot`.
 - Project files are owned by `igor:igor`; do not use `sudo` to update them.
 - Use `sudo` only for systemd operations when it is available.
+- After updating application code, give the user this deployment command:
+  `bash /home/igor/calories-bot/run_update.sh "<commit message>"`.
