@@ -12,6 +12,7 @@ from calories_bot.bot import (
     ANALYSIS_ERROR_TEXT,
     DELETE_ERROR_TEXT,
     FORMAT_ERROR_TEXT,
+    HELP_TEXT,
     NOT_FOOD_TEXT,
     READ_ERROR_TEXT,
     UNCERTAIN_WRITE_TEXT,
@@ -41,6 +42,14 @@ from calories_bot.sheets import (
 
 TZ = ZoneInfo("Europe/Kyiv")
 METADATA = LLMMetadata(model="test", effort="none", input_tokens=10, output_tokens=5)
+
+
+@pytest.fixture(autouse=True)
+def run_to_thread_inline(monkeypatch):
+    async def inline(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("calories_bot.bot.asyncio.to_thread", inline)
 
 
 def food_analysis(*, estimated: bool = False) -> FoodAnalysis:
@@ -371,7 +380,64 @@ def test_google_write_failure_is_propagated_without_changing_state(tmp_path) -> 
     assert store.state.today_total == 300
 
 
-def make_update(*, user_id=123, chat_id=-1001, chat_type=ChatType.SUPERGROUP):
+def user_record(user_id=123, *, status="active", sheet="sheet-123", cutoff=time(1)):
+    from calories_bot.users import UserRecord
+
+    return UserRecord(
+        row_number=2,
+        telegram_user_id=user_id,
+        display_name="User",
+        telegram_username="user",
+        status=status,
+        invite_token="",
+        spreadsheet_id=sheet,
+        day_start=cutoff,
+    )
+
+
+class FakeManager:
+    def __init__(self, users=None, services=None):
+        self.users = users or {}
+        self.services = services or {}
+        self.activation = None
+        self.invites = []
+        self.status_changes = []
+        self.deleted_users = []
+
+    def get_user(self, user_id):
+        return self.users.get(user_id)
+
+    def service_for(self, user):
+        return self.services[user.telegram_user_id]
+
+    def activate(self, *args):
+        self.activation = args
+        record = user_record(args[1])
+        self.users[args[1]] = record
+        return record
+
+    def create_invite(self, name):
+        self.invites.append(name)
+        return "secure-token"
+
+    def set_status(self, user_id, status):
+        self.status_changes.append((user_id, status))
+        current = self.users[user_id]
+        updated = user_record(
+            user_id,
+            status=status,
+            sheet=current.spreadsheet_id,
+            cutoff=current.day_start,
+        )
+        self.users[user_id] = updated
+        return updated
+
+    def delete_user(self, user_id):
+        self.deleted_users.append(user_id)
+        self.users.pop(user_id, None)
+
+
+def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
     class FakeMessage:
         text = "сир 50"
         caption = None
@@ -391,8 +457,10 @@ def make_update(*, user_id=123, chat_id=-1001, chat_type=ChatType.SUPERGROUP):
     message = FakeMessage()
     return (
         SimpleNamespace(
-            effective_user=SimpleNamespace(id=user_id),
-            effective_chat=SimpleNamespace(id=chat_id, type=chat_type),
+            effective_user=SimpleNamespace(id=user_id, username=f"user{user_id}"),
+            effective_chat=SimpleNamespace(
+                id=user_id if chat_id is None else chat_id, type=chat_type
+            ),
             effective_message=message,
         ),
         message,
@@ -400,15 +468,9 @@ def make_update(*, user_id=123, chat_id=-1001, chat_type=ChatType.SUPERGROUP):
 
 
 @pytest.mark.parametrize(
-    "user_id,chat_id,chat_type",
-    [
-        (999, -1001, ChatType.SUPERGROUP),
-        (123, -1002, ChatType.SUPERGROUP),
-        (123, -1001, ChatType.PRIVATE),
-        (123, -1001, ChatType.CHANNEL),
-    ],
+    "chat_type", [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]
 )
-def test_unauthorized_sources_do_not_call_service(user_id, chat_id, chat_type) -> None:
+def test_non_private_sources_are_ignored(chat_type) -> None:
     class FakeService:
         def __init__(self):
             self.calls = 0
@@ -418,14 +480,15 @@ def test_unauthorized_sources_do_not_call_service(user_id, chat_id, chat_type) -
             return "reply"
 
     service = FakeService()
-    handlers = TelegramHandlers(123, -1001, service)
-    update, message = make_update(user_id=user_id, chat_id=chat_id, chat_type=chat_type)
+    manager = FakeManager({123: user_record()}, {123: service})
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update(chat_type=chat_type)
     asyncio.run(handlers.text(update, None))
     assert service.calls == 0
     assert message.replies == []
 
 
-def test_handler_passes_telegram_message_date() -> None:
+def test_handler_resolves_user_then_passes_message_to_personal_service() -> None:
     class FakeService:
         def __init__(self):
             self.args = None
@@ -435,7 +498,7 @@ def test_handler_passes_telegram_message_date() -> None:
             return MealReply("reply", 1, date(2026, 8, 2))
 
     service = FakeService()
-    handlers = TelegramHandlers(123, -1001, service)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
     asyncio.run(handlers.text(update, None))
     assert service.args[2] == message.date
@@ -457,7 +520,7 @@ def test_day_handler_passes_telegram_message_date() -> None:
             return "=== 60 кк\n• 60 кк сир"
 
     service = FakeService()
-    handlers = TelegramHandlers(123, -1001, service)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
 
     asyncio.run(handlers.day(update, None))
@@ -473,7 +536,9 @@ def test_day_handler_maps_read_error_to_user_message() -> None:
             del timestamp
             raise SheetsReadError("failed")
 
-    handlers = TelegramHandlers(123, -1001, FailingService())
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: FailingService()})
+    )
     update, message = make_update()
 
     asyncio.run(handlers.day(update, None))
@@ -496,15 +561,15 @@ def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
 
     query = FakeQuery()
     update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=user_id),
-        effective_chat=SimpleNamespace(id=-1001, type=ChatType.SUPERGROUP),
+        effective_user=SimpleNamespace(id=user_id, username=f"user{user_id}"),
+        effective_chat=SimpleNamespace(id=user_id, type=ChatType.PRIVATE),
         effective_message=SimpleNamespace(),
         callback_query=query,
     )
     return update, query
 
 
-def test_delete_callback_removes_source_and_leaves_confirmation() -> None:
+def test_delete_callback_keeps_source_message_and_leaves_confirmation() -> None:
     class FakeService:
         def __init__(self):
             self.args = None
@@ -513,22 +578,13 @@ def test_delete_callback_removes_source_and_leaves_confirmation() -> None:
             self.args = args
             return MealDeletion(date(2026, 8, 2), 905, None, True)
 
-    class FakeBot:
-        def __init__(self):
-            self.deleted = []
-
-        async def delete_message(self, **kwargs):
-            self.deleted.append(kwargs)
-
     service = FakeService()
-    bot = FakeBot()
-    handlers = TelegramHandlers(123, -1001, service)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, query = make_callback_update()
 
-    asyncio.run(handlers.delete(update, SimpleNamespace(bot=bot)))
+    asyncio.run(handlers.delete(update, SimpleNamespace()))
 
     assert service.args == (42, date(2026, 8, 2))
-    assert bot.deleted == [{"chat_id": -1001, "message_id": 42}]
     assert query.answers == [(None, {})]
     assert query.edits == [("Видалено\n=== 905 кк", {"reply_markup": None})]
 
@@ -538,15 +594,12 @@ def test_repeated_delete_callback_uses_idempotent_result() -> None:
         def delete_message(self, *args):
             return MealDeletion(date(2026, 8, 2), 905, None, False)
 
-    class FakeBot:
-        async def delete_message(self, **kwargs):
-            del kwargs
-            raise RuntimeError("already gone")
-
-    handlers = TelegramHandlers(123, -1001, FakeService())
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: FakeService()})
+    )
     update, query = make_callback_update()
 
-    asyncio.run(handlers.delete(update, SimpleNamespace(bot=FakeBot())))
+    asyncio.run(handlers.delete(update, SimpleNamespace()))
 
     assert query.edits[0][0] == "Видалено\n=== 905 кк"
 
@@ -556,32 +609,24 @@ def test_delete_callback_keeps_messages_when_sheets_fail() -> None:
         def delete_message(self, *args):
             raise SheetsWriteError("failed")
 
-    class FakeBot:
-        def __init__(self):
-            self.calls = 0
-
-        async def delete_message(self, **kwargs):
-            del kwargs
-            self.calls += 1
-
-    bot = FakeBot()
-    handlers = TelegramHandlers(123, -1001, FailingService())
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: FailingService()})
+    )
     update, query = make_callback_update()
 
-    asyncio.run(handlers.delete(update, SimpleNamespace(bot=bot)))
+    asyncio.run(handlers.delete(update, SimpleNamespace()))
 
-    assert bot.calls == 0
     assert query.edits == []
     assert query.answers == [(DELETE_ERROR_TEXT, {"show_alert": True})]
 
 
-def test_delete_callback_rejects_unauthorized_user() -> None:
-    handlers = TelegramHandlers(123, -1001, SimpleNamespace())
+def test_delete_callback_rejects_unknown_user_without_touching_store() -> None:
+    handlers = TelegramHandlers(999, FakeManager())
     update, query = make_callback_update(user_id=999)
 
     asyncio.run(handlers.delete(update, SimpleNamespace()))
 
-    assert query.answers == [("Недоступно.", {"show_alert": True})]
+    assert query.answers == [("Доступ лише за запрошенням.", {"show_alert": True})]
     assert query.edits == []
 
 
@@ -589,7 +634,8 @@ def test_delete_callback_rejects_unauthorized_user() -> None:
     "data", [None, "other:42:2026-08-02", "delete:0:2026-08-02", "delete:42:bad"]
 )
 def test_delete_callback_rejects_invalid_payload(data) -> None:
-    handlers = TelegramHandlers(123, -1001, SimpleNamespace())
+    service = SimpleNamespace()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, query = make_callback_update(data)
 
     asyncio.run(handlers.delete(update, SimpleNamespace()))
@@ -615,7 +661,7 @@ def test_photo_handler_downloads_largest_photo_and_passes_caption() -> None:
             return MealReply("reply", 1, date(2026, 8, 2))
 
     service = FakeService()
-    handlers = TelegramHandlers(123, -1001, service)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
     message.caption = "200 г"
     message.photo = [SimpleNamespace(), FakePhoto()]
@@ -636,7 +682,7 @@ def test_photo_handler_ignores_media_groups() -> None:
             return "reply"
 
     service = FakeService()
-    handlers = TelegramHandlers(123, -1001, service)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
     message.photo = [SimpleNamespace()]
     message.media_group_id = "album"
@@ -664,20 +710,175 @@ def test_handler_maps_errors_to_user_messages(error, expected) -> None:
         def process_message(self, *args):
             raise error
 
-    handlers = TelegramHandlers(123, -1001, FailingService())
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: FailingService()})
+    )
     update, message = make_update()
     asyncio.run(handlers.text(update, None))
     assert message.replies == [expected]
 
 
-def test_start_and_help_share_help_text() -> None:
-    handlers = TelegramHandlers(123, -1001, SimpleNamespace())
+def test_start_and_help_share_help_text_for_active_user() -> None:
+    service = SimpleNamespace()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
-    asyncio.run(handlers.start(update, None))
-    asyncio.run(handlers.help(update, None))
+    asyncio.run(handlers.start(update, SimpleNamespace(args=[])))
+    asyncio.run(handlers.help(update, SimpleNamespace()))
     assert len(message.replies) == 2
     assert message.replies[0] == message.replies[1]
     assert message.reply_kwargs == [
         {"do_quote": False},
         {"do_quote": False},
+    ]
+
+
+def test_unknown_and_blocked_users_never_get_a_service() -> None:
+    manager = FakeManager({124: user_record(124, status="blocked")})
+    handlers = TelegramHandlers(999, manager)
+
+    unknown_update, unknown_message = make_update(user_id=123)
+    blocked_update, blocked_message = make_update(user_id=124)
+    asyncio.run(handlers.text(unknown_update, SimpleNamespace()))
+    asyncio.run(handlers.text(blocked_update, SimpleNamespace()))
+
+    assert unknown_message.replies == ["Доступ лише за запрошенням."]
+    assert blocked_message.replies == ["Доступ до бота вимкнено."]
+
+
+def test_blocked_photo_is_not_downloaded() -> None:
+    class Photo:
+        async def get_file(self):
+            raise AssertionError("blocked photo must not be downloaded")
+
+    handlers = TelegramHandlers(999, FakeManager({123: user_record(status="blocked")}))
+    update, message = make_update()
+    message.photo = [Photo()]
+
+    asyncio.run(handlers.photo(update, SimpleNamespace()))
+
+    assert message.replies == ["Доступ до бота вимкнено."]
+
+
+def test_two_users_are_routed_to_different_services() -> None:
+    class Service:
+        def __init__(self, label):
+            self.label = label
+            self.calls = []
+
+        def process_message(self, *args):
+            self.calls.append(args)
+            return MealReply(self.label, args[1], date(2026, 8, 2))
+
+    first = Service("first")
+    second = Service("second")
+    manager = FakeManager(
+        {123: user_record(123), 124: user_record(124, sheet="sheet-124")},
+        {123: first, 124: second},
+    )
+    handlers = TelegramHandlers(999, manager)
+    first_update, first_message = make_update(user_id=123)
+    second_update, second_message = make_update(user_id=124)
+
+    asyncio.run(handlers.text(first_update, SimpleNamespace()))
+    asyncio.run(handlers.text(second_update, SimpleNamespace()))
+
+    assert len(first.calls) == len(second.calls) == 1
+    assert first_message.replies == ["first"]
+    assert second_message.replies == ["second"]
+
+
+def test_start_activates_invite_and_repeat_start_does_not_reactivate() -> None:
+    manager = FakeManager()
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update()
+    context = SimpleNamespace(args=["token"])
+
+    asyncio.run(handlers.start(update, context))
+    asyncio.run(handlers.start(update, context))
+
+    assert manager.activation == ("token", 123, "user123")
+    assert message.replies == [HELP_TEXT, HELP_TEXT]
+
+
+def test_start_without_invite_and_blocked_start_show_access_messages() -> None:
+    manager = FakeManager({124: user_record(124, status="blocked")})
+    handlers = TelegramHandlers(999, manager)
+    unknown_update, unknown_message = make_update(user_id=123)
+    blocked_update, blocked_message = make_update(user_id=124)
+
+    asyncio.run(handlers.start(unknown_update, SimpleNamespace(args=[])))
+    asyncio.run(handlers.start(blocked_update, SimpleNamespace(args=[])))
+
+    assert unknown_message.replies == ["Доступ лише за запрошенням."]
+    assert blocked_message.replies == ["Доступ до бота вимкнено."]
+
+
+def test_admin_invite_returns_deep_link() -> None:
+    class Bot:
+        async def get_me(self):
+            return SimpleNamespace(username="calorie_bot")
+
+    manager = FakeManager()
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update(user_id=999)
+
+    asyncio.run(handlers.invite(update, SimpleNamespace(args=["Вася"], bot=Bot())))
+
+    assert manager.invites == ["Вася"]
+    assert message.replies == ["https://t.me/calorie_bot?start=secure-token"]
+
+
+def test_non_admin_cannot_execute_admin_command() -> None:
+    manager = FakeManager({123: user_record()})
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update()
+
+    asyncio.run(handlers.block(update, SimpleNamespace(args=["123"])))
+
+    assert manager.status_changes == []
+    assert message.replies == ["Недоступно."]
+
+
+def test_admin_block_unblock_and_confirmed_delete() -> None:
+    manager = FakeManager({123: user_record()})
+    handlers = TelegramHandlers(999, manager)
+    admin_update, admin_message = make_update(user_id=999)
+
+    asyncio.run(handlers.block(admin_update, SimpleNamespace(args=["123"])))
+    asyncio.run(handlers.unblock(admin_update, SimpleNamespace(args=["123"])))
+    asyncio.run(
+        handlers.delete_user_command(admin_update, SimpleNamespace(args=["123"]))
+    )
+    callback_update, query = make_callback_update("admin-delete:123", user_id=999)
+    asyncio.run(handlers.admin_delete_callback(callback_update, SimpleNamespace()))
+
+    assert manager.status_changes == [(123, "blocked"), (123, "active")]
+    assert manager.deleted_users == [123]
+    assert admin_message.replies[:2] == ["Заблоковано: 123", "Розблоковано: 123"]
+    assert query.edits == [("Користувача 123 видалено.", {"reply_markup": None})]
+
+
+def test_admin_can_cancel_delete() -> None:
+    handlers = TelegramHandlers(999, FakeManager())
+    update, query = make_callback_update("admin-cancel:123", user_id=999)
+
+    asyncio.run(handlers.admin_delete_callback(update, SimpleNamespace()))
+
+    assert query.answers == [(None, {})]
+    assert query.edits == [("Видалення скасовано.", {"reply_markup": None})]
+
+
+def test_admin_commands_validate_arguments() -> None:
+    manager = FakeManager()
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update(user_id=999)
+
+    asyncio.run(handlers.invite(update, SimpleNamespace(args=[], bot=None)))
+    asyncio.run(handlers.block(update, SimpleNamespace(args=["bad"])))
+    asyncio.run(handlers.delete_user_command(update, SimpleNamespace(args=[])))
+
+    assert message.replies == [
+        "Формат: /invite <імʼя>",
+        "Формат: /block <telegram_user_id>",
+        "Формат: /delete <telegram_user_id>",
     ]

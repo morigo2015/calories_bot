@@ -7,24 +7,27 @@ from calories_bot.config import ConfigError, Settings
 
 REQUIRED_NAMES = [
     "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_USER_ID",
-    "TELEGRAM_CHAT_ID",
+    "ADMIN_TELEGRAM_USER_ID",
     "OPENAI_API_KEY",
     "GOOGLE_SERVICE_ACCOUNT_FILE",
-    "GOOGLE_SPREADSHEET_ID",
+    "USERS_SPREADSHEET_ID",
+    "GOOGLE_DRIVE_FOLDER_ID",
 ]
 
 
 def set_valid_env(monkeypatch, tmp_path) -> None:
     credentials = tmp_path / "service-account.json"
     credentials.write_text("{}", encoding="utf-8")
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CALORIES_BOT_ENV_FILE", str(env_file))
     values = {
         "TELEGRAM_BOT_TOKEN": "token",
-        "TELEGRAM_USER_ID": "123",
-        "TELEGRAM_CHAT_ID": "-1001",
+        "ADMIN_TELEGRAM_USER_ID": "123",
         "OPENAI_API_KEY": "key",
         "GOOGLE_SERVICE_ACCOUNT_FILE": str(credentials),
-        "GOOGLE_SPREADSHEET_ID": "sheet",
+        "USERS_SPREADSHEET_ID": "users-sheet",
+        "GOOGLE_DRIVE_FOLDER_ID": "drive-folder",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -34,7 +37,7 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         "OPENAI_CACHED_INPUT_COST_PER_1M",
         "OPENAI_OUTPUT_COST_PER_1M",
         "APP_TIMEZONE",
-        "DAY_START_TIME",
+        "DEFAULT_DAY_START",
         "PHOTO_STORAGE_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -43,12 +46,13 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
 def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     set_valid_env(monkeypatch, tmp_path)
     settings = Settings.from_env()
-    assert settings.telegram_user_id == 123
-    assert settings.telegram_chat_id == -1001
+    assert settings.admin_telegram_user_id == 123
     assert settings.openai_reasoning_effort == "none"
     assert settings.openai_pricing.complete is False
     assert settings.timezone.key == "Europe/Kyiv"
-    assert settings.day_start_time.isoformat(timespec="minutes") == "01:00"
+    assert settings.default_day_start.isoformat(timespec="minutes") == "01:00"
+    assert settings.users_sheet_name == "users"
+    assert settings.meal_sheet_name == "food_log"
     assert settings.photo_storage_dir == (Path.cwd() / "data" / "photos").resolve()
 
 
@@ -94,10 +98,9 @@ def test_missing_required_value_is_reported(monkeypatch, tmp_path) -> None:
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
-        ("TELEGRAM_USER_ID", "user", "TELEGRAM_USER_ID"),
-        ("TELEGRAM_CHAT_ID", "chat", "TELEGRAM_CHAT_ID"),
+        ("ADMIN_TELEGRAM_USER_ID", "user", "ADMIN_TELEGRAM_USER_ID"),
         ("OPENAI_REASONING_EFFORT", "extreme", "OPENAI_REASONING_EFFORT"),
-        ("DAY_START_TIME", "1:00", "DAY_START_TIME"),
+        ("DEFAULT_DAY_START", "1:00", "DEFAULT_DAY_START"),
         ("APP_TIMEZONE", "Nowhere/Unknown", "APP_TIMEZONE"),
         ("OPENAI_INPUT_COST_PER_1M", "abc", "decimal"),
         ("OPENAI_INPUT_COST_PER_1M", "-1", "non-negative"),

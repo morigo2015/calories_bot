@@ -1,101 +1,72 @@
-# Calories Bot
+# Calories Bot v2
 
-Telegram-бот для обліку калорій одного користувача в окремій групі або
-супергрупі. Бот приймає текст або одне фото страви, аналізує їжу через OpenAI,
-записує один рядок на повідомлення в Google Sheets і повертає підсумок за
-обліковий день.
+Закритий багатокористувацький Telegram-бот обліку калорій для приватних чатів.
+Доступ надається одноразовими invite-посиланнями. Кожен користувач має окремий
+Google Spreadsheet, окрему локальну теку фотографій і власну межу облікової
+доби. Реєстр користувачів зберігається в окремому адміністративному Spreadsheet.
 
-## Формат повідомлень
+Повні продуктові й технічні вимоги: `docs/PRD_v2.md` і `docs/TZ_v2.md`.
+
+## Повідомлення користувача
 
 ```text
 сир 50
 сир 50г 120#
 #120 сир 50 г
 2 яйця, хліб 50
-йогурт 200г 65 кк/100гр
 батончик 45g 380kcal/100g
 ```
 
-`#120` і `120#` без пробілу означають 120 кк/100 г. Також підтримуються
-`кк`, `ккал`, змішані кириличні/латинські `к/k/а/a` і `kcal`. Усі варіанти
-нормалізуються до `120 ккал/100г`.
+`#120` і `120#` означають 120 ккал/100 г. Якщо ваги чи калорійності немає,
+бот оцінює її. Також підтримується одне фото з caption або без нього. Фотоальбоми
+й зображення як document ігноруються.
 
-Вага розпізнається у формах `г`, `гр`, `грам`, `грами`, `грама`, `грамів`,
-`граммів`, поширених російських варіантах, а також `g`, `gr`, `gram`, `grams`.
+Користувацькі команди:
 
-Ціле число наприкінці повідомлення або перед комою, `;` чи переносом рядка
-вважається вагою і отримує `гр`. Число в іншому місці є частиною опису:
-`2 яйця` — кількість, а `піца 30 см` — розмір. Десяткові значення не
-підтримуються. Некоректний `#` або десятковий запис відхиляється без викликів
-OpenAI та Google.
+- `/start <invite_token>` — активувати invite; повторний `/start` показує довідку;
+- `/help` — правила та приклади;
+- `/day` — згрупований підсумок поточної персональної облікової доби.
 
-Якщо ваги чи калорійності немає, бот оцінює значення. Відповідь має компактний
-формат; `≈` позначає оцінену вагу, а `#120` — калорійність на 100 г:
+Кнопка `Видалити` фізично прибирає рядок із персональної таблиці, безпечно
+видаляє пов'язане локальне фото й перераховує відповідну добу. Початкове
+повідомлення користувача в Telegram залишається.
 
-```text
-50 кк
-Абрикос 3 шт ≈105 г #48
-=== 955 кк
-```
+## Адміністрування
 
-Також можна надіслати одне фото страви з підписом на кшталт `200 г` або без
-підпису. Бот передає фото та підпис у модель; без підпису в компактному описі
-використовується розпізнана назва. Фото в альбомах і зображення, надіслані як
-документи, ігноруються.
-
-## Telegram
-
-1. Створіть бота через BotFather.
-2. Створіть окрему групу або супергрупу, додайте бота адміністратором і вимкніть
-   privacy mode у BotFather.
-3. Вкажіть ID групи в `TELEGRAM_CHAT_ID`, а свій ID — у `TELEGRAM_USER_ID`.
-
-Бот ігнорує приватні повідомлення, канали, інші групи, інших користувачів і
-редагування вже оброблених повідомлень. Відповіді бота не цитують оригінальне
-повідомлення. Підтримуються `/start` і `/help` з однаковою короткою довідкою та `/day`
-зі згрупованим маркованим підсумком поточної доби. Після введення `/` Telegram
-пропонує команди `/day` і `/help`.
-
-Під кожною успішною відповіддю є кнопка `Видалити`. Вона фізично прибирає рядок
-із Sheets, перераховує добу, видаляє вихідне повідомлення, якщо Telegram це
-дозволяє, і лишає коротке підтвердження. Звичайне видалення через меню Telegram
-не є тригером, бо Bot API не надсилає такі події для групових повідомлень.
-
-Щоб безпечно знайти ID, зупиніть бот, надішліть повідомлення в групу і запустіть:
-
-```bash
-python scripts/discover_telegram_ids.py --env-file C:\tmp\calories-bot-live-test\.env.live
-```
-
-Helper показує лише знайдені ID та не друкує токен.
-
-## Google Sheets
-
-1. Увімкніть Google Sheets API в Google Cloud.
-2. Створіть service account і завантажте JSON-ключ.
-3. Створіть таблицю й надайте service account права редактора.
-4. Вкажіть ID таблиці та назву аркуша в `.env`.
-
-Аркуш можна не створювати. Бот створить його та точні заголовки:
+Admin-команди працюють лише в приватному чаті користувача з ID із
+`ADMIN_TELEGRAM_USER_ID`:
 
 ```text
-timestamp, day, meal_name, total_weight_g, meal_kcal, kcal_per_100g,
-telegram_message_id, normalized_request, request, photo_path, items_json,
-estimated, model, effort, input_tokens, output_tokens, llm_cost_usd
+/invite Вася
+/block 123456789
+/unblock 123456789
+/delete 123456789
 ```
 
-Точна попередня схема без `day` автоматично мігрується: колонка вставляється
-після `timestamp`, а накопичені рядки отримують облікову дату з урахуванням
-межі `DAY_START_TIME`. Частково заповнена нова схема дозаповнюється під час
-наступного старту. Інші заголовки вважаються несумісними. `timestamp`
-записується як нативний date-time Google Sheets у `APP_TIMEZONE`, а `day` — як
-нативна дата у форматі `yyyy-mm-dd`.
+`/delete` вимагає inline-підтвердження. Невдала спроба повного видалення лишає
+користувача `blocked`, щоб операцію можна було безпечно повторити.
 
-Для повідомлень із фото `photo_path` містить абсолютний шлях до JPEG на сервері.
-Для текстових повідомлень колонка порожня. Це локальний шлях, а не публічне
-посилання.
+Реєстр має точні колонки:
 
-## Конфігурація і локальний запуск
+```text
+telegram_user_id, display_name, telegram_username, status, invite_token,
+spreadsheet_id, day_start
+```
+
+Для перенесення на v2 додайте поточного користувача в реєстр вручну зі статусом
+`active`, його Telegram ID, існуючим `spreadsheet_id` і `day_start`. Підтримувана
+legacy meal-схема без `day` мігрується автоматично. Фото, чиї збережені шляхи
+вказують безпосередньо в корінь `PHOTO_STORAGE_DIR`, переносяться в персональну
+підтеку під час першого відкриття таблиці.
+
+## Google Cloud
+
+Service account потребує доступу до Google Sheets API та Google Drive API.
+Створіть одну Drive-папку, адміністративний Spreadsheet реєстру в цій папці й
+надайте service account права редактора. Нові персональні Spreadsheets бот
+створює в цій самій папці автоматично.
+
+## Конфігурація
 
 Потрібен Python 3.11 або новіший.
 
@@ -106,70 +77,29 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Обов’язкові змінні:
+Обов'язкові змінні:
 
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_ID`, `TELEGRAM_CHAT_ID`;
+- `TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_USER_ID`;
 - `OPENAI_API_KEY`;
-- `GOOGLE_SERVICE_ACCOUNT_FILE`, `GOOGLE_SPREADSHEET_ID`.
+- `GOOGLE_SERVICE_ACCOUNT_FILE`, `USERS_SPREADSHEET_ID`;
+- `GOOGLE_DRIVE_FOLDER_ID`.
 
-Додаткові параметри:
+Додаткові змінні:
 
-- `OPENAI_MODEL` — типово `gpt-5.6-luna`;
-- `OPENAI_REASONING_EFFORT` — типово `none`;
-- три `OPENAI_*_COST_PER_1M` — тарифи в USD за мільйон токенів;
-- `GOOGLE_SHEET_NAME` — типово `food_log`;
-- `PHOTO_STORAGE_DIR` — каталог фотографій, типово `./data/photos`;
-- `APP_TIMEZONE` — типово `Europe/Kyiv`;
-- `DAY_START_TIME` — типово `01:00`.
+- `USERS_SHEET_NAME=users`;
+- `MEAL_SHEET_NAME=food_log`;
+- `PHOTO_STORAGE_DIR=./data/photos`;
+- `APP_TIMEZONE=Europe/Kyiv`;
+- `DEFAULT_DAY_START=01:00`;
+- `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT` і тарифи `OPENAI_*_COST_PER_1M`.
 
-Якщо тарифи порожні, бот працює та записує token usage, але залишає
-`llm_cost_usd` порожньою. Некоректне непорожнє значення є помилкою конфігурації.
+Секрети `.env` і `service-account.json` повинні мати права `600`.
 
 Запуск:
 
 ```bash
 python -m calories_bot.main
 ```
-
-Для live-конфігурації поза репозиторієм можна явно задати файл:
-
-```powershell
-$env:CALORIES_BOT_ENV_FILE='C:\tmp\calories-bot-live-test\.env.live'
-.\.venv\Scripts\python.exe -m calories_bot.main
-```
-
-## systemd на Ubuntu
-
-Приклад використовує `/opt/calories-bot` і системного користувача `calories-bot`:
-
-```bash
-sudo useradd --system --home /opt/calories-bot --shell /usr/sbin/nologin calories-bot
-sudo mkdir -p /opt/calories-bot
-# Скопіюйте код, .env і service-account.json у /opt/calories-bot
-sudo mkdir -p /opt/calories-bot/data/photos
-sudo chown -R calories-bot:calories-bot /opt/calories-bot
-sudo chmod 600 /opt/calories-bot/.env /opt/calories-bot/service-account.json
-sudo cp deploy/calories-bot.service /etc/systemd/system/calories-bot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now calories-bot
-sudo systemctl status calories-bot
-```
-
-Логи: `journalctl -u calories-bot -f`.
-
-## Автоматизація Git і оновлення VPS
-
-PowerShell-скрипти для першої ініціалізації Git/GitHub, збереження версій і
-деплою на `hetzner` знаходяться в каталозі `automation`.
-
-```powershell
-.\automation\init-git.ps1 -RemoteUrl "git@github.com:YOUR_USER/calories_bot.git"
-.\automation\publish.ps1 -Message "Describe the change"
-```
-
-Перший крок виконується один раз. `publish.ps1` зберігає версію в GitHub,
-копіює застосунок на VPS і перезапускає сервіс. Локальні тести він не запускає.
-Деталі наведені в `automation/README.md`.
 
 ## Перевірки
 
@@ -179,10 +109,11 @@ python -m compileall -q calories_bot
 ruff format --check .
 ruff check .
 mypy calories_bot
-pytest --cov=calories_bot --cov-branch --cov-fail-under=90
+python -m pytest --cov=calories_bot --cov-branch
 pip check
 pip-audit
 ```
 
-Live credentials зберігайте поза репозиторієм, наприклад у
-`C:\tmp\calories-bot-live-test`. Не надсилайте секрети в чат.
+На live-сервері зміни вже знаходяться в `/home/igor/calories-bot`. Після
+налаштування `.env`, Drive-папки та реєстру застосуйте оновлення командою,
+яку наведено у фінальному звіті.

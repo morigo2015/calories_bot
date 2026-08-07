@@ -97,11 +97,12 @@ class FakeWorksheet:
         del kwargs
         for update in updates:
             range_name = update["range"]
-            assert range_name.startswith("B")
+            assert range_name[0] in {"B", "J"}
             row_index = int(range_name[1:]) - 1
-            while len(self.rows[row_index]) < 2:
+            column_index = 1 if range_name.startswith("B") else 9
+            while len(self.rows[row_index]) <= column_index:
                 self.rows[row_index].append("")
-            self.rows[row_index][1] = update["values"][0][0]
+            self.rows[row_index][column_index] = update["values"][0][0]
 
     def delete_rows(self, start_index, end_index=None):
         del end_index
@@ -516,3 +517,33 @@ def test_exact_append_failure_is_distinct() -> None:
             make_meal(),
             METADATA,
         )
+
+
+def test_legacy_root_photo_is_moved_to_personal_directory(tmp_path) -> None:
+    root = tmp_path / "photos"
+    root.mkdir()
+    legacy = root / "42.jpg"
+    legacy.write_bytes(b"photo")
+    row = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 42, photo_path=str(legacy))
+    store = build_store([HEADERS, row])
+
+    store.migrate_legacy_photos(root, 123)
+
+    destination = root / "123" / "42.jpg"
+    assert destination.read_bytes() == b"photo"
+    assert not legacy.exists()
+    assert row[9] == str(destination)
+
+
+def test_photo_in_another_users_directory_is_not_migrated(tmp_path) -> None:
+    root = tmp_path / "photos"
+    other = root / "999" / "42.jpg"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"photo")
+    row = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 42, photo_path=str(other))
+    store = build_store([HEADERS, row])
+
+    store.migrate_legacy_photos(root, 123)
+
+    assert other.exists()
+    assert row[9] == str(other)

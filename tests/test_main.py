@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from telegram import Chat, Message, Update, User
+from telegram import Chat, Message, MessageEntity, Update, User
 from telegram.constants import ChatType
 
 from calories_bot import main as main_module
@@ -22,18 +22,19 @@ def test_configure_logging_suppresses_network_request_urls() -> None:
 def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     settings = SimpleNamespace(
         telegram_bot_token="token",
-        telegram_user_id=123,
-        telegram_chat_id=-1001,
+        admin_telegram_user_id=999,
         openai_api_key="key",
         openai_model="model",
         openai_reasoning_effort="none",
         openai_pricing=ModelPricing(None, None, None),
         google_service_account_file="credentials.json",
-        google_spreadsheet_id="sheet",
-        google_sheet_name="food_log",
+        users_spreadsheet_id="users-sheet",
+        users_sheet_name="users",
+        google_drive_folder_id="folder",
+        meal_sheet_name="food_log",
         photo_storage_dir=Path("data/photos"),
         timezone=ZoneInfo("Europe/Kyiv"),
-        day_start_time=time(1),
+        default_day_start=time(1),
     )
     monkeypatch.setattr(main_module.Settings, "from_env", lambda: settings)
 
@@ -44,20 +45,35 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         lambda *args: created.setdefault("analyzer", SimpleNamespace()),
     )
     monkeypatch.setattr(
-        main_module,
-        "GoogleSheetsStore",
-        lambda **kwargs: created.setdefault("store", SimpleNamespace()),
+        main_module.gspread,
+        "service_account",
+        lambda **kwargs: created.setdefault("google_client", SimpleNamespace()),
     )
     monkeypatch.setattr(
         main_module,
-        "CaloriesService",
-        lambda *args: created.setdefault("service", SimpleNamespace()),
+        "GoogleUserRegistry",
+        lambda *args: created.setdefault("registry", SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "GoogleWorkspace",
+        lambda *args, **kwargs: created.setdefault("workspace", SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "UserManager",
+        lambda *args: created.setdefault("manager", SimpleNamespace()),
     )
     handlers = SimpleNamespace(
         start=lambda: None,
         help=lambda: None,
         day=lambda: None,
         delete=lambda: None,
+        invite=lambda: None,
+        block=lambda: None,
+        unblock=lambda: None,
+        delete_user_command=lambda: None,
+        admin_delete_callback=lambda: None,
         text=lambda: None,
         photo=lambda: None,
     )
@@ -103,19 +119,31 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 6
+    assert len(app.handlers) == 11
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"] is main_module.configure_bot_commands
 
     message = Message(
         message_id=1,
         date=datetime(2026, 8, 2, tzinfo=UTC),
-        chat=Chat(-1001, ChatType.SUPERGROUP),
+        chat=Chat(123, ChatType.PRIVATE),
         from_user=User(123, "Igor", False),
         text="сир 50",
     )
     assert app.handlers[-1].check_update(Update(1, message=message))
     assert not app.handlers[-1].check_update(Update(2, edited_message=message))
+
+    command = Message(
+        message_id=2,
+        date=datetime(2026, 8, 2, tzinfo=UTC),
+        chat=Chat(123, ChatType.PRIVATE),
+        from_user=User(123, "Igor", False),
+        text="/day",
+        entities=[MessageEntity(MessageEntity.BOT_COMMAND, 0, 4)],
+    )
+    command.set_bot(SimpleNamespace(username="calorie_bot"))
+    assert app.handlers[2].check_update(Update(3, message=command))
+    assert not app.handlers[2].check_update(Update(4, edited_message=command))
 
 
 def test_configure_bot_commands_registers_day_and_help() -> None:

@@ -20,18 +20,19 @@ class ConfigError(RuntimeError):
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
-    telegram_user_id: int
-    telegram_chat_id: int
+    admin_telegram_user_id: int
     openai_api_key: str
     openai_model: str
     openai_reasoning_effort: str
     openai_pricing: ModelPricing
     google_service_account_file: Path
-    google_spreadsheet_id: str
-    google_sheet_name: str
+    users_spreadsheet_id: str
+    users_sheet_name: str
+    google_drive_folder_id: str
+    meal_sheet_name: str
     photo_storage_dir: Path
     timezone: ZoneInfo
-    day_start_time: time
+    default_day_start: time
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -40,11 +41,11 @@ class Settings:
 
         required = {
             "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN"),
-            "TELEGRAM_USER_ID": os.getenv("TELEGRAM_USER_ID"),
-            "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID"),
+            "ADMIN_TELEGRAM_USER_ID": os.getenv("ADMIN_TELEGRAM_USER_ID"),
             "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
             "GOOGLE_SERVICE_ACCOUNT_FILE": os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
-            "GOOGLE_SPREADSHEET_ID": os.getenv("GOOGLE_SPREADSHEET_ID"),
+            "USERS_SPREADSHEET_ID": os.getenv("USERS_SPREADSHEET_ID"),
+            "GOOGLE_DRIVE_FOLDER_ID": os.getenv("GOOGLE_DRIVE_FOLDER_ID"),
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
@@ -53,14 +54,9 @@ class Settings:
             )
 
         try:
-            telegram_user_id = int(required["TELEGRAM_USER_ID"] or "")
+            admin_telegram_user_id = int(required["ADMIN_TELEGRAM_USER_ID"] or "")
         except ValueError as exc:
-            raise ConfigError("TELEGRAM_USER_ID must be an integer") from exc
-
-        try:
-            telegram_chat_id = int(required["TELEGRAM_CHAT_ID"] or "")
-        except ValueError as exc:
-            raise ConfigError("TELEGRAM_CHAT_ID must be an integer") from exc
+            raise ConfigError("ADMIN_TELEGRAM_USER_ID must be an integer") from exc
 
         effort = os.getenv("OPENAI_REASONING_EFFORT", "none") or "none"
         allowed_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -94,10 +90,10 @@ class Settings:
         except ZoneInfoNotFoundError as exc:
             raise ConfigError(f"Unknown APP_TIMEZONE: {timezone_name}") from exc
 
-        day_start_raw = os.getenv("DAY_START_TIME", "01:00") or "01:00"
+        day_start_raw = os.getenv("DEFAULT_DAY_START", "01:00") or "01:00"
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", day_start_raw):
-            raise ConfigError("DAY_START_TIME must use HH:MM in 24-hour format")
-        day_start_time = time.fromisoformat(day_start_raw)
+            raise ConfigError("DEFAULT_DAY_START must use HH:MM in 24-hour format")
+        default_day_start = time.fromisoformat(day_start_raw)
 
         credentials_path = Path(
             required["GOOGLE_SERVICE_ACCOUNT_FILE"] or ""
@@ -109,18 +105,19 @@ class Settings:
 
         return cls(
             telegram_bot_token=required["TELEGRAM_BOT_TOKEN"] or "",
-            telegram_user_id=telegram_user_id,
-            telegram_chat_id=telegram_chat_id,
+            admin_telegram_user_id=admin_telegram_user_id,
             openai_api_key=required["OPENAI_API_KEY"] or "",
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
             openai_reasoning_effort=effort,
             openai_pricing=pricing,
             google_service_account_file=credentials_path,
-            google_spreadsheet_id=required["GOOGLE_SPREADSHEET_ID"] or "",
-            google_sheet_name=os.getenv("GOOGLE_SHEET_NAME", "food_log"),
+            users_spreadsheet_id=required["USERS_SPREADSHEET_ID"] or "",
+            users_sheet_name=os.getenv("USERS_SHEET_NAME", "users"),
+            google_drive_folder_id=required["GOOGLE_DRIVE_FOLDER_ID"] or "",
+            meal_sheet_name=os.getenv("MEAL_SHEET_NAME", "food_log"),
             photo_storage_dir=Path(os.getenv("PHOTO_STORAGE_DIR", "./data/photos"))
             .expanduser()
             .resolve(),
             timezone=timezone,
-            day_start_time=day_start_time,
+            default_day_start=default_day_start,
         )

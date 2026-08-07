@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -201,15 +202,20 @@ def _meal_from_row(row: list[object]) -> StoredMeal:
 class GoogleSheetsStore:
     def __init__(
         self,
-        credentials_file: Path,
+        credentials_file: Path | None,
         spreadsheet_id: str,
         worksheet_name: str,
         timezone: ZoneInfo,
         day_start_time: time,
+        *,
+        client: gspread.Client | None = None,
     ) -> None:
         self._timezone = timezone
         self._day_start_time = day_start_time
-        client = gspread.service_account(filename=str(credentials_file))
+        if client is None:
+            if credentials_file is None:
+                raise ValueError("credentials_file is required without a client")
+            client = gspread.service_account(filename=str(credentials_file))
         spreadsheet = client.open_by_key(spreadsheet_id)
         try:
             self._worksheet = spreadsheet.worksheet(worksheet_name)
@@ -219,6 +225,43 @@ class GoogleSheetsStore:
             )
         self._ensure_headers()
         self._format_date_columns()
+
+    def migrate_legacy_photos(
+        self, photo_storage_dir: Path, telegram_user_id: int
+    ) -> None:
+        """Move exact legacy root photos into the user's isolated directory."""
+        root = photo_storage_dir.resolve()
+        user_dir = (root / str(telegram_user_id)).resolve()
+        if not user_dir.is_relative_to(root):
+            raise ValueError("Invalid Telegram user photo directory")
+        updates: list[dict[str, object]] = []
+        for row_number, row in enumerate(self._data_rows(), start=2):
+            if len(row) <= PHOTO_PATH_COLUMN or not str(row[PHOTO_PATH_COLUMN]).strip():
+                continue
+            source = Path(str(row[PHOTO_PATH_COLUMN])).resolve()
+            if source.parent != root:
+                continue
+            destination = user_dir / source.name
+            if source.exists():
+                user_dir.mkdir(parents=True, exist_ok=True)
+                if destination.exists() and not source.samefile(destination):
+                    raise SheetsWriteError(
+                        f"Cannot migrate photo because it already exists: {destination}"
+                    )
+                shutil.move(str(source), str(destination))
+            elif not destination.exists():
+                continue
+            updates.append(
+                {
+                    "range": f"J{row_number}",
+                    "values": [[str(destination)]],
+                }
+            )
+        if updates:
+            try:
+                self._worksheet.batch_update(updates, raw=True)
+            except Exception as exc:
+                raise SheetsWriteError("Could not update migrated photo paths") from exc
 
     def _ensure_headers(self) -> None:
         rows = self._worksheet.get_all_values(

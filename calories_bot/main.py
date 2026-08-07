@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import gspread
 from telegram import BotCommand
 from telegram.ext import (
     Application,
@@ -13,9 +14,10 @@ from telegram.ext import (
 )
 
 from .analyzer import OpenAIAnalyzer
-from .bot import CaloriesService, TelegramHandlers
+from .bot import TelegramHandlers, UserManager
 from .config import Settings
-from .sheets import GoogleSheetsStore
+from .users import GoogleUserRegistry
+from .workspace import GoogleWorkspace
 
 
 async def configure_bot_commands(
@@ -53,23 +55,30 @@ def main() -> None:
         settings.openai_reasoning_effort,
         settings.openai_pricing,
     )
-    store = GoogleSheetsStore(
-        credentials_file=settings.google_service_account_file,
-        spreadsheet_id=settings.google_spreadsheet_id,
-        worksheet_name=settings.google_sheet_name,
-        timezone=settings.timezone,
-        day_start_time=settings.day_start_time,
+    google_client = gspread.service_account(
+        filename=str(settings.google_service_account_file)
     )
-    service = CaloriesService(
+    registry = GoogleUserRegistry(
+        google_client,
+        settings.users_spreadsheet_id,
+        settings.users_sheet_name,
+    )
+    workspace = GoogleWorkspace(
+        google_client,
+        settings.google_drive_folder_id,
+        settings.meal_sheet_name,
+        timezone=settings.timezone,
+        photo_storage_dir=settings.photo_storage_dir,
+    )
+    manager = UserManager(
         analyzer,
-        store,
+        registry,
+        workspace,
         settings.timezone,
-        settings.day_start_time,
+        settings.default_day_start,
         settings.photo_storage_dir,
     )
-    handlers = TelegramHandlers(
-        settings.telegram_user_id, settings.telegram_chat_id, service
-    )
+    handlers = TelegramHandlers(settings.admin_telegram_user_id, manager)
 
     application = (
         Application.builder()
@@ -78,11 +87,34 @@ def main() -> None:
         .post_init(configure_bot_commands)
         .build()
     )
-    application.add_handler(CommandHandler("start", handlers.start))
-    application.add_handler(CommandHandler("help", handlers.help))
-    application.add_handler(CommandHandler("day", handlers.day))
+    message_update = filters.UpdateType.MESSAGE
+    application.add_handler(
+        CommandHandler("start", handlers.start, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("help", handlers.help, filters=message_update)
+    )
+    application.add_handler(CommandHandler("day", handlers.day, filters=message_update))
+    application.add_handler(
+        CommandHandler("invite", handlers.invite, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("block", handlers.block, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("unblock", handlers.unblock, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("delete", handlers.delete_user_command, filters=message_update)
+    )
     application.add_handler(
         CallbackQueryHandler(handlers.delete, pattern=r"^delete:\d+:\d{4}-\d{2}-\d{2}$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.admin_delete_callback,
+            pattern=r"^admin-(?:delete|cancel):\d+$",
+        )
     )
     application.add_handler(
         MessageHandler(filters.UpdateType.MESSAGE & filters.PHOTO, handlers.photo)
