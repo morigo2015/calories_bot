@@ -96,13 +96,21 @@ class Analyzer(Protocol):
 
 _DECIMAL = re.compile(r"\d+[.,]\d+")
 _HASH_MARKER = re.compile(r"(?<![\w#])(?:#(?P<prefix>\d+)|(?P<suffix>\d+)#)(?![\w#])")
-_KCAL_UNIT = r"(?:[кk][кk]|[кk][кk][аa]л|kcal)"
+_KCAL_UNIT = (
+    r"(?:[кk][кk]|[кk][кk][аa]л|kcal|"
+    r"кілокалорій|кілокалорії|кілокалорія|"
+    r"килокалорий|килокалории|килокалория|"
+    r"калорій|калорії|калорія|"
+    r"калорий|калории|калория)"
+)
 _WEIGHT_UNIT = (
-    r"(?:граммів|граммов|граммами|граммы|грамми|грамма|грамм|"
+    r"(?:граммів|граммов|граммами|граммах|граммы|грамми|грамма|грамме|грамм|"
     r"грамів|грамами|грамом|грами|грама|граму|грам|гр|г|grams|gram|gr|g)"
 )
 _TEXT_KCAL = re.compile(
-    rf"(?<!\w)(?P<value>\d+)\s*{_KCAL_UNIT}\s*/\s*100\s*{_WEIGHT_UNIT}?(?!\w)",
+    rf"(?<!\w)(?P<value>\d+)\s*{_KCAL_UNIT}\s*"
+    rf"(?:/\s*(?:100|сто)|(?:на|за)\s*(?:100|сто))\s*"
+    rf"{_WEIGHT_UNIT}?(?!\w)",
     re.IGNORECASE,
 )
 _CANONICAL_KCAL = re.compile(r"(?<!\w)(?P<value>\d+) ккал/100г(?!\w)")
@@ -114,6 +122,123 @@ _BARE_AT_BOUNDARY = re.compile(
     r"(?<!\w)(?P<value>\d+)(?=[ \t]*(?:[,;]|\r?\n|[.!?]*[ \t]*$))",
     re.MULTILINE,
 )
+
+_NUMBER_WORD_VALUES = {
+    "нуль": 0,
+    "ноль": 0,
+    "один": 1,
+    "одна": 1,
+    "одне": 1,
+    "одно": 1,
+    "одну": 1,
+    "два": 2,
+    "дві": 2,
+    "две": 2,
+    "три": 3,
+    "чотири": 4,
+    "четыре": 4,
+    "п'ять": 5,
+    "пять": 5,
+    "шість": 6,
+    "шесть": 6,
+    "сім": 7,
+    "семь": 7,
+    "вісім": 8,
+    "восемь": 8,
+    "дев'ять": 9,
+    "девять": 9,
+    "десять": 10,
+    "одинадцять": 11,
+    "одиннадцать": 11,
+    "дванадцять": 12,
+    "двенадцать": 12,
+    "тринадцять": 13,
+    "тринадцать": 13,
+    "чотирнадцять": 14,
+    "четырнадцать": 14,
+    "п'ятнадцять": 15,
+    "пятнадцать": 15,
+    "шістнадцять": 16,
+    "шестнадцать": 16,
+    "сімнадцять": 17,
+    "семнадцать": 17,
+    "вісімнадцять": 18,
+    "восемнадцать": 18,
+    "дев'ятнадцять": 19,
+    "девятнадцать": 19,
+    "двадцять": 20,
+    "двадцать": 20,
+    "тридцять": 30,
+    "тридцать": 30,
+    "сорок": 40,
+    "п'ятдесят": 50,
+    "пятьдесят": 50,
+    "шістдесят": 60,
+    "шестьдесят": 60,
+    "сімдесят": 70,
+    "семьдесят": 70,
+    "вісімдесят": 80,
+    "восемьдесят": 80,
+    "дев'яносто": 90,
+    "девяносто": 90,
+    "сто": 100,
+    "двісті": 200,
+    "двести": 200,
+    "триста": 300,
+    "чотириста": 400,
+    "четыреста": 400,
+    "п'ятсот": 500,
+    "пятьсот": 500,
+    "шістсот": 600,
+    "шестьсот": 600,
+    "сімсот": 700,
+    "семьсот": 700,
+    "вісімсот": 800,
+    "восемьсот": 800,
+    "дев'ятсот": 900,
+    "девятьсот": 900,
+}
+_THOUSAND_WORDS = {
+    "тисяча",
+    "тисячі",
+    "тисяч",
+    "тысяча",
+    "тысячи",
+    "тысяч",
+}
+_ALL_NUMBER_WORDS = set(_NUMBER_WORD_VALUES) | _THOUSAND_WORDS
+
+
+def _number_word_regex(word: str) -> str:
+    return re.escape(word).replace("'", "['’ʼ]")
+
+
+_NUMBER_WORD_ALTERNATION = "|".join(
+    _number_word_regex(word)
+    for word in sorted(_ALL_NUMBER_WORDS, key=len, reverse=True)
+)
+_SPOKEN_NUMBER = re.compile(
+    rf"(?<!\w)(?:{_NUMBER_WORD_ALTERNATION})"
+    rf"(?:[ \t]+(?:{_NUMBER_WORD_ALTERNATION}))*(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _number_word_key(word: str) -> str:
+    return word.casefold().replace("’", "'").replace("ʼ", "'")
+
+
+def _replace_spoken_number(match: re.Match[str]) -> str:
+    total = 0
+    current = 0
+    for raw_word in re.split(r"[ \t]+", match.group(0)):
+        word = _number_word_key(raw_word)
+        if word in _THOUSAND_WORDS:
+            total += (current or 1) * 1000
+            current = 0
+        else:
+            current += _NUMBER_WORD_VALUES[word]
+    return str(total + current)
 
 
 def _positive_integer(value: str, label: str) -> int:
@@ -140,6 +265,7 @@ def normalize_input(text: str) -> NormalizedInput:
     normalized = text.strip()
     if not normalized:
         raise InputFormatError("Message is empty")
+    normalized = _SPOKEN_NUMBER.sub(_replace_spoken_number, normalized)
     if _DECIMAL.search(normalized):
         raise InputFormatError("Decimal values are not supported; use whole numbers")
 

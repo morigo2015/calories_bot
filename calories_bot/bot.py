@@ -24,7 +24,7 @@ from .analyzer import (
     NormalizedInput,
     normalize_input,
 )
-from .models import MealResult, calculate_meal, round_whole
+from .models import CalculatedFoodItem, MealResult, calculate_meal, round_whole
 from .sheets import (
     DayMeal,
     MealDeletion,
@@ -51,8 +51,20 @@ HELP_TEXT = (
     "• #120 сир 50 г\n"
     "• 2 яйця, хліб 50\n"
     "• фото з підписом 200 г\n\n"
-    "#120 і 120# означають 120 кк/100 г. Використовуйте лише цілі числа.\n\n"
+    "#120, 120# і «120 ккал на 100 грам» означають "
+    "120 кк/100 г. Числа можна надиктовувати українською або "
+    "російською, наприклад «сто двадцять грам». "
+    "Використовуйте лише цілі числа.\n\n"
     "/day — показати всі прийоми їжі за сьогодні."
+)
+ADMIN_HELP_TEXT = (
+    f"{HELP_TEXT}\n\n"
+    "Адміністрування:\n"
+    "/invite Імʼя — додати користувача та отримати invite-посилання\n"
+    "/users — показати перелік, ID і статуси користувачів\n"
+    "/block ID — тимчасово заблокувати\n"
+    "/unblock ID — відновити доступ\n"
+    "/delete ID — повністю видалити користувача після підтвердження"
 )
 NOT_FOOD_TEXT = "Не вдалося розпізнати страву. Уточніть, що саме ви зʼїли."
 FORMAT_ERROR_TEXT = (
@@ -103,18 +115,64 @@ def _compact_description(meal: MealResult, normalized_request: str) -> str:
     parts = [description]
     if any(item.weight_estimated for item in meal.items):
         parts.append(f"≈{round_whole(meal.total_weight_g)} г")
-    parts.append(f"#{round_whole(meal.kcal_per_100g)}")
+    density_estimated = any(item.kcal_estimated for item in meal.items)
+    density_prefix = "≈" if density_estimated else ""
+    parts.append(f"{density_prefix}#{round_whole(meal.kcal_per_100g)}")
     return html.escape(" ".join(parts))
 
 
-def format_reply(meal: MealResult, today_total: int, normalized_request: str) -> str:
-    return "\n".join(
-        [
-            f"<b>{round_whole(meal.meal_kcal)} кк</b>",
-            _compact_description(meal, normalized_request),
-            f"=== {today_total} кк",
-        ]
+def _format_item_calculation(item: CalculatedFoodItem) -> str:
+    weight_g = item.weight_g
+    kcal_per_100g = item.kcal_per_100g
+    calories = item.calories
+    weight_estimated = item.weight_estimated
+    kcal_estimated = item.kcal_estimated
+    result_estimated = weight_estimated or kcal_estimated
+    weight_prefix = "≈" if weight_estimated else ""
+    kcal_prefix = "≈" if kcal_estimated else ""
+    result_prefix = "≈" if result_estimated else ""
+    name = html.escape(item.name)
+    return (
+        f"• {name}: {weight_prefix}{round_whole(weight_g)} г × "
+        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г = "
+        f"{result_prefix}{round_whole(calories)} кк"
     )
+
+
+def format_reply(meal: MealResult, today_total: int, normalized_request: str) -> str:
+    lines = [
+        f"<b>{round_whole(meal.meal_kcal)} кк</b>",
+        _compact_description(meal, normalized_request),
+        "Розрахунок:",
+        *(_format_item_calculation(item) for item in meal.items),
+    ]
+    if meal.estimated:
+        lines.append("≈ — значення оцінено ботом")
+    lines.append(f"=== {today_total} кк")
+    return "\n".join(lines)
+
+
+def format_users_reply(users: list[UserRecord]) -> str:
+    if not users:
+        return "Користувачів ще немає."
+
+    status_labels = {
+        "invited": "запрошений",
+        "active": "активний",
+        "blocked": "заблокований",
+    }
+    lines = [f"Користувачі ({len(users)}):"]
+    for user in users:
+        name = re.sub(r"\s+", " ", user.display_name).strip() or "Без імені"
+        identity = (
+            f"ID {user.telegram_user_id}"
+            if user.telegram_user_id is not None
+            else "ще не активований"
+        )
+        if user.telegram_username:
+            identity += f" (@{user.telegram_username.lstrip('@')})"
+        lines.append(f"• {name} — {status_labels[user.status]} — {identity}")
+    return "\n".join(lines)
 
 
 def format_day_reply(meals: list[DayMeal]) -> str:
@@ -306,6 +364,9 @@ class UserManager:
     def get_user(self, telegram_user_id: int) -> UserRecord | None:
         return self._registry.get_user(telegram_user_id)
 
+    def list_users(self) -> list[UserRecord]:
+        return self._registry.list_users()
+
     def service_for(self, user: UserRecord) -> CaloriesService:
         if (
             user.status != "active"
@@ -468,7 +529,11 @@ class TelegramHandlers:
             await message.reply_text(ACCESS_ERROR_TEXT, do_quote=False)
             return
         if existing is not None:
-            text = HELP_TEXT if existing.status == "active" else BLOCKED_TEXT
+            text = (
+                ADMIN_HELP_TEXT
+                if existing.status == "active" and self._is_admin(update)
+                else HELP_TEXT if existing.status == "active" else BLOCKED_TEXT
+            )
             await message.reply_text(text, do_quote=False)
             return
         token = context.args[0] if context.args else ""
@@ -495,6 +560,9 @@ class TelegramHandlers:
         del context
         message = update.effective_message
         if message is None:
+            return
+        if self._is_admin(update):
+            await message.reply_text(ADMIN_HELP_TEXT, do_quote=False)
             return
         if await self._active_service(update) is not None:
             await message.reply_text(HELP_TEXT, do_quote=False)
@@ -648,6 +716,20 @@ class TelegramHandlers:
         await message.reply_text(
             f"https://t.me/{bot_user.username}?start={token}", do_quote=False
         )
+
+    async def users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        message = update.effective_message
+        if not self._is_admin(update) or message is None:
+            await self._reject_admin_command(update)
+            return
+        try:
+            users = await asyncio.to_thread(self._manager.list_users)
+        except Exception:
+            LOGGER.exception("Could not list users")
+            await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
+            return
+        await message.reply_text(format_users_reply(users), do_quote=False)
 
     async def block(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._set_status_command(update, context, "blocked")

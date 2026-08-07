@@ -42,6 +42,9 @@ class Registry:
             return self.current
         return None
 
+    def list_users(self):
+        return [self.current]
+
     def get_invite(self, token):
         if self.current.status == "invited" and self.current.invite_token == token:
             return self.current

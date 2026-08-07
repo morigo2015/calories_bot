@@ -70,6 +70,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         day=lambda: None,
         delete=lambda: None,
         invite=lambda: None,
+        users=lambda: None,
         block=lambda: None,
         unblock=lambda: None,
         delete_user_command=lambda: None,
@@ -119,9 +120,10 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 11
+    assert len(app.handlers) == 12
     assert app.polling == {"drop_pending_updates": False}
-    assert created["post_init"] is main_module.configure_bot_commands
+    assert created["post_init"].func is main_module.configure_bot_commands
+    assert created["post_init"].keywords == {"admin_user_id": 999}
 
     message = Message(
         message_id=1,
@@ -146,18 +148,30 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     assert not app.handlers[2].check_update(Update(4, edited_message=command))
 
 
-def test_configure_bot_commands_registers_day_and_help() -> None:
+def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     class FakeBot:
         def __init__(self):
-            self.commands = None
+            self.calls = []
 
-        async def set_my_commands(self, commands):
-            self.commands = commands
+        async def set_my_commands(self, commands, **kwargs):
+            self.calls.append((commands, kwargs))
 
     bot = FakeBot()
-    asyncio.run(main_module.configure_bot_commands(SimpleNamespace(bot=bot)))
+    asyncio.run(
+        main_module.configure_bot_commands(SimpleNamespace(bot=bot), admin_user_id=999)
+    )
 
-    assert [(command.command, command.description) for command in bot.commands] == [
+    assert [(command.command, command.description) for command in bot.calls[0][0]] == [
         ("day", "показати прийоми їжі за сьогодні"),
         ("help", "показати довідку"),
     ]
+    assert [command.command for command in bot.calls[1][0]] == [
+        "day",
+        "help",
+        "invite",
+        "users",
+        "block",
+        "unblock",
+        "delete",
+    ]
+    assert bot.calls[1][1]["scope"].chat_id == 999

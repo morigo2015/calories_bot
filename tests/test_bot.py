@@ -9,6 +9,7 @@ from telegram.constants import ChatType, ParseMode
 
 from calories_bot.analyzer import AnalysisError, AnalysisResult, InputFormatError
 from calories_bot.bot import (
+    ADMIN_HELP_TEXT,
     ANALYSIS_ERROR_TEXT,
     DELETE_ERROR_TEXT,
     FORMAT_ERROR_TEXT,
@@ -23,6 +24,7 @@ from calories_bot.bot import (
     TelegramHandlers,
     format_day_reply,
     format_reply,
+    format_users_reply,
 )
 from calories_bot.models import (
     FoodAnalysis,
@@ -39,6 +41,7 @@ from calories_bot.sheets import (
     SheetsWriteError,
     SheetsWriteUncertainError,
 )
+from calories_bot.users import UserRecord
 
 TZ = ZoneInfo("Europe/Kyiv")
 METADATA = LLMMetadata(model="test", effort="none", input_tokens=10, output_tokens=5)
@@ -183,7 +186,10 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
 
-    assert reply.text == "<b>60 кк</b>\nсир 50 г #120\n=== 360 кк"
+    assert reply.text == (
+        "<b>60 кк</b>\nсир 50 г #120\nРозрахунок:\n"
+        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 360 кк"
+    )
     assert reply.accounting_day == date(2026, 8, 2)
     assert store.appended[0][3] == "сир 50 гр"
     assert analyzer.normalized.text == "сир 50 гр"
@@ -250,7 +256,10 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
     service = build_service(analyzer, store, tmp_path)
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
-    assert reply.text == "<b>60 кк</b>\nсир 50 г #120\n=== 360 кк"
+    assert reply.text == (
+        "<b>60 кк</b>\nсир 50 г #120\nРозрахунок:\n"
+        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 360 кк"
+    )
     assert analyzer.calls == 0
     assert store.appended == []
 
@@ -284,7 +293,10 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     )
 
     photo_path = store.appended[0][4]
-    assert reply.text == "<b>60 кк</b>\n50 г #120\n=== 360 кк"
+    assert reply.text == (
+        "<b>60 кк</b>\n50 г #120\nРозрахунок:\n"
+        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 360 кк"
+    )
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
     assert photo_path == str((tmp_path / "photos" / "42.jpg").resolve())
@@ -300,7 +312,11 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
         "", 43, datetime(2026, 8, 2, 12, tzinfo=TZ), b"jpeg-data"
     )
 
-    assert reply.text == "<b>60 кк</b>\nсир ≈50 г #120\n=== 60 кк"
+    assert reply.text == (
+        "<b>60 кк</b>\nсир ≈50 г ≈#120\nРозрахунок:\n"
+        "• сир: ≈50 г × ≈120 кк/100 г = ≈60 кк\n"
+        "≈ — значення оцінено ботом\n=== 60 кк"
+    )
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
 
@@ -308,7 +324,11 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
 def test_estimate_is_marked_in_reply() -> None:
     meal = calculate_meal(food_analysis(estimated=True))
     reply = format_reply(meal, 60, "сир")
-    assert reply == "<b>60 кк</b>\nсир ≈50 г #120\n=== 60 кк"
+    assert reply == (
+        "<b>60 кк</b>\nсир ≈50 г ≈#120\nРозрахунок:\n"
+        "• сир: ≈50 г × ≈120 кк/100 г = ≈60 кк\n"
+        "≈ — значення оцінено ботом\n=== 60 кк"
+    )
 
 
 def test_composite_reply_stays_compact() -> None:
@@ -333,13 +353,45 @@ def test_composite_reply_stays_compact() -> None:
         ],
     )
     reply = format_reply(calculate_meal(analysis), 110, "яблуко, сир 50 гр")
-    assert reply == "<b>110 кк</b>\nяблуко, сир 50 г ≈150 г #73\n=== 110 кк"
+    assert reply == (
+        "<b>110 кк</b>\nяблуко, сир 50 г ≈150 г ≈#73\nРозрахунок:\n"
+        "• яблуко: ≈100 г × ≈50 кк/100 г = ≈50 кк\n"
+        "• сир: 50 г × 120 кк/100 г = 60 кк\n"
+        "≈ — значення оцінено ботом\n=== 110 кк"
+    )
 
 
 def test_reply_removes_existing_density_and_escapes_html() -> None:
     meal = calculate_meal(food_analysis())
     reply = format_reply(meal, 60, "сир <міцний> 50 гр 120 ккал/100г")
-    assert reply == "<b>60 кк</b>\nсир &lt;міцний&gt; 50 г #120\n=== 60 кк"
+    assert reply == (
+        "<b>60 кк</b>\nсир &lt;міцний&gt; 50 г #120\nРозрахунок:\n"
+        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 60 кк"
+    )
+
+
+def test_user_list_contains_status_ids_and_pending_invites() -> None:
+    users = [
+        user_record(123, status="active"),
+        user_record(456, status="blocked"),
+        UserRecord(
+            row_number=4,
+            telegram_user_id=None,
+            display_name="Новий користувач",
+            telegram_username="",
+            status="invited",
+            invite_token="token",
+            spreadsheet_id="",
+            day_start=time(1),
+        ),
+    ]
+
+    assert format_users_reply(users) == (
+        "Користувачі (3):\n"
+        "• User — активний — ID 123 (@user)\n"
+        "• User — заблокований — ID 456 (@user)\n"
+        "• Новий користувач — запрошений — ще не активований"
+    )
 
 
 def test_service_deletes_photo_only_inside_storage(tmp_path) -> None:
@@ -419,6 +471,9 @@ class FakeManager:
     def create_invite(self, name):
         self.invites.append(name)
         return "secure-token"
+
+    def list_users(self):
+        return list(self.users.values())
 
     def set_status(self, user_id, status):
         self.status_changes.append((user_id, status))
@@ -826,6 +881,20 @@ def test_admin_invite_returns_deep_link() -> None:
 
     assert manager.invites == ["Вася"]
     assert message.replies == ["https://t.me/calorie_bot?start=secure-token"]
+
+
+def test_admin_help_and_user_list_are_available_without_personal_account() -> None:
+    manager = FakeManager({123: user_record()})
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update(user_id=999)
+
+    asyncio.run(handlers.help(update, SimpleNamespace()))
+    asyncio.run(handlers.users(update, SimpleNamespace()))
+
+    assert message.replies == [
+        ADMIN_HELP_TEXT,
+        "Користувачі (1):\n• User — активний — ID 123 (@user)",
+    ]
 
 
 def test_non_admin_cannot_execute_admin_command() -> None:

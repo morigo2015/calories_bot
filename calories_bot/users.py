@@ -59,6 +59,8 @@ class UserRecord:
 class UserRegistry(Protocol):
     def get_user(self, telegram_user_id: int) -> UserRecord | None: ...
 
+    def list_users(self) -> list[UserRecord]: ...
+
     def get_invite(self, token: str) -> UserRecord | None: ...
 
     def create_invite(
@@ -190,6 +192,10 @@ class GoogleUserRegistry:
                     f"Duplicate retained user in registry: {telegram_user_id}"
                 )
             return matches[0] if matches else None
+
+    def list_users(self) -> list[UserRecord]:
+        with self._lock:
+            return self._records()
 
     def get_invite(self, token: str) -> UserRecord | None:
         if not token:

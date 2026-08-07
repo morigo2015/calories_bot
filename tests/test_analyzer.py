@@ -30,6 +30,8 @@ from calories_bot.models import FoodAnalysis, FoodItem, calculate_meal, round_wh
         ("2 яйця, хліб 50", "2 яйця, хліб 50 гр"),
         ("йогурт 200г 65 кк/100гр", "йогурт 200 гр 65 ккал/100г"),
         ("батончик 45g 380kcal/100g", "батончик 45 гр 380 ккал/100г"),
+        ("сир 120 г 30 ккал на 100 грам", "сир 120 гр 30 ккал/100г"),
+        ("сир 120 г 30 калорій за 100 грамів", "сир 120 гр 30 ккал/100г"),
         ("кава без цукру", "кава без цукру"),
         ("піца 30 см", "піца 30 см"),
         ("піца 30", "піца 30 гр"),
@@ -75,6 +77,38 @@ def test_spoken_weight_units_are_normalized(unit: str) -> None:
 def test_spoken_weight_units_work_in_kcal_per_100g(unit: str) -> None:
     normalized = normalize_input(f"сир 50 грамів 120 кк/100 {unit}")
     assert normalized.text == "сир 50 гр 120 ккал/100г"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "сир сто двадцять грам, тридцять ккал на сто грам",
+            "сир 120 гр, 30 ккал/100г",
+        ),
+        (
+            "творог сто двадцать граммов, тридцать килокалорий на сто граммов",
+            "творог 120 гр, 30 ккал/100г",
+        ),
+        ("два яйця, хліб пʼятдесят", "2 яйця, хліб 50 гр"),
+        ("кавун одна тисяча двісті грамів", "кавун 1200 гр"),
+    ],
+)
+def test_ukrainian_and_russian_spoken_numbers_are_normalized(
+    source: str, expected: str
+) -> None:
+    normalized = normalize_input(source)
+    assert normalized.text == expected
+
+
+def test_spoken_calorie_and_weight_values_keep_explicit_sources() -> None:
+    normalized = normalize_input(
+        "сир сто двадцять грам триста ккал на сто грам"
+    )
+    assert [(value.kind, value.value) for value in normalized.explicit_values] == [
+        ("weight", 120),
+        ("kcal", 300),
+    ]
 
 
 def test_weight_units_are_not_matched_inside_words() -> None:

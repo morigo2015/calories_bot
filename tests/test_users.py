@@ -150,6 +150,18 @@ def test_duplicate_retained_user_is_rejected() -> None:
         registry.get_user(123)
 
 
+def test_list_users_returns_invited_active_and_blocked_rows() -> None:
+    rows = [
+        USER_HEADERS,
+        ["", "Invite", "", "invited", "token", "", "01:00"],
+        [123, "Active", "active", "active", "", "sheet-a", "01:00"],
+        [456, "Blocked", "blocked", "blocked", "", "sheet-b", "02:00"],
+    ]
+    users = build_registry(rows).list_users()
+
+    assert [user.status for user in users] == ["invited", "active", "blocked"]
+
+
 def test_block_unblock_preserves_spreadsheet_and_delete_removes_row() -> None:
     row = [123, "A", "a", "active", "", "sheet-a", "01:00"]
     registry = build_registry([USER_HEADERS, row])

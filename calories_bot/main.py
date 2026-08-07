@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import Any
 
 import gspread
-from telegram import BotCommand
+from telegram import BotCommand, BotCommandScopeChat
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -22,12 +23,24 @@ from .workspace import GoogleWorkspace
 
 async def configure_bot_commands(
     application: Application[Any, Any, Any, Any, Any, Any],
+    admin_user_id: int,
 ) -> None:
+    user_commands = [
+        BotCommand("day", "показати прийоми їжі за сьогодні"),
+        BotCommand("help", "показати довідку"),
+    ]
+    admin_commands = [
+        *user_commands,
+        BotCommand("invite", "додати користувача"),
+        BotCommand("users", "показати перелік користувачів"),
+        BotCommand("block", "заблокувати користувача"),
+        BotCommand("unblock", "розблокувати користувача"),
+        BotCommand("delete", "повністю видалити користувача"),
+    ]
+    await application.bot.set_my_commands(user_commands)
     await application.bot.set_my_commands(
-        [
-            BotCommand("day", "показати прийоми їжі за сьогодні"),
-            BotCommand("help", "показати довідку"),
-        ]
+        admin_commands,
+        scope=BotCommandScopeChat(chat_id=admin_user_id),
     )
 
 
@@ -84,7 +97,12 @@ def main() -> None:
         Application.builder()
         .token(settings.telegram_bot_token)
         .concurrent_updates(False)
-        .post_init(configure_bot_commands)
+        .post_init(
+            partial(
+                configure_bot_commands,
+                admin_user_id=settings.admin_telegram_user_id,
+            )
+        )
         .build()
     )
     message_update = filters.UpdateType.MESSAGE
@@ -97,6 +115,9 @@ def main() -> None:
     application.add_handler(CommandHandler("day", handlers.day, filters=message_update))
     application.add_handler(
         CommandHandler("invite", handlers.invite, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("users", handlers.users, filters=message_update)
     )
     application.add_handler(
         CommandHandler("block", handlers.block, filters=message_update)
