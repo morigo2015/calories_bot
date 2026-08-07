@@ -71,6 +71,18 @@ def test_invalid_day_start_and_malformed_rows_fail() -> None:
         invalid_status.get_user(123)
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", time(0)),
+        ("0.041666666666666664", time(1)),
+        (0.125, time(3)),
+    ],
+)
+def test_google_sheets_native_time_value_is_accepted(value, expected) -> None:
+    assert parse_day_start(value) == expected
+
+
 def test_invite_activation_is_one_time_and_retains_personal_context() -> None:
     registry = build_registry()
     invite = registry.create_invite("Вася", "token", time(3))

@@ -4,6 +4,7 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import time
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Protocol
 
 import gspread
@@ -81,9 +82,27 @@ class UserRegistry(Protocol):
 
 def parse_day_start(value: object) -> time:
     text = str(value).strip()
-    if not _DAY_START_RE.fullmatch(text):
+    if _DAY_START_RE.fullmatch(text):
+        return time.fromisoformat(text)
+    # Google Sheets returns a time-only cell as a fraction of a day when data
+    # is requested with ValueRenderOption.unformatted: 01:00 becomes
+    # 0.041666666666666664. Accept exact minute values in that native form too.
+    try:
+        day_fraction = Decimal(text)
+    except InvalidOperation as exc:
+        raise UserRegistryError(
+            f"Invalid day_start in user registry: {text!r}"
+        ) from exc
+    if not day_fraction.is_finite():
         raise UserRegistryError(f"Invalid day_start in user registry: {text!r}")
-    return time.fromisoformat(text)
+    seconds = int(
+        (day_fraction * Decimal(24 * 60 * 60)).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+    if not 0 <= seconds < 24 * 60 * 60 or seconds % 60:
+        raise UserRegistryError(f"Invalid day_start in user registry: {text!r}")
+    return time(hour=seconds // 3600, minute=(seconds % 3600) // 60)
 
 
 class GoogleUserRegistry:
