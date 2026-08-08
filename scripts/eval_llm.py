@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import json
+import copy
+import hashlib
 import os
+import secrets
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -13,6 +17,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from calories_bot.analyzer import (
+    SYSTEM_PROMPT,
     AnalysisError,
     ModelPricing,
     NormalizedInput,
@@ -20,9 +25,16 @@ from calories_bot.analyzer import (
     normalize_input,
 )
 from calories_bot.models import FoodAnalysis, LLMMetadata, calculate_meal
+from scripts.eval_storage import (
+    DatasetValidationError,
+    atomic_write_json,
+    read_dataset,
+    safe_image_path,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "evals" / "cases.jsonl"
+DEFAULT_REPORTS = ROOT / "eval-results" / "runs"
 ALLOWED_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 
@@ -37,11 +49,14 @@ class CheckResult:
 @dataclass(frozen=True)
 class CaseResult:
     case_id: str
+    repeat_index: int
     passed: bool
     hard_failure: bool
     latency_seconds: float
     checks: list[CheckResult]
-    error: str | None
+    normalized_input: dict[str, Any]
+    actual: dict[str, Any] | None
+    error: dict[str, Any] | None
     input_tokens: int | None
     output_tokens: int | None
     cost_usd: str | None
@@ -69,40 +84,126 @@ def pricing_from_env() -> ModelPricing:
 
 
 def load_cases(path: Path, selected: set[str]) -> list[dict[str, Any]]:
-    cases: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    with path.open(encoding="utf-8") as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
-            if not line or line.startswith("//"):
-                continue
-            try:
-                case = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SystemExit(
-                    f"Invalid JSON at {path}:{line_number}: {exc}"
-                ) from exc
-            if not isinstance(case, dict) or not isinstance(case.get("id"), str):
-                raise SystemExit(f"Case at {path}:{line_number} needs a string id")
-            case_id = case["id"]
-            if case_id in seen:
-                raise SystemExit(f"Duplicate case id: {case_id}")
-            seen.add(case_id)
-            if not isinstance(case.get("text", ""), str):
-                raise SystemExit(f"Case {case_id} needs a string text field")
-            if (
-                not isinstance(case.get("expected"), dict)
-                or "is_food" not in case["expected"]
-            ):
-                raise SystemExit(f"Case {case_id} needs an expected object")
-            if not selected or case_id in selected:
-                cases.append(case)
-    missing = selected - seen
+    try:
+        _, parsed = read_dataset(path)
+    except DatasetValidationError as exc:
+        raise SystemExit(str(exc)) from exc
+    all_cases = [case for _, case in parsed]
+    seen = {case["id"] for case in all_cases}
+    cases = [case for case in all_cases if not selected or case["id"] in selected]
+    missing = selected.difference(seen)
     if missing:
         raise SystemExit("Unknown case IDs: " + ", ".join(sorted(missing)))
     if not cases:
         raise SystemExit("No eval cases selected")
     return cases
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def create_run_identity(started_at: datetime | None = None) -> tuple[str, str, str]:
+    started = (started_at or _utc_now()).astimezone(UTC)
+    compact = started.strftime("%Y%m%dT%H%M%SZ")
+    return (
+        compact + "-" + secrets.token_hex(3),
+        _iso_utc(started),
+        started.strftime("Run %Y-%m-%d %H:%M UTC"),
+    )
+
+
+def _project_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path.resolve())
+
+
+def _git_metadata() -> dict[str, Any]:
+    metadata: dict[str, Any] = {"commit": None, "dirty": None}
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if commit.returncode == 0:
+            metadata["commit"] = commit.stdout.strip() or None
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if status.returncode == 0:
+            metadata["dirty"] = bool(status.stdout)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return metadata
+
+
+def _normalized_input_dict(normalized: NormalizedInput) -> dict[str, Any]:
+    return {
+        "text": normalized.text,
+        "original_text": normalized.original_text,
+        "explicit_values": [asdict(value) for value in normalized.explicit_values],
+        "household_portions": [
+            asdict(portion) for portion in normalized.household_portions
+        ],
+    }
+
+
+def serialize_analysis(analysis: FoodAnalysis) -> dict[str, Any]:
+    """Serialize diagnostic fields, including Pydantic-excluded source IDs."""
+    return {
+        "is_food": analysis.is_food,
+        "meal_name": analysis.meal_name,
+        "items": [
+            {
+                "name": item.name,
+                "weight_g": item.weight_g,
+                "weight_estimated": item.weight_estimated,
+                "weight_origin": item.weight_origin,
+                "weight_source_id": item.weight_source_id,
+                "kcal_per_100g": item.kcal_per_100g,
+                "kcal_estimated": item.kcal_estimated,
+                "kcal_origin": item.kcal_origin,
+                "kcal_source_id": item.kcal_source_id,
+                "portion_display": item.portion_display,
+            }
+            for item in analysis.items
+        ],
+    }
+
+
+def build_dataset_snapshot(
+    cases: list[dict[str, Any]], cases_path: Path
+) -> list[dict[str, Any]]:
+    snapshot = copy.deepcopy(cases)
+    for case in snapshot:
+        image_name = case.get("image")
+        if not image_name:
+            continue
+        try:
+            image_path = safe_image_path(cases_path.parent, image_name)
+            case["image_sha256"] = _sha256(image_path.read_bytes())
+        except (DatasetValidationError, OSError) as exc:
+            raise SystemExit(f"Cannot read image for {case['id']}: {exc}") from exc
+    return snapshot
 
 
 def _in_range(value: float, bounds: list[float]) -> bool:
@@ -236,20 +337,21 @@ def _metadata_values(
 
 
 def run_case(
-    analyzer: OpenAIAnalyzer, case: dict[str, Any], cases_path: Path
+    analyzer: OpenAIAnalyzer,
+    case: dict[str, Any],
+    cases_path: Path,
+    repeat_index: int = 0,
 ) -> CaseResult:
     case_id = str(case["id"])
     text = str(case.get("text", ""))
     image_bytes: bytes | None = None
     image_name = case.get("image")
     if image_name:
-        image_path = (cases_path.parent / str(image_name)).resolve()
-        if not image_path.is_relative_to(cases_path.parent.resolve()):
-            raise SystemExit(f"Case {case_id} image escapes the eval directory")
         try:
+            image_path = safe_image_path(cases_path.parent, image_name)
             image_bytes = image_path.read_bytes()
-        except OSError as exc:
-            raise SystemExit(f"Cannot read image for {case_id}: {image_path}") from exc
+        except (DatasetValidationError, OSError) as exc:
+            raise SystemExit(f"Cannot read image for {case_id}: {image_name}") from exc
     if text:
         normalized = normalize_input(text)
     else:
@@ -270,10 +372,13 @@ def run_case(
         passed = all(check.passed for check in checks)
         return CaseResult(
             case_id=case_id,
+            repeat_index=repeat_index,
             passed=passed,
             hard_failure=False,
             latency_seconds=time.perf_counter() - started,
             checks=checks,
+            normalized_input=_normalized_input_dict(normalized),
+            actual=serialize_analysis(result.analysis),
             error=None,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -282,11 +387,14 @@ def run_case(
     except AnalysisError as exc:
         return CaseResult(
             case_id=case_id,
+            repeat_index=repeat_index,
             passed=False,
             hard_failure=True,
             latency_seconds=time.perf_counter() - started,
             checks=[],
-            error=str(exc),
+            normalized_input=_normalized_input_dict(normalized),
+            actual=None,
+            error={"type": type(exc).__name__, "message": str(exc)},
             input_tokens=None,
             output_tokens=None,
             cost_usd=None,
@@ -308,7 +416,7 @@ def _print_case(result: CaseResult) -> None:
     marker = "PASS" if result.passed else "FAIL"
     print(f"  {marker} {result.case_id} ({result.latency_seconds:.1f}s)")
     if result.error:
-        print(f"       {result.error}")
+        print(f"       {result.error['message']}")
     for check in result.checks:
         if not check.passed:
             print(f"       {check.name}: got {check.actual}; expected {check.expected}")
@@ -329,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--min-pass-rate", type=float, default=0.90)
+    parser.add_argument("--name", help="human-readable name for this eval run")
     parser.add_argument("--report", type=Path)
     parser.add_argument(
         "--confirm",
@@ -342,6 +451,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.repeat < 1 or not 0 <= args.min_pass_rate <= 1:
         raise SystemExit("--repeat must be positive and pass rate must be from 0 to 1")
+    if args.name is not None and not args.name.strip():
+        raise SystemExit("--name must not be empty")
 
     load_dotenv(os.getenv("CALORIES_BOT_ENV_FILE") or None)
     cases_path = args.cases.resolve()
@@ -364,10 +475,17 @@ def main() -> int:
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY is missing")
+    run_id, started_at, automatic_name = create_run_identity()
+    run_name = args.name.strip() if args.name is not None else automatic_name
+    try:
+        dataset_bytes = cases_path.read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"Cannot read eval dataset: {cases_path}") from exc
+    dataset_snapshot = build_dataset_snapshot(cases, cases_path)
     configured_model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     configured_pricing = pricing_from_env()
     unknown_pricing = ModelPricing(None, None, None)
-    report_runs: list[dict[str, Any]] = []
+    report_configurations: list[dict[str, Any]] = []
     overall_passed = True
 
     for model, effort in configs:
@@ -375,9 +493,9 @@ def main() -> int:
         pricing = configured_pricing if model == configured_model else unknown_pricing
         analyzer = OpenAIAnalyzer(api_key, model, effort, pricing)
         results: list[CaseResult] = []
-        for _ in range(args.repeat):
+        for repeat_index in range(args.repeat):
             for case in cases:
-                result = run_case(analyzer, case, cases_path)
+                result = run_case(analyzer, case, cases_path, repeat_index=repeat_index)
                 results.append(result)
                 _print_case(result)
 
@@ -401,7 +519,7 @@ def main() -> int:
             f"tokens={total_input}+{total_output}, "
             f"cost=${total_cost if total_cost is not None else 'unknown'}"
         )
-        report_runs.append(
+        report_configurations.append(
             {
                 "model": model,
                 "effort": effort,
@@ -416,23 +534,27 @@ def main() -> int:
             }
         )
 
-    if args.report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(
-            json.dumps(
-                {
-                    "cases": str(cases_path),
-                    "minimum_pass_rate": args.min_pass_rate,
-                    "passed": overall_passed,
-                    "runs": report_runs,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        print(f"\nReport: {args.report}")
+    report = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "name": run_name,
+        "started_at": started_at,
+        "finished_at": _iso_utc(_utc_now()),
+        "git": _git_metadata(),
+        "prompt_sha256": _sha256(SYSTEM_PROMPT.encode("utf-8")),
+        "dataset_sha256": _sha256(dataset_bytes),
+        "cases_path": _project_path(cases_path),
+        "minimum_pass_rate": args.min_pass_rate,
+        "passed": overall_passed,
+        "dataset_snapshot": dataset_snapshot,
+        "configurations": report_configurations,
+    }
+    canonical_report = DEFAULT_REPORTS / f"{run_id}.json"
+    atomic_write_json(canonical_report, report)
+    print(f"\nHistorical report: {canonical_report}")
+    if args.report and args.report.resolve() != canonical_report.resolve():
+        atomic_write_json(args.report, report)
+        print(f"Report copy: {args.report}")
     return 0 if overall_passed else 1
 
 

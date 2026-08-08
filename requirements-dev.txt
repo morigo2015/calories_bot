@@ -4,3 +4,4 @@ pytest-cov>=6,<8
 ruff>=0.12,<1
 mypy>=1.17,<2
 pip-audit>=2.9,<3
+telethon>=1.44,<2
