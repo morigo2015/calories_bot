@@ -7,13 +7,12 @@ from zoneinfo import ZoneInfo
 import pytest
 from telegram.constants import ChatType, ParseMode
 
+from calories_bot import bot as bot_module
 from calories_bot.analyzer import AnalysisError, AnalysisResult, InputFormatError
 from calories_bot.bot import (
-    ADMIN_HELP_TEXT,
     ANALYSIS_ERROR_TEXT,
     DELETE_ERROR_TEXT,
     FORMAT_ERROR_TEXT,
-    HELP_TEXT,
     NOT_FOOD_TEXT,
     READ_ERROR_TEXT,
     UNCERTAIN_WRITE_TEXT,
@@ -25,6 +24,7 @@ from calories_bot.bot import (
     format_day_reply,
     format_reply,
     format_users_reply,
+    load_help_text,
 )
 from calories_bot.models import (
     FoodAnalysis,
@@ -187,8 +187,7 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
 
     assert reply.text == (
-        "<b>60 кк</b>\nсир 50 г #120\nРозрахунок:\n"
-        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 360 кк"
+        "Сир 60 кк = 50 г × 120 кк/100 г\n=== 360 кк"
     )
     assert reply.accounting_day == date(2026, 8, 2)
     assert store.appended[0][3] == "сир 50 гр"
@@ -257,8 +256,7 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
     assert reply.text == (
-        "<b>60 кк</b>\nсир 50 г #120\nРозрахунок:\n"
-        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 360 кк"
+        "Сир 60 кк = 50 г × 120 кк/100 г\n=== 360 кк"
     )
     assert analyzer.calls == 0
     assert store.appended == []
@@ -294,8 +292,7 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
 
     photo_path = store.appended[0][4]
     assert reply.text == (
-        "<b>60 кк</b>\n50 г #120\nРозрахунок:\n"
-        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 360 кк"
+        "Сир 60 кк = 50 г × 120 кк/100 г\n=== 360 кк"
     )
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
@@ -313,9 +310,7 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
     )
 
     assert reply.text == (
-        "<b>60 кк</b>\nсир ≈50 г ≈#120\nРозрахунок:\n"
-        "• сир: ≈50 г × ≈120 кк/100 г = ≈60 кк\n"
-        "≈ — значення оцінено ботом\n=== 60 кк"
+        "Сир ≈60 кк = ≈50 г × ≈120 кк/100 г\n=== 60 кк"
     )
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
@@ -323,11 +318,31 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
 
 def test_estimate_is_marked_in_reply() -> None:
     meal = calculate_meal(food_analysis(estimated=True))
-    reply = format_reply(meal, 60, "сир")
+    reply = format_reply(meal, 60)
     assert reply == (
-        "<b>60 кк</b>\nсир ≈50 г ≈#120\nРозрахунок:\n"
-        "• сир: ≈50 г × ≈120 кк/100 г = ≈60 кк\n"
-        "≈ — значення оцінено ботом\n=== 60 кк"
+        "Сир ≈60 кк = ≈50 г × ≈120 кк/100 г\n=== 60 кк"
+    )
+
+
+def test_reply_uses_compact_requested_format() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="яблучні оладки",
+        items=[
+            FoodItem(
+                name="яблучні оладки",
+                weight_g=50,
+                weight_estimated=False,
+                kcal_per_100g=220,
+                kcal_estimated=True,
+            )
+        ],
+    )
+
+    reply = format_reply(calculate_meal(analysis), 110)
+
+    assert reply == (
+        "Яблучні оладки ≈110 кк = 50 г × ≈220 кк/100 г\n=== 110 кк"
     )
 
 
@@ -352,21 +367,21 @@ def test_composite_reply_stays_compact() -> None:
             ),
         ],
     )
-    reply = format_reply(calculate_meal(analysis), 110, "яблуко, сир 50 гр")
+    reply = format_reply(calculate_meal(analysis), 110)
     assert reply == (
-        "<b>110 кк</b>\nяблуко, сир 50 г ≈150 г ≈#73\nРозрахунок:\n"
-        "• яблуко: ≈100 г × ≈50 кк/100 г = ≈50 кк\n"
-        "• сир: 50 г × 120 кк/100 г = 60 кк\n"
-        "≈ — значення оцінено ботом\n=== 110 кк"
+        "Яблуко ≈50 кк = ≈100 г × ≈50 кк/100 г\n"
+        "Сир 60 кк = 50 г × 120 кк/100 г\n"
+        "=== 110 кк"
     )
 
 
-def test_reply_removes_existing_density_and_escapes_html() -> None:
-    meal = calculate_meal(food_analysis())
-    reply = format_reply(meal, 60, "сир <міцний> 50 гр 120 ккал/100г")
+def test_reply_escapes_html_in_item_name() -> None:
+    analysis = food_analysis()
+    analysis.items[0].name = "сир <міцний>"
+    meal = calculate_meal(analysis)
+    reply = format_reply(meal, 60)
     assert reply == (
-        "<b>60 кк</b>\nсир &lt;міцний&gt; 50 г #120\nРозрахунок:\n"
-        "• сир: 50 г × 120 кк/100 г = 60 кк\n=== 60 кк"
+        "Сир &lt;міцний&gt; 60 кк = 50 г × 120 кк/100 г\n=== 60 кк"
     )
 
 
@@ -787,6 +802,20 @@ def test_start_and_help_share_help_text_for_active_user() -> None:
     ]
 
 
+def test_help_text_is_loaded_from_editable_files(monkeypatch, tmp_path) -> None:
+    help_file = tmp_path / "help.txt"
+    admin_help_file = tmp_path / "admin_help.txt"
+    help_file.write_text("Перша довідка\n", encoding="utf-8")
+    admin_help_file.write_text("Команди адміністратора\n", encoding="utf-8")
+    monkeypatch.setattr(bot_module, "HELP_TEXT_FILE", help_file)
+    monkeypatch.setattr(bot_module, "ADMIN_HELP_TEXT_FILE", admin_help_file)
+
+    assert load_help_text(admin=True) == "Перша довідка\n\nКоманди адміністратора"
+
+    help_file.write_text("Оновлена довідка\n", encoding="utf-8")
+    assert load_help_text() == "Оновлена довідка"
+
+
 def test_unknown_and_blocked_users_never_get_a_service() -> None:
     manager = FakeManager({124: user_record(124, status="blocked")})
     handlers = TelegramHandlers(999, manager)
@@ -852,7 +881,7 @@ def test_start_activates_invite_and_repeat_start_does_not_reactivate() -> None:
     asyncio.run(handlers.start(update, context))
 
     assert manager.activation == ("token", 123, "user123")
-    assert message.replies == [HELP_TEXT, HELP_TEXT]
+    assert message.replies == [load_help_text(), load_help_text()]
 
 
 def test_start_without_invite_and_blocked_start_show_access_messages() -> None:
@@ -892,7 +921,7 @@ def test_admin_help_and_user_list_are_available_without_personal_account() -> No
     asyncio.run(handlers.users(update, SimpleNamespace()))
 
     assert message.replies == [
-        ADMIN_HELP_TEXT,
+        load_help_text(admin=True),
         "Користувачі (1):\n• User — активний — ID 123 (@user)",
     ]
 

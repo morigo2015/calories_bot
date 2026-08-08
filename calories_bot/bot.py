@@ -44,28 +44,8 @@ from .users import (
 
 LOGGER = logging.getLogger(__name__)
 
-HELP_TEXT = (
-    "Опишіть те, що ви зʼїли, або надішліть одне фото страви. Приклади:\n"
-    "• сир 50\n"
-    "• сир 50г 120#\n"
-    "• #120 сир 50 г\n"
-    "• 2 яйця, хліб 50\n"
-    "• фото з підписом 200 г\n\n"
-    "#120, 120# і «120 ккал на 100 грам» означають "
-    "120 кк/100 г. Числа можна надиктовувати українською або "
-    "російською, наприклад «сто двадцять грам». "
-    "Використовуйте лише цілі числа.\n\n"
-    "/day — показати всі прийоми їжі за сьогодні."
-)
-ADMIN_HELP_TEXT = (
-    f"{HELP_TEXT}\n\n"
-    "Адміністрування:\n"
-    "/invite Імʼя — додати користувача та отримати invite-посилання\n"
-    "/users — показати перелік, ID і статуси користувачів\n"
-    "/block ID — тимчасово заблокувати\n"
-    "/unblock ID — відновити доступ\n"
-    "/delete ID — повністю видалити користувача після підтвердження"
-)
+HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
+ADMIN_HELP_TEXT_FILE = Path(__file__).with_name("admin_help.txt")
 NOT_FOOD_TEXT = "Не вдалося розпізнати страву. Уточніть, що саме ви зʼїли."
 FORMAT_ERROR_TEXT = (
     "Некоректний формат. Використовуйте цілі числа, наприклад: "
@@ -90,10 +70,6 @@ ACCESS_ERROR_TEXT = "Не вдалося перевірити доступ. Сп
 ACTIVATION_ERROR_TEXT = "Не вдалося активувати доступ. Спробуйте ще раз."
 ADMIN_ERROR_TEXT = "Не вдалося виконати команду. Спробуйте ще раз."
 
-_DISPLAY_KCAL = re.compile(r"(?<!\w)\d+ ккал/100г(?!\w)")
-_DISPLAY_WEIGHT = re.compile(r"(?<!\w)(\d+) гр(?!\w)")
-
-
 class NotFoodError(ValueError):
     """Raised when the message does not describe consumed food."""
 
@@ -105,20 +81,12 @@ class MealReply:
     accounting_day: date
 
 
-def _compact_description(meal: MealResult, normalized_request: str) -> str:
-    description = _DISPLAY_KCAL.sub("", normalized_request)
-    description = _DISPLAY_WEIGHT.sub(r"\1 г", description)
-    description = re.sub(r"[ \t]+", " ", description)
-    description = re.sub(r"\s+([,;:.!?])", r"\1", description).strip()
-    description = description.strip(" ,;") or meal.meal_name
-
-    parts = [description]
-    if any(item.weight_estimated for item in meal.items):
-        parts.append(f"≈{round_whole(meal.total_weight_g)} г")
-    density_estimated = any(item.kcal_estimated for item in meal.items)
-    density_prefix = "≈" if density_estimated else ""
-    parts.append(f"{density_prefix}#{round_whole(meal.kcal_per_100g)}")
-    return html.escape(" ".join(parts))
+def load_help_text(*, admin: bool = False) -> str:
+    text = HELP_TEXT_FILE.read_text(encoding="utf-8").strip()
+    if admin:
+        admin_text = ADMIN_HELP_TEXT_FILE.read_text(encoding="utf-8").strip()
+        return f"{text}\n\n{admin_text}"
+    return text
 
 
 def _format_item_calculation(item: CalculatedFoodItem) -> str:
@@ -131,24 +99,20 @@ def _format_item_calculation(item: CalculatedFoodItem) -> str:
     weight_prefix = "≈" if weight_estimated else ""
     kcal_prefix = "≈" if kcal_estimated else ""
     result_prefix = "≈" if result_estimated else ""
-    name = html.escape(item.name)
+    display_name = item.name[:1].upper() + item.name[1:]
+    name = html.escape(display_name)
     return (
-        f"• {name}: {weight_prefix}{round_whole(weight_g)} г × "
-        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г = "
-        f"{result_prefix}{round_whole(calories)} кк"
+        f"{name} {result_prefix}{round_whole(calories)} кк = "
+        f"{weight_prefix}{round_whole(weight_g)} г × "
+        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
     )
 
 
-def format_reply(meal: MealResult, today_total: int, normalized_request: str) -> str:
+def format_reply(meal: MealResult, today_total: int) -> str:
     lines = [
-        f"<b>{round_whole(meal.meal_kcal)} кк</b>",
-        _compact_description(meal, normalized_request),
-        "Розрахунок:",
         *(_format_item_calculation(item) for item in meal.items),
+        f"=== {today_total} кк",
     ]
-    if meal.estimated:
-        lines.append("≈ — значення оцінено ботом")
-    lines.append(f"=== {today_total} кк")
     return "\n".join(lines)
 
 
@@ -246,15 +210,8 @@ class CaloriesService:
         with self._store_lock:
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
-                display_request = (
-                    state.existing.normalized_request or state.existing.meal.meal_name
-                )
                 return MealReply(
-                    text=format_reply(
-                        state.existing.meal,
-                        state.today_total,
-                        display_request,
-                    ),
+                    text=format_reply(state.existing.meal, state.today_total),
                     telegram_message_id=telegram_message_id,
                     accounting_day=day,
                 )
@@ -268,15 +225,8 @@ class CaloriesService:
             # model was working, so the earlier daily total is no longer valid.
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
-                display_request = (
-                    state.existing.normalized_request or state.existing.meal.meal_name
-                )
                 return MealReply(
-                    text=format_reply(
-                        state.existing.meal,
-                        state.today_total,
-                        display_request,
-                    ),
+                    text=format_reply(state.existing.meal, state.today_total),
                     telegram_message_id=telegram_message_id,
                     accounting_day=day,
                 )
@@ -296,9 +246,8 @@ class CaloriesService:
                 result.metadata,
             )
             today_total = state.today_total + round_whole(stored.meal.meal_kcal)
-            display_request = stored.normalized_request or stored.meal.meal_name
             return MealReply(
-                text=format_reply(stored.meal, today_total, display_request),
+                text=format_reply(stored.meal, today_total),
                 telegram_message_id=telegram_message_id,
                 accounting_day=day,
             )
@@ -530,9 +479,9 @@ class TelegramHandlers:
             return
         if existing is not None:
             text = (
-                ADMIN_HELP_TEXT
+                load_help_text(admin=True)
                 if existing.status == "active" and self._is_admin(update)
-                else HELP_TEXT if existing.status == "active" else BLOCKED_TEXT
+                else load_help_text() if existing.status == "active" else BLOCKED_TEXT
             )
             await message.reply_text(text, do_quote=False)
             return
@@ -554,7 +503,7 @@ class TelegramHandlers:
             LOGGER.exception("Could not activate invite")
             await message.reply_text(ACTIVATION_ERROR_TEXT, do_quote=False)
             return
-        await message.reply_text(HELP_TEXT, do_quote=False)
+        await message.reply_text(load_help_text(), do_quote=False)
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -562,10 +511,10 @@ class TelegramHandlers:
         if message is None:
             return
         if self._is_admin(update):
-            await message.reply_text(ADMIN_HELP_TEXT, do_quote=False)
+            await message.reply_text(load_help_text(admin=True), do_quote=False)
             return
         if await self._active_service(update) is not None:
-            await message.reply_text(HELP_TEXT, do_quote=False)
+            await message.reply_text(load_help_text(), do_quote=False)
 
     async def day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
