@@ -850,8 +850,7 @@ def main() -> int:
     app = DashboardApp(args.results_dir.resolve(), args.dataset.resolve())
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     host, port = server.server_address[:2]
-    display_host = "127.0.0.1" if host == "0.0.0.0" else host
-    print(f"Eval dashboard: http://{display_host}:{port}/", flush=True)
+    print(f"Eval dashboard: http://{host}:{port}/", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

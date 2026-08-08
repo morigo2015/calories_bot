@@ -16,9 +16,17 @@ cd "$PROJECT_DIR"
 if [[ $# -eq 0 ]]; then
     exit 0
 fi
-if [[ $1 != "--llm" ]]; then
-    echo "Usage: bash scripts/run_tests.sh [--llm --confirm [eval options]]" >&2
-    exit 2
-fi
-shift
-"$PYTHON_BIN" -m scripts.eval_llm "$@"
+case $1 in
+    --llm)
+        shift
+        "$PYTHON_BIN" -m scripts.eval_llm "$@"
+        ;;
+    --e2e)
+        shift
+        "$PYTHON_BIN" -m scripts.eval_telegram_e2e "$@"
+        ;;
+    *)
+        echo "Usage: bash scripts/run_tests.sh [--llm|--e2e] --confirm [options]" >&2
+        exit 2
+        ;;
+esac
