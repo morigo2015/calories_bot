@@ -138,7 +138,21 @@ def _format_item_calculation(item: CalculatedFoodItem) -> str:
     name = html.escape(display_name)
     if item.portion_display:
         portion = html.escape(item.portion_display)
-        return f"{name} {result_prefix}{round_whole(calories)} кк = {portion}"
+        count_match = re.fullmatch(r"(?P<count>\d+)\s*шт\.?", item.portion_display)
+        if count_match:
+            count = int(count_match.group("count"))
+            if count > 0:
+                unit_weight = weight_g / count
+                return (
+                    f"{name} {result_prefix}{round_whole(calories)} кк = "
+                    f"{portion} × {weight_prefix}{round_whole(unit_weight)} г/шт. × "
+                    f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
+                )
+        return (
+            f"{name} {result_prefix}{round_whole(calories)} кк = "
+            f"{portion} ({weight_prefix}{round_whole(weight_g)} г) × "
+            f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
+        )
     return (
         f"{name} {result_prefix}{round_whole(calories)} кк = "
         f"{weight_prefix}{round_whole(weight_g)} г × "
@@ -377,7 +391,10 @@ class CaloriesService:
 
             photo_path: str | None = None
             if image_bytes is not None:
-                photo_file = self._photo_storage_dir / f"{telegram_message_id}.jpg"
+                photo_file = (
+                    self._photo_storage_dir
+                    / f"{day.isoformat()}-{telegram_message_id}.jpg"
+                )
                 photo_file.write_bytes(image_bytes)
                 photo_path = str(photo_file)
             stored = self._store.append_meal(
@@ -405,7 +422,10 @@ class CaloriesService:
             self._delete_photo(deletion.photo_path)
         elif not deletion.deleted:
             self._delete_photo(
-                str(self._photo_storage_dir / f"{telegram_message_id}.jpg")
+                str(
+                    self._photo_storage_dir
+                    / f"{fallback_day.isoformat()}-{telegram_message_id}.jpg"
+                )
             )
         return deletion
 

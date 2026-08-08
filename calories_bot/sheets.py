@@ -347,6 +347,17 @@ class GoogleSheetsStore:
             raise ValueError("Google Sheets row has no day")
         return _date_from_sheet_serial(row[DAY_COLUMN])
 
+    def _matches_message(
+        self, row: list[object], telegram_message_id: int, day: date
+    ) -> bool:
+        try:
+            return (
+                self._message_id(row) == telegram_message_id
+                and self._row_day(row) == day
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _day_total(self, rows: list[list[object]], day: date) -> float:
         total = 0.0
         for row in rows:
@@ -360,10 +371,13 @@ class GoogleSheetsStore:
         return total
 
     def _find_by_message_id(
-        self, rows: list[list[object]], telegram_message_id: int
+        self,
+        rows: list[list[object]],
+        telegram_message_id: int,
+        day: date,
     ) -> StoredMeal | None:
         for row in rows:
-            if self._message_id(row) == telegram_message_id:
+            if self._matches_message(row, telegram_message_id, day):
                 try:
                     return _meal_from_row(row)
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -375,7 +389,7 @@ class GoogleSheetsStore:
     def get_state(self, day: date, telegram_message_id: int) -> SheetState:
         try:
             rows = self._data_rows()
-            existing = self._find_by_message_id(rows, telegram_message_id)
+            existing = self._find_by_message_id(rows, telegram_message_id, day)
             return SheetState(today_total=self._day_total(rows, day), existing=existing)
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
@@ -433,7 +447,7 @@ class GoogleSheetsStore:
 
         target_index: int | None = None
         for index, row in enumerate(rows):
-            if self._message_id(row) == telegram_message_id:
+            if self._matches_message(row, telegram_message_id, fallback_day):
                 target_index = index
                 break
 
@@ -466,7 +480,8 @@ class GoogleSheetsStore:
                     "Could not verify whether Google Sheets deleted the row"
                 ) from verify_error
             if any(
-                self._message_id(row) == telegram_message_id for row in verified_rows
+                self._matches_message(row, telegram_message_id, fallback_day)
+                for row in verified_rows
             ):
                 raise SheetsWriteError(
                     "Google Sheets did not delete the row"
@@ -542,7 +557,9 @@ class GoogleSheetsStore:
         except Exception as append_error:
             try:
                 existing = self._find_by_message_id(
-                    self._data_rows(), telegram_message_id
+                    self._data_rows(),
+                    telegram_message_id,
+                    accounting_date(timestamp, self._timezone, self._day_start_time),
                 )
             except Exception as verify_error:
                 raise SheetsWriteUncertainError(

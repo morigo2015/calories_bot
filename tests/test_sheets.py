@@ -279,6 +279,31 @@ def test_duplicate_restores_photo_path_and_metadata() -> None:
     assert state.existing.metadata.input_tokens == 100
 
 
+def test_reused_message_id_from_previous_day_is_not_a_duplicate() -> None:
+    rows = [
+        HEADERS,
+        stored_row(datetime(2026, 8, 1, 12, tzinfo=TZ), 42, 100),
+        stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 43, 200),
+    ]
+
+    state = build_store(rows).get_state(datetime(2026, 8, 2).date(), 42)
+
+    assert state.existing is None
+    assert state.today_total == 200
+
+
+def test_same_message_id_on_same_day_is_a_duplicate() -> None:
+    rows = [
+        HEADERS,
+        stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 42, 100),
+    ]
+
+    state = build_store(rows).get_state(datetime(2026, 8, 2).date(), 42)
+
+    assert state.existing is not None
+    assert state.existing.meal.meal_kcal == 100
+
+
 def test_malformed_rows_are_skipped_in_total() -> None:
     rows = [
         HEADERS,
@@ -430,13 +455,32 @@ def test_delete_removes_row_and_recalculates_original_day() -> None:
     ]
     store = build_store(rows)
 
-    deletion = store.delete_meal(42, datetime(2026, 8, 5).date())
+    deletion = store.delete_meal(42, datetime(2026, 8, 2).date())
 
     assert deletion.deleted is True
     assert deletion.accounting_day.isoformat() == "2026-08-02"
     assert deletion.day_total == 100
     assert deletion.photo_path == "/photos/42.jpg"
     assert [store._message_id(row) for row in store._worksheet.rows[1:]] == [41, 43]
+
+
+def test_delete_uses_day_when_message_id_was_reused() -> None:
+    rows = [
+        HEADERS,
+        stored_row(datetime(2026, 8, 1, 12, tzinfo=TZ), 42, 100),
+        stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 42, 200),
+    ]
+    store = build_store(rows)
+
+    deletion = store.delete_meal(42, datetime(2026, 8, 2).date())
+
+    assert deletion.deleted is True
+    assert deletion.accounting_day == datetime(2026, 8, 2).date()
+    assert len(store._worksheet.rows) == 2
+    assert (
+        _date_from_sheet_serial(store._worksheet.rows[1][1])
+        == datetime(2026, 8, 1).date()
+    )
 
 
 def test_repeated_delete_is_idempotent_and_uses_fallback_day() -> None:
@@ -532,6 +576,27 @@ def test_exact_append_failure_is_distinct() -> None:
             44,
             "сир",
             "сир",
+            None,
+            make_meal(),
+            METADATA,
+        )
+
+
+def test_failed_append_does_not_return_old_row_with_reused_message_id() -> None:
+    old = stored_row(datetime(2026, 8, 1, 12, tzinfo=TZ), 44, 100)
+    store = build_store([HEADERS, old])
+
+    def fail_before_append(row, value_input_option="RAW"):
+        raise TimeoutError("not accepted")
+
+    store._worksheet.append_row = fail_before_append
+
+    with pytest.raises(SheetsWriteError):
+        store.append_meal(
+            datetime(2026, 8, 2, 12, tzinfo=TZ),
+            44,
+            "каша 500 г 150#",
+            "каша 500 гр 150 ккал/100г",
             None,
             make_meal(),
             METADATA,

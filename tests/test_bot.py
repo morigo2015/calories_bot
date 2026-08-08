@@ -296,8 +296,9 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     assert reply.text == "Сир 60 кк = 50 г × 120 кк/100 г\n\nЗа день: 360 кк"
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
-    assert photo_path == str((tmp_path / "photos" / "42.jpg").resolve())
-    assert (tmp_path / "photos" / "42.jpg").read_bytes() == b"jpeg-data"
+    expected_photo = tmp_path / "photos" / "2026-08-02-42.jpg"
+    assert photo_path == str(expected_photo.resolve())
+    assert expected_photo.read_bytes() == b"jpeg-data"
 
 
 def test_service_accepts_photo_without_caption(tmp_path) -> None:
@@ -399,7 +400,55 @@ def test_reply_uses_portion_display_and_daily_goal() -> None:
     reply = format_reply(calculate_meal(analysis), 860, 2000)
 
     assert reply == (
-        "Яйця ≈140 кк = 2 шт.\n\nЗа день: 860 із 2000 кк · залишилось 1140 кк"
+        "Яйця ≈140 кк = 2 шт. × ≈50 г/шт. × ≈140 кк/100 г\n\n"
+        "За день: 860 із 2000 кк · залишилось 1140 кк"
+    )
+
+
+def test_reply_explains_estimated_weight_per_piece() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="сирники",
+        items=[
+            FoodItem(
+                name="сирники",
+                weight_g=250,
+                weight_estimated=True,
+                kcal_per_100g=25,
+                kcal_estimated=False,
+                portion_display="5 шт.",
+            )
+        ],
+    )
+
+    reply = format_reply(calculate_meal(analysis), 625, 1500)
+
+    assert reply == (
+        "Сирники ≈63 кк = 5 шт. × ≈50 г/шт. × 25 кк/100 г\n\n"
+        "За день: 625 із 1500 кк · залишилось 875 кк"
+    )
+
+
+def test_reply_explains_non_count_portion_weight() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="борщ",
+        items=[
+            FoodItem(
+                name="борщ",
+                weight_g=300,
+                weight_estimated=True,
+                kcal_per_100g=40,
+                kcal_estimated=True,
+                portion_display="1 тарілка",
+            )
+        ],
+    )
+
+    reply = format_reply(calculate_meal(analysis), 120)
+
+    assert reply == (
+        "Борщ ≈120 кк = 1 тарілка (≈300 г) × ≈40 кк/100 г\n\nЗа день: 120 кк"
     )
 
 

@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 git add \
     AGENTS.md VPS_HELP.txt .env.example .gitignore \
     pyproject.toml requirements.txt requirements-dev.txt run_update.sh \
-    calories_bot tests docs deploy scripts
+    calories_bot tests docs deploy scripts evals
 
 if git diff --cached --quiet; then
     echo "No changes to commit."
