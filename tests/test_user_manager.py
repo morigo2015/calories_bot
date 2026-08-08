@@ -15,6 +15,7 @@ def record(
     token="token",
     sheet="",
     cutoff=time(1),
+    goal=None,
 ):
     return UserRecord(
         row_number=2,
@@ -25,6 +26,7 @@ def record(
         invite_token=token,
         spreadsheet_id=sheet,
         day_start=cutoff,
+        daily_kcal_goal=goal,
     )
 
 
@@ -84,6 +86,18 @@ class Registry:
             token="",
             sheet=self.current.spreadsheet_id,
             cutoff=self.current.day_start,
+            goal=self.current.daily_kcal_goal,
+        )
+        return self.current
+
+    def set_daily_kcal_goal(self, user_id, goal):
+        self.current = record(
+            user_id=user_id,
+            status=self.current.status,
+            token="",
+            sheet=self.current.spreadsheet_id,
+            cutoff=self.current.day_start,
+            goal=goal,
         )
         return self.current
 
@@ -187,6 +201,17 @@ def test_set_status_delegates_to_registry(tmp_path) -> None:
     blocked = users.set_status(123, "blocked")
 
     assert blocked.status == "blocked"
+
+
+def test_goal_update_refreshes_cached_service(tmp_path) -> None:
+    registry = Registry(record(user_id=123, status="active", token="", sheet="sheet"))
+    users = manager(tmp_path, registry, Workspace())
+    service = users.service_for(registry.current)
+
+    updated = users.set_daily_kcal_goal(123, 2000)
+
+    assert updated.daily_kcal_goal == 2000
+    assert service._daily_kcal_goal == 2000
 
 
 def test_delete_failure_keeps_user_blocked_and_registry_row(tmp_path) -> None:

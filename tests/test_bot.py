@@ -24,7 +24,9 @@ from calories_bot.bot import (
     format_day_reply,
     format_reply,
     format_users_reply,
+    format_week_reply,
     load_help_text,
+    load_start_text,
 )
 from calories_bot.models import (
     FoodAnalysis,
@@ -111,6 +113,10 @@ class FakeStore:
         self.day = day
         return self.day_meals
 
+    def get_daily_totals(self, start_day, end_day):
+        self.range = (start_day, end_day)
+        return getattr(self, "daily_totals", {})
+
     def delete_meal(self, telegram_message_id, fallback_day):
         self.deleted = (telegram_message_id, fallback_day)
         return self.deletion
@@ -186,9 +192,7 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
 
-    assert reply.text == (
-        "Сир 60 кк = 50 г × 120 кк/100 г\n=== 360 кк"
-    )
+    assert reply.text == "Сир 60 кк = 50 г × 120 кк/100 г\n\nЗа день: 360 кк"
     assert reply.accounting_day == date(2026, 8, 2)
     assert store.appended[0][3] == "сир 50 гр"
     assert analyzer.normalized.text == "сир 50 гр"
@@ -238,7 +242,7 @@ def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> Non
     worker.join(timeout=1)
 
     assert not worker.is_alive()
-    assert result[0].text.endswith("=== 334 кк")
+    assert result[0].text.endswith("За день: 334 кк")
 
 
 def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
@@ -255,21 +259,19 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
     service = build_service(analyzer, store, tmp_path)
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
-    assert reply.text == (
-        "Сир 60 кк = 50 г × 120 кк/100 г\n=== 360 кк"
-    )
+    assert reply.text == "Сир 60 кк = 50 г × 120 кк/100 г\n\nЗа день: 360 кк"
     assert analyzer.calls == 0
     assert store.appended == []
 
 
-def test_invalid_format_does_not_call_store_or_analyzer(tmp_path) -> None:
+def test_invalid_format_checks_duplicate_but_does_not_call_analyzer(tmp_path) -> None:
     analyzer = FakeAnalyzer(food_analysis())
     store = FakeStore(SheetState(today_total=0, existing=None))
     service = build_service(analyzer, store, tmp_path)
     with pytest.raises(ValueError):
         service.process_message("сир 50.5", 1, datetime(2026, 8, 2, 12, tzinfo=TZ))
     assert analyzer.calls == 0
-    assert store.calls == 0
+    assert store.calls == 1
 
 
 def test_non_food_is_not_appended(tmp_path) -> None:
@@ -291,9 +293,7 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     )
 
     photo_path = store.appended[0][4]
-    assert reply.text == (
-        "Сир 60 кк = 50 г × 120 кк/100 г\n=== 360 кк"
-    )
+    assert reply.text == "Сир 60 кк = 50 г × 120 кк/100 г\n\nЗа день: 360 кк"
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
     assert photo_path == str((tmp_path / "photos" / "42.jpg").resolve())
@@ -309,9 +309,7 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
         "", 43, datetime(2026, 8, 2, 12, tzinfo=TZ), b"jpeg-data"
     )
 
-    assert reply.text == (
-        "Сир ≈60 кк = ≈50 г × ≈120 кк/100 г\n=== 60 кк"
-    )
+    assert reply.text == ("Сир ≈60 кк = ≈50 г × ≈120 кк/100 г\n\nЗа день: 60 кк")
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
 
@@ -319,9 +317,7 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
 def test_estimate_is_marked_in_reply() -> None:
     meal = calculate_meal(food_analysis(estimated=True))
     reply = format_reply(meal, 60)
-    assert reply == (
-        "Сир ≈60 кк = ≈50 г × ≈120 кк/100 г\n=== 60 кк"
-    )
+    assert reply == "Сир ≈60 кк = ≈50 г × ≈120 кк/100 г\n\nЗа день: 60 кк"
 
 
 def test_reply_uses_compact_requested_format() -> None:
@@ -341,9 +337,7 @@ def test_reply_uses_compact_requested_format() -> None:
 
     reply = format_reply(calculate_meal(analysis), 110)
 
-    assert reply == (
-        "Яблучні оладки ≈110 кк = 50 г × ≈220 кк/100 г\n=== 110 кк"
-    )
+    assert reply == ("Яблучні оладки ≈110 кк = 50 г × ≈220 кк/100 г\n\nЗа день: 110 кк")
 
 
 def test_composite_reply_stays_compact() -> None:
@@ -369,9 +363,10 @@ def test_composite_reply_stays_compact() -> None:
     )
     reply = format_reply(calculate_meal(analysis), 110)
     assert reply == (
-        "Яблуко ≈50 кк = ≈100 г × ≈50 кк/100 г\n"
-        "Сир 60 кк = 50 г × 120 кк/100 г\n"
-        "=== 110 кк"
+        "Перекус ≈110 кк\n"
+        "• Яблуко ≈50 кк = ≈100 г × ≈50 кк/100 г\n"
+        "• Сир 60 кк = 50 г × 120 кк/100 г\n\n"
+        "За день: 110 кк"
     )
 
 
@@ -380,9 +375,73 @@ def test_reply_escapes_html_in_item_name() -> None:
     analysis.items[0].name = "сир <міцний>"
     meal = calculate_meal(analysis)
     reply = format_reply(meal, 60)
-    assert reply == (
-        "Сир &lt;міцний&gt; 60 кк = 50 г × 120 кк/100 г\n=== 60 кк"
+    assert reply == ("Сир &lt;міцний&gt; 60 кк = 50 г × 120 кк/100 г\n\nЗа день: 60 кк")
+
+
+def test_reply_uses_portion_display_and_daily_goal() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="яйця",
+        items=[
+            FoodItem(
+                name="яйця",
+                weight_g=100,
+                weight_estimated=True,
+                weight_origin="deterministic_reference",
+                kcal_per_100g=140,
+                kcal_estimated=True,
+                kcal_origin="model_estimate",
+                portion_display="2 шт.",
+            )
+        ],
     )
+
+    reply = format_reply(calculate_meal(analysis), 860, 2000)
+
+    assert reply == (
+        "Яйця ≈140 кк = 2 шт.\n\nЗа день: 860 із 2000 кк · залишилось 1140 кк"
+    )
+
+
+def test_daily_goal_does_not_show_negative_remainder() -> None:
+    reply = format_reply(calculate_meal(food_analysis()), 2130, 2000)
+    assert reply.endswith("За день: 2130 із 2000 кк")
+    assert "залишилось" not in reply
+
+
+def test_week_reply_includes_all_days_and_excludes_empty_days_from_stats() -> None:
+    reply = format_week_reply(
+        date(2026, 8, 8),
+        {
+            date(2026, 8, 2): 1640.4,
+            date(2026, 8, 3): 1799.6,
+            date(2026, 8, 5): 1870,
+            date(2026, 8, 6): 1730,
+            date(2026, 8, 8): 2310,
+        },
+        2000,
+    )
+
+    assert reply == (
+        "Останні 7 днів\n\n"
+        "• 02.08: 1640 кк\n"
+        "• 03.08: 1800 кк\n"
+        "• 04.08: немає записів\n"
+        "• 05.08: 1870 кк\n"
+        "• 06.08: 1730 кк\n"
+        "• 07.08: немає записів\n"
+        "• 08.08: 2310 кк\n\n"
+        "Заповнено: 5 із 7 днів\n"
+        "У середньому: 1870 кк/день\n"
+        "Денна ціль: 2000 кк\n"
+        "У межах цілі: 4 із 5 заповнених днів\n"
+        "Найменше: 1640 кк\n"
+        "Найбільше: 2310 кк"
+    )
+
+
+def test_week_reply_handles_no_records() -> None:
+    assert format_week_reply(date(2026, 8, 8), {}) == "За останні 7 днів записів немає."
 
 
 def test_user_list_contains_status_ids_and_pending_invites() -> None:
@@ -447,7 +506,14 @@ def test_google_write_failure_is_propagated_without_changing_state(tmp_path) -> 
     assert store.state.today_total == 300
 
 
-def user_record(user_id=123, *, status="active", sheet="sheet-123", cutoff=time(1)):
+def user_record(
+    user_id=123,
+    *,
+    status="active",
+    sheet="sheet-123",
+    cutoff=time(1),
+    goal=None,
+):
     from calories_bot.users import UserRecord
 
     return UserRecord(
@@ -459,6 +525,7 @@ def user_record(user_id=123, *, status="active", sheet="sheet-123", cutoff=time(
         invite_token="",
         spreadsheet_id=sheet,
         day_start=cutoff,
+        daily_kcal_goal=goal,
     )
 
 
@@ -500,6 +567,21 @@ class FakeManager:
             cutoff=current.day_start,
         )
         self.users[user_id] = updated
+        return updated
+
+    def set_daily_kcal_goal(self, user_id, goal):
+        current = self.users[user_id]
+        updated = user_record(
+            user_id,
+            status=current.status,
+            sheet=current.spreadsheet_id,
+            cutoff=current.day_start,
+            goal=goal,
+        )
+        self.users[user_id] = updated
+        service = self.services.get(user_id)
+        if service is not None and hasattr(service, "set_daily_kcal_goal"):
+            service.set_daily_kcal_goal(goal)
         return updated
 
     def delete_user(self, user_id):
@@ -563,6 +645,9 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
         def __init__(self):
             self.args = None
 
+        def get_existing_reply(self, *args):
+            return None
+
         def process_message(self, *args):
             self.args = args
             return MealReply("reply", 1, date(2026, 8, 2))
@@ -573,6 +658,29 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
     asyncio.run(handlers.text(update, None))
     assert service.args[2] == message.date
     assert message.replies == ["reply"]
+    assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
+    assert message.reply_kwargs[0]["do_quote"] is False
+
+
+def test_duplicate_photo_is_checked_before_download() -> None:
+    class Photo:
+        async def get_file(self):
+            raise AssertionError("duplicate photo must not be downloaded")
+
+    class Service:
+        def get_existing_reply(self, message_id, timestamp):
+            del timestamp
+            return MealReply("existing", message_id, date(2026, 8, 2))
+
+    service = Service()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+    message.photo = [Photo()]
+
+    asyncio.run(handlers.photo(update, None))
+
+    assert message.replies == ["existing"]
+    assert message.reply_kwargs[0]["reply_markup"] is not None
     assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
     assert message.reply_kwargs[0]["do_quote"] is False
     button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
@@ -614,6 +722,66 @@ def test_day_handler_maps_read_error_to_user_message() -> None:
     asyncio.run(handlers.day(update, None))
 
     assert message.replies == [READ_ERROR_TEXT]
+
+
+def test_week_handler_uses_shifted_accounting_day(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.daily_totals = {date(2026, 8, 1): 500}
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+    message.date = datetime(2026, 8, 2, 0, 30, tzinfo=TZ)
+
+    asyncio.run(handlers.week(update, SimpleNamespace(user_data={})))
+
+    assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
+    assert message.replies[0].startswith("Останні 7 днів")
+
+
+def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
+    class GoalService:
+        def __init__(self):
+            self.food_calls = 0
+
+        def process_message(self, *args):
+            self.food_calls += 1
+
+    service = GoalService()
+    manager = FakeManager({123: user_record()}, {123: service})
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update()
+    context = SimpleNamespace(args=[], user_data={})
+
+    asyncio.run(handlers.goal(update, context))
+    assert context.user_data == {"awaiting_daily_kcal_goal": True}
+    message.text = "2000"
+    asyncio.run(handlers.text(update, context))
+
+    assert manager.users[123].daily_kcal_goal == 2000
+    assert service.food_calls == 0
+    assert context.user_data == {}
+    assert message.replies[-1] == "Денну ціль встановлено: 2000 кк ✓"
+
+
+def test_goal_with_existing_value_can_be_disabled() -> None:
+    service = SimpleNamespace(set_daily_kcal_goal=lambda goal: None)
+    manager = FakeManager(
+        {123: user_record(goal=2000)},
+        {123: service},
+    )
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update()
+    context = SimpleNamespace(args=[], user_data={})
+
+    asyncio.run(handlers.goal(update, context))
+    button = message.reply_kwargs[-1]["reply_markup"].inline_keyboard[0][0]
+    assert button.callback_data == "goal-disable:123"
+
+    callback_update, query = make_callback_update("goal-disable:123")
+    asyncio.run(handlers.goal_disable_callback(callback_update, context))
+
+    assert manager.users[123].daily_kcal_goal is None
+    assert query.edits == [("Денну ціль вимкнено ✓", {"reply_markup": None})]
 
 
 def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
@@ -726,6 +894,9 @@ def test_photo_handler_downloads_largest_photo_and_passes_caption() -> None:
         def __init__(self):
             self.args = None
 
+        def get_existing_reply(self, *args):
+            return None
+
         def process_message(self, *args):
             self.args = args
             return MealReply("reply", 1, date(2026, 8, 2))
@@ -788,14 +959,14 @@ def test_handler_maps_errors_to_user_messages(error, expected) -> None:
     assert message.replies == [expected]
 
 
-def test_start_and_help_share_help_text_for_active_user() -> None:
+def test_start_and_help_use_separate_content_for_active_user() -> None:
     service = SimpleNamespace()
     handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
     asyncio.run(handlers.start(update, SimpleNamespace(args=[])))
     asyncio.run(handlers.help(update, SimpleNamespace()))
     assert len(message.replies) == 2
-    assert message.replies[0] == message.replies[1]
+    assert message.replies == [load_start_text(), load_help_text()]
     assert message.reply_kwargs == [
         {"do_quote": False},
         {"do_quote": False},
@@ -881,7 +1052,7 @@ def test_start_activates_invite_and_repeat_start_does_not_reactivate() -> None:
     asyncio.run(handlers.start(update, context))
 
     assert manager.activation == ("token", 123, "user123")
-    assert message.replies == [load_help_text(), load_help_text()]
+    assert message.replies == [load_start_text(), load_start_text()]
 
 
 def test_start_without_invite_and_blocked_start_show_access_messages() -> None:

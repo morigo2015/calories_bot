@@ -67,14 +67,19 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     handlers = SimpleNamespace(
         start=lambda: None,
         help=lambda: None,
+        tips=lambda: None,
         day=lambda: None,
+        week=lambda: None,
+        goal=lambda: None,
         delete=lambda: None,
         invite=lambda: None,
         users=lambda: None,
         block=lambda: None,
         unblock=lambda: None,
         delete_user_command=lambda: None,
+        cancel_goal_waiting=lambda: None,
         admin_delete_callback=lambda: None,
+        goal_disable_callback=lambda: None,
         text=lambda: None,
         photo=lambda: None,
     )
@@ -120,7 +125,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 12
+    assert len(app.handlers) == 17
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords == {"admin_user_id": 999}
@@ -144,8 +149,8 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         entities=[MessageEntity(MessageEntity.BOT_COMMAND, 0, 4)],
     )
     command.set_bot(SimpleNamespace(username="calorie_bot"))
-    assert app.handlers[2].check_update(Update(3, message=command))
-    assert not app.handlers[2].check_update(Update(4, edited_message=command))
+    assert app.handlers[3].check_update(Update(3, message=command))
+    assert not app.handlers[3].check_update(Update(4, edited_message=command))
 
 
 def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
@@ -162,12 +167,18 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     )
 
     assert [(command.command, command.description) for command in bot.calls[0][0]] == [
-        ("day", "показати прийоми їжі за сьогодні"),
-        ("help", "показати довідку"),
+        ("day", "прийоми їжі за сьогодні"),
+        ("week", "підсумок за 7 днів"),
+        ("goal", "встановити денну ціль"),
+        ("help", "як користуватися ботом"),
+        ("tips", "додаткові можливості"),
     ]
     assert [command.command for command in bot.calls[1][0]] == [
         "day",
+        "week",
+        "goal",
         "help",
+        "tips",
         "invite",
         "users",
         "block",

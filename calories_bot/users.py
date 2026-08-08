@@ -10,7 +10,7 @@ from typing import Protocol
 import gspread
 from gspread.utils import ValueInputOption, ValueRenderOption
 
-USER_HEADERS = [
+LEGACY_USER_HEADERS = [
     "telegram_user_id",
     "display_name",
     "telegram_username",
@@ -19,6 +19,7 @@ USER_HEADERS = [
     "spreadsheet_id",
     "day_start",
 ]
+USER_HEADERS = [*LEGACY_USER_HEADERS, "daily_kcal_goal"]
 
 USER_ID_COLUMN = 0
 DISPLAY_NAME_COLUMN = 1
@@ -27,6 +28,10 @@ STATUS_COLUMN = 3
 INVITE_TOKEN_COLUMN = 4
 SPREADSHEET_ID_COLUMN = 5
 DAY_START_COLUMN = 6
+DAILY_KCAL_GOAL_COLUMN = 7
+
+MIN_DAILY_KCAL_GOAL = 1
+MAX_DAILY_KCAL_GOAL = 20_000
 
 VALID_STATUSES = {"invited", "active", "blocked"}
 _DAY_START_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
@@ -54,6 +59,7 @@ class UserRecord:
     invite_token: str
     spreadsheet_id: str
     day_start: time
+    daily_kcal_goal: int | None = None
 
 
 class UserRegistry(Protocol):
@@ -78,6 +84,10 @@ class UserRegistry(Protocol):
     def complete_activation(self, invite: UserRecord) -> UserRecord: ...
 
     def set_status(self, telegram_user_id: int, status: str) -> UserRecord: ...
+
+    def set_daily_kcal_goal(
+        self, telegram_user_id: int, goal: int | None
+    ) -> UserRecord: ...
 
     def delete_user(self, telegram_user_id: int) -> None: ...
 
@@ -107,6 +117,18 @@ def parse_day_start(value: object) -> time:
     return time(hour=seconds // 3600, minute=(seconds % 3600) // 60)
 
 
+def parse_daily_kcal_goal(value: object) -> int | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    if not text.isascii() or not text.isdecimal():
+        raise UserRegistryError(f"Invalid daily_kcal_goal in user registry: {text!r}")
+    goal = int(text)
+    if not MIN_DAILY_KCAL_GOAL <= goal <= MAX_DAILY_KCAL_GOAL:
+        raise UserRegistryError(f"Invalid daily_kcal_goal in user registry: {text!r}")
+    return goal
+
+
 class GoogleUserRegistry:
     def __init__(
         self,
@@ -133,6 +155,20 @@ class GoogleUserRegistry:
                 USER_HEADERS, value_input_option=ValueInputOption.raw
             )
             return
+        if rows[0] == LEGACY_USER_HEADERS:
+            try:
+                self._worksheet.update(
+                    values=[["daily_kcal_goal"]],
+                    range_name="H1:H1",
+                    raw=True,
+                )
+            except Exception as exc:
+                raise UserRegistryError(
+                    "Could not migrate the user registry headers"
+                ) from exc
+            rows = self._worksheet.get_all_values(
+                value_render_option=ValueRenderOption.unformatted
+            )
         if rows[0] != USER_HEADERS:
             raise UserRegistryError(
                 "User registry headers are incompatible. Expected: "
@@ -174,6 +210,7 @@ class GoogleUserRegistry:
             invite_token=str(padded[INVITE_TOKEN_COLUMN]).strip(),
             spreadsheet_id=str(padded[SPREADSHEET_ID_COLUMN]).strip(),
             day_start=parse_day_start(padded[DAY_START_COLUMN]),
+            daily_kcal_goal=parse_daily_kcal_goal(padded[DAILY_KCAL_GOAL_COLUMN]),
         )
 
     def _records(self) -> list[UserRecord]:
@@ -227,6 +264,7 @@ class GoogleUserRegistry:
                 token,
                 "",
                 day_start.isoformat(timespec="minutes"),
+                "",
             ]
             try:
                 self._worksheet.append_row(row, value_input_option=ValueInputOption.raw)
@@ -241,7 +279,7 @@ class GoogleUserRegistry:
         try:
             self._worksheet.update(
                 values=[values],
-                range_name=f"A{row_number}:G{row_number}",
+                range_name=f"A{row_number}:H{row_number}",
                 raw=True,
             )
         except Exception as exc:
@@ -282,6 +320,7 @@ class GoogleUserRegistry:
                     current.invite_token,
                     spreadsheet_id,
                     current.day_start.isoformat(timespec="minutes"),
+                    current.daily_kcal_goal or "",
                 ],
             )
 
@@ -309,6 +348,7 @@ class GoogleUserRegistry:
                     "",
                     current.spreadsheet_id,
                     current.day_start.isoformat(timespec="minutes"),
+                    current.daily_kcal_goal or "",
                 ],
             )
 
@@ -329,8 +369,38 @@ class GoogleUserRegistry:
                     "",
                     current.spreadsheet_id,
                     current.day_start.isoformat(timespec="minutes"),
+                    current.daily_kcal_goal or "",
                 ],
             )
+
+    def set_daily_kcal_goal(
+        self, telegram_user_id: int, goal: int | None
+    ) -> UserRecord:
+        if goal is not None and not MIN_DAILY_KCAL_GOAL <= goal <= MAX_DAILY_KCAL_GOAL:
+            raise ValueError(
+                f"daily kcal goal must be between {MIN_DAILY_KCAL_GOAL} "
+                f"and {MAX_DAILY_KCAL_GOAL}"
+            )
+        with self._lock:
+            current = self.get_user(telegram_user_id)
+            if current is None or current.status != "active":
+                raise UserRegistryError("Active user not found")
+            updated = self._update_row(
+                current.row_number,
+                [
+                    current.telegram_user_id,
+                    current.display_name,
+                    current.telegram_username,
+                    current.status,
+                    current.invite_token,
+                    current.spreadsheet_id,
+                    current.day_start.isoformat(timespec="minutes"),
+                    goal or "",
+                ],
+            )
+            if updated.daily_kcal_goal != goal:
+                raise UserRegistryError("Could not verify daily kcal goal update")
+            return updated
 
     def delete_user(self, telegram_user_id: int) -> None:
         with self._lock:

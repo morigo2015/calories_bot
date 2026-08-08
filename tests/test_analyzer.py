@@ -10,6 +10,7 @@ from calories_bot.analyzer import (
     ModelPricing,
     NormalizedInput,
     OpenAIAnalyzer,
+    apply_household_portions,
     calculate_llm_cost,
     enforce_explicit_values,
     normalize_input,
@@ -102,13 +103,34 @@ def test_ukrainian_and_russian_spoken_numbers_are_normalized(
 
 
 def test_spoken_calorie_and_weight_values_keep_explicit_sources() -> None:
-    normalized = normalize_input(
-        "сир сто двадцять грам триста ккал на сто грам"
-    )
+    normalized = normalize_input("сир сто двадцять грам триста ккал на сто грам")
     assert [(value.kind, value.value) for value in normalized.explicit_values] == [
         ("weight", 120),
         ("kcal", 300),
     ]
+
+
+def test_household_egg_portion_is_preserved_and_uses_reference_weight() -> None:
+    normalized = normalize_input("два яйця")
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="яйця",
+        items=[
+            FoodItem(
+                name="яйця",
+                weight_g=140,
+                weight_estimated=True,
+                kcal_per_100g=140,
+                kcal_estimated=True,
+            )
+        ],
+    )
+
+    applied = apply_household_portions(analysis, normalized.household_portions)
+
+    assert applied.items[0].weight_g == 100
+    assert applied.items[0].weight_origin == "deterministic_reference"
+    assert applied.items[0].portion_display == "2 шт."
 
 
 def test_weight_units_are_not_matched_inside_words() -> None:
@@ -186,9 +208,11 @@ def test_explicit_sources_override_model_values_and_flags() -> None:
 
     assert enforced.items[0].weight_g == 50
     assert enforced.items[0].weight_estimated is False
+    assert enforced.items[0].weight_origin == "user_text"
     assert enforced.items[0].kcal_estimated is True
     assert enforced.items[1].kcal_per_100g == 100
     assert enforced.items[1].kcal_estimated is False
+    assert enforced.items[1].kcal_origin == "user_text"
     assert enforced.items[1].weight_estimated is True
 
 
@@ -304,6 +328,37 @@ def test_food_analysis_derives_missing_meal_name_from_items() -> None:
     )
 
     assert analysis.meal_name == "сир, хліб"
+
+
+def test_legacy_food_item_derives_safe_origins() -> None:
+    item = FoodItem.model_validate(
+        {
+            "name": "сир",
+            "weight_g": 50,
+            "weight_estimated": False,
+            "kcal_per_100g": 120,
+            "kcal_estimated": True,
+        }
+    )
+    assert item.weight_origin == "user_text"
+    assert item.kcal_origin == "model_estimate"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("weight_g", 10_001), ("kcal_per_100g", 1_001)],
+)
+def test_implausible_analysis_values_are_rejected(field: str, value: int) -> None:
+    values = {
+        "name": "сир",
+        "weight_g": 50,
+        "weight_estimated": True,
+        "kcal_per_100g": 120,
+        "kcal_estimated": True,
+    }
+    values[field] = value
+    with pytest.raises(ValueError, match="implausibly"):
+        FoodItem.model_validate(values)
 
 
 @pytest.mark.parametrize(

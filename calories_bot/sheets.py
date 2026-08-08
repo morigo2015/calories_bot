@@ -86,14 +86,14 @@ class SheetsWriteUncertainError(SheetsWriteError):
 
 @dataclass(frozen=True)
 class SheetState:
-    today_total: int
+    today_total: float
     existing: StoredMeal | None
 
 
 @dataclass(frozen=True)
 class DayMeal:
     meal_name: str
-    meal_kcal: int
+    meal_kcal: float
 
 
 @dataclass(frozen=True)
@@ -108,6 +108,8 @@ class MealStore(Protocol):
     def get_state(self, day: date, telegram_message_id: int) -> SheetState: ...
 
     def get_day_meals(self, day: date) -> list[DayMeal]: ...
+
+    def get_daily_totals(self, start_day: date, end_day: date) -> dict[date, float]: ...
 
     def delete_meal(
         self, telegram_message_id: int, fallback_day: date
@@ -345,7 +347,7 @@ class GoogleSheetsStore:
             raise ValueError("Google Sheets row has no day")
         return _date_from_sheet_serial(row[DAY_COLUMN])
 
-    def _day_total(self, rows: list[list[object]], day: date) -> int:
+    def _day_total(self, rows: list[list[object]], day: date) -> float:
         total = 0.0
         for row in rows:
             if len(row) <= MEAL_KCAL_COLUMN:
@@ -355,7 +357,7 @@ class GoogleSheetsStore:
                     total += float(str(row[MEAL_KCAL_COLUMN]))
             except (TypeError, ValueError):
                 LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
-        return round_whole(total)
+        return total
 
     def _find_by_message_id(
         self, rows: list[list[object]], telegram_message_id: int
@@ -393,12 +395,33 @@ class GoogleSheetsStore:
                     meals.append(
                         DayMeal(
                             meal_name=meal_name,
-                            meal_kcal=round_whole(float(str(row[MEAL_KCAL_COLUMN]))),
+                            meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
                         )
                     )
                 except (TypeError, ValueError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
             return meals
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_daily_totals(self, start_day: date, end_day: date) -> dict[date, float]:
+        if end_day < start_day:
+            raise ValueError("end_day cannot be before start_day")
+        try:
+            totals: dict[date, float] = {}
+            # One worksheet read per report; grouping happens entirely in memory.
+            for row in self._data_rows():
+                if len(row) <= MEAL_KCAL_COLUMN:
+                    continue
+                try:
+                    row_day = self._row_day(row)
+                    if start_day <= row_day <= end_day:
+                        totals[row_day] = totals.get(row_day, 0.0) + float(
+                            str(row[MEAL_KCAL_COLUMN])
+                        )
+                except (TypeError, ValueError):
+                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+            return totals
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
 
@@ -417,7 +440,7 @@ class GoogleSheetsStore:
         if target_index is None:
             return MealDeletion(
                 accounting_day=fallback_day,
-                day_total=self._day_total(rows, fallback_day),
+                day_total=round_whole(self._day_total(rows, fallback_day)),
                 photo_path=None,
                 deleted=False,
             )
@@ -459,7 +482,7 @@ class GoogleSheetsStore:
 
         return MealDeletion(
             accounting_day=day,
-            day_total=self._day_total(rows, day),
+            day_total=round_whole(self._day_total(rows, day)),
             photo_path=photo_path,
             deleted=True,
         )
@@ -492,9 +515,9 @@ class GoogleSheetsStore:
                 accounting_date(timestamp, self._timezone, self._day_start_time)
             ),
             meal.meal_name,
-            round_whole(meal.total_weight_g),
-            round_whole(meal.meal_kcal),
-            round_whole(meal.kcal_per_100g),
+            meal.total_weight_g,
+            meal.meal_kcal,
+            meal.kcal_per_100g,
             telegram_message_id,
             normalized_request,
             request,

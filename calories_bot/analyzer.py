@@ -33,14 +33,27 @@ Rules:
 - A plain number without an explicit source ID is part of the description,
   for example "2 яйця" or "піца 30 см".
 - If weight is absent, estimate a typical consumed portion and set
-  weight_estimated=true and weight_source_id=null.
+  weight_estimated=true, weight_origin=model_estimate and weight_source_id=null.
 - If kcal per 100 g is absent, estimate it and set kcal_estimated=true and
-  kcal_source_id=null.
+  kcal_origin=model_estimate and kcal_source_id=null.
 - For supplied values, set the matching estimated flag to false and return
-  its source ID.
+  its source ID. The application will set the origin to user_text.
+- Values read or estimated from a photo use origin=image and are approximate.
+- For a natural portion such as "2 яйця", "1 тарілка", "жменя" or "половина",
+  return a concise Ukrainian portion_display such as "2 шт." or "1 тарілка".
 - Split composite meals into useful ingredients only when the user names
   multiple components. Do not invent unnecessary ingredients.
 - Use concise Ukrainian names. Do not calculate totals; the application does that.
+
+Examples:
+- "сир 150 г" -> one item; assign the weight source and estimate kcal/100g.
+- "сир 150 г, 120 ккал/100 г" -> assign both authoritative sources.
+- "два яйця і бутерброд" -> two named items with estimated missing nutrition.
+- "тарілка борщу" -> one item with portion_display="1 тарілка".
+- A meal photo with caption "250 г" -> use the caption weight and recognize food.
+- A meal photo without caption -> recognize and estimate the portion.
+- A label photo -> read the product name and kcal/100g; estimate portion if absent.
+- "як справи?" -> is_food=false.
 """
 
 
@@ -62,9 +75,19 @@ class ExplicitValue:
 
 
 @dataclass(frozen=True)
+class HouseholdPortion:
+    count: int
+    display: str
+    item_alias: str
+    reference_weight_g: int | None
+
+
+@dataclass(frozen=True)
 class NormalizedInput:
     text: str
     explicit_values: tuple[ExplicitValue, ...]
+    original_text: str = ""
+    household_portions: tuple[HouseholdPortion, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,6 +145,13 @@ _BARE_AT_BOUNDARY = re.compile(
     r"(?<!\w)(?P<value>\d+)(?=[ \t]*(?:[,;]|\r?\n|[.!?]*[ \t]*$))",
     re.MULTILINE,
 )
+_EGG_PORTION = re.compile(
+    r"(?<!\w)(?P<count>\d+)\s*"
+    r"(?P<unit>яйц(?:е|я|ь)|яєць|яйця|яйцо|яйца|яиц)(?!\w)",
+    re.IGNORECASE,
+)
+_EGG_ITEM_ALIASES = ("яйц", "яєч", "омлет")
+_EGG_REFERENCE_WEIGHT_G = 50
 
 _NUMBER_WORD_VALUES = {
     "нуль": 0,
@@ -262,6 +292,7 @@ def _placeholder(index: int) -> str:
 
 
 def normalize_input(text: str) -> NormalizedInput:
+    original_text = text
     normalized = text.strip()
     if not normalized:
         raise InputFormatError("Message is empty")
@@ -334,13 +365,33 @@ def normalize_input(text: str) -> NormalizedInput:
                 end=end,
             )
         )
-    return NormalizedInput(text=normalized, explicit_values=tuple(explicit))
+    portions = tuple(
+        HouseholdPortion(
+            count=int(match.group("count")),
+            display=f"{int(match.group('count'))} шт.",
+            item_alias="egg",
+            reference_weight_g=int(match.group("count")) * _EGG_REFERENCE_WEIGHT_G,
+        )
+        for match in _EGG_PORTION.finditer(normalized)
+        if int(match.group("count")) > 0
+    )
+    return NormalizedInput(
+        text=normalized,
+        explicit_values=tuple(explicit),
+        original_text=original_text,
+        household_portions=portions,
+    )
 
 
 def enforce_explicit_values(
-    analysis: FoodAnalysis, explicit_values: tuple[ExplicitValue, ...]
+    analysis: FoodAnalysis,
+    explicit_values: tuple[ExplicitValue, ...],
+    *,
+    image_present: bool = False,
 ) -> FoodAnalysis:
     if not analysis.is_food:
+        if explicit_values:
+            raise AnalysisError("A non-food response omitted explicit source IDs")
         return analysis
 
     sources = {source.source_id: source for source in explicit_values}
@@ -356,8 +407,18 @@ def enforce_explicit_values(
             if source_id is None:
                 if kind == "weight":
                     item.weight_estimated = True
+                    item.weight_origin = (
+                        "image"
+                        if image_present and item.weight_origin == "image"
+                        else "model_estimate"
+                    )
                 else:
                     item.kcal_estimated = True
+                    item.kcal_origin = (
+                        "image"
+                        if image_present and item.kcal_origin == "image"
+                        else "model_estimate"
+                    )
                 continue
             source = sources.get(source_id)
             if source is None or source.kind != kind:
@@ -370,9 +431,11 @@ def enforce_explicit_values(
             if kind == "weight":
                 item.weight_g = source.value
                 item.weight_estimated = False
+                item.weight_origin = "user_text"
             else:
                 item.kcal_per_100g = source.value
                 item.kcal_estimated = False
+                item.kcal_origin = "user_text"
 
     missing = set(sources) - used
     if missing:
@@ -380,6 +443,38 @@ def enforce_explicit_values(
             "The model did not assign every explicit source ID: "
             + ", ".join(sorted(missing))
         )
+    return FoodAnalysis(is_food=True, meal_name=analysis.meal_name, items=items)
+
+
+def apply_household_portions(
+    analysis: FoodAnalysis, portions: tuple[HouseholdPortion, ...]
+) -> FoodAnalysis:
+    if not analysis.is_food or not portions:
+        return analysis
+    items = [item.model_copy(deep=True) for item in analysis.items]
+    available = list(range(len(items)))
+    for portion in portions:
+        if portion.item_alias != "egg":
+            continue
+        match_index = next(
+            (
+                index
+                for index in available
+                if any(
+                    alias in items[index].name.casefold() for alias in _EGG_ITEM_ALIASES
+                )
+            ),
+            None,
+        )
+        if match_index is None:
+            continue
+        item = items[match_index]
+        item.portion_display = portion.display
+        if item.weight_source_id is None and portion.reference_weight_g is not None:
+            item.weight_g = portion.reference_weight_g
+            item.weight_estimated = True
+            item.weight_origin = "deterministic_reference"
+        available.remove(match_index)
     return FoodAnalysis(is_food=True, meal_name=analysis.meal_name, items=items)
 
 
@@ -431,6 +526,15 @@ class OpenAIAnalyzer:
             }
             for source in normalized.explicit_values
         ]
+        portion_hints = [
+            {
+                "count": portion.count,
+                "display": portion.display,
+                "item_alias": portion.item_alias,
+                "reference_weight_g": portion.reference_weight_g,
+            }
+            for portion in normalized.household_portions
+        ]
         user_content: str | list[dict[str, str]] = normalized.text
         if image_bytes is not None:
             encoded_image = base64.b64encode(image_bytes).decode("ascii")
@@ -459,7 +563,9 @@ class OpenAIAnalyzer:
                             "role": "developer",
                             "content": (
                                 "Authoritative source values with character positions: "
-                                f"{constraints}"
+                                f"{constraints}. Deterministic portion hints: "
+                                f"{portion_hints}. Original user text: "
+                                f"{normalized.original_text!r}"
                             ),
                         },
                         {"role": "user", "content": user_content},
@@ -473,7 +579,12 @@ class OpenAIAnalyzer:
         parsed = response.output_parsed
         if parsed is None:
             raise AnalysisError("OpenAI returned no structured analysis")
-        analysis = enforce_explicit_values(parsed, normalized.explicit_values)
+        analysis = enforce_explicit_values(
+            parsed,
+            normalized.explicit_values,
+            image_present=image_bytes is not None,
+        )
+        analysis = apply_household_portions(analysis, normalized.household_portions)
 
         usage = response.usage
         if usage is None:

@@ -3,11 +3,13 @@ from datetime import time
 import pytest
 
 from calories_bot.users import (
+    LEGACY_USER_HEADERS,
     USER_HEADERS,
     GoogleUserRegistry,
     InviteUnavailableError,
     UserAlreadyRegisteredError,
     UserRegistryError,
+    parse_daily_kcal_goal,
     parse_day_start,
 )
 
@@ -26,6 +28,9 @@ class FakeWorksheet:
 
     def update(self, values, range_name=None, **kwargs):
         del kwargs
+        if range_name == "H1:H1":
+            self.rows[0].append(values[0][0])
+            return
         row_number = int(range_name.split(":", maxsplit=1)[0][1:])
         self.rows[row_number - 1] = list(values[0])
 
@@ -52,6 +57,16 @@ def test_incompatible_registry_headers_fail() -> None:
     registry = build_registry([["telegram_user_id", "status"]])
     with pytest.raises(UserRegistryError, match="headers"):
         registry._ensure_headers()
+
+
+def test_known_legacy_registry_header_is_migrated_without_changing_rows() -> None:
+    row = [123, "A", "a", "active", "", "sheet", "01:00"]
+    registry = build_registry([list(LEGACY_USER_HEADERS), list(row)])
+
+    registry._ensure_headers()
+
+    assert registry._worksheet.rows == [USER_HEADERS, row]
+    assert registry.get_user(123).daily_kcal_goal is None
 
 
 def test_invalid_day_start_and_malformed_rows_fail() -> None:
@@ -81,6 +96,24 @@ def test_invalid_day_start_and_malformed_rows_fail() -> None:
 )
 def test_google_sheets_native_time_value_is_accepted(value, expected) -> None:
     assert parse_day_start(value) == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "20001", "1.5", "two"])
+def test_invalid_daily_goal_is_rejected(value) -> None:
+    with pytest.raises(UserRegistryError, match="daily_kcal_goal"):
+        parse_daily_kcal_goal(value)
+
+
+def test_daily_goal_is_read_written_disabled_and_verified() -> None:
+    registry = build_registry(
+        [USER_HEADERS, [123, "A", "", "active", "", "sheet", "01:00", ""]]
+    )
+
+    enabled = registry.set_daily_kcal_goal(123, 2000)
+    disabled = registry.set_daily_kcal_goal(123, None)
+
+    assert enabled.daily_kcal_goal == 2000
+    assert disabled.daily_kcal_goal is None
 
 
 def test_invite_activation_is_one_time_and_retains_personal_context() -> None:

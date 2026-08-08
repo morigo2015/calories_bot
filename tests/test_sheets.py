@@ -63,8 +63,10 @@ class FakeWorksheet:
         self.fail_after_delete = fail_after_delete
         self.fail_reads = fail_reads
         self.formatted = []
+        self.read_count = 0
 
     def get_all_values(self, **kwargs):
+        self.read_count += 1
         if self.fail_reads:
             raise TimeoutError("read failed")
         return self.rows
@@ -241,6 +243,23 @@ def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
         DayMeal(meal_name="вівсянка з бананом", meal_kcal=320),
         DayMeal(meal_name="курка з рисом", meal_kcal=460),
     ]
+
+
+def test_daily_totals_read_once_and_keep_exact_values() -> None:
+    first = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 1, 100)
+    first[4] = 100.4
+    second = stored_row(datetime(2026, 8, 2, 13, tzinfo=TZ), 2, 200)
+    second[4] = 200.4
+    outside = stored_row(datetime(2026, 8, 9, 12, tzinfo=TZ), 3, 999)
+    store = build_store([HEADERS, first, second, outside])
+
+    totals = store.get_daily_totals(
+        datetime(2026, 8, 2).date(), datetime(2026, 8, 8).date()
+    )
+
+    assert set(totals) == {datetime(2026, 8, 2).date()}
+    assert totals[datetime(2026, 8, 2).date()] == pytest.approx(300.8)
+    assert store._worksheet.read_count == 1
 
 
 def test_duplicate_restores_photo_path_and_metadata() -> None:
