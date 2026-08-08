@@ -47,7 +47,7 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     set_valid_env(monkeypatch, tmp_path)
     settings = Settings.from_env()
     assert settings.admin_telegram_user_id == 123
-    assert settings.openai_reasoning_effort == "none"
+    assert settings.openai_reasoning_effort == "low"
     assert settings.openai_pricing.complete is False
     assert settings.timezone.key == "Europe/Kyiv"
     assert settings.default_day_start.isoformat(timespec="minutes") == "01:00"

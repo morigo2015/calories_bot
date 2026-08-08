@@ -22,6 +22,12 @@ This workspace is the live checkout on the Hetzner server. The project lives at
 - Never include `.env`, `service-account.json`, `data/`, or spreadsheet exports
   in Git commits. Preserve unrelated user changes and untracked files.
 
+# Testing
+
+- After a significant application update, run `bash scripts/run_tests.sh`.
+- Run the paid LLM eval only after the user explicitly approves it in the current
+  conversation: `bash scripts/run_tests.sh --llm --confirm`.
+
 # Permissions and sandboxing
 
 - Keep project directories writable by their owner (`u+rwx`) and regular files

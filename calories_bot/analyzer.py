@@ -538,6 +538,11 @@ class OpenAIAnalyzer:
         user_content: str | list[dict[str, str]] = normalized.text
         if image_bytes is not None:
             encoded_image = base64.b64encode(image_bytes).decode("ascii")
+            image_mime_type = (
+                "image/png"
+                if image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+                else "image/jpeg"
+            )
             user_content = [
                 {
                     "type": "input_text",
@@ -545,7 +550,7 @@ class OpenAIAnalyzer:
                 },
                 {
                     "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{encoded_image}",
+                    "image_url": f"data:{image_mime_type};base64,{encoded_image}",
                     "detail": "auto",
                 },
             ]

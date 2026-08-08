@@ -58,7 +58,7 @@ class Settings:
         except ValueError as exc:
             raise ConfigError("ADMIN_TELEGRAM_USER_ID must be an integer") from exc
 
-        effort = os.getenv("OPENAI_REASONING_EFFORT", "none") or "none"
+        effort = os.getenv("OPENAI_REASONING_EFFORT", "low") or "low"
         allowed_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
         if effort not in allowed_efforts:
             raise ConfigError(

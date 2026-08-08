@@ -501,6 +501,30 @@ def test_openai_analyzer_sends_text_and_base64_photo() -> None:
     }
 
 
+def test_openai_analyzer_uses_png_media_type() -> None:
+    response = SimpleNamespace(
+        output_parsed=FoodAnalysis(is_food=False, meal_name="", items=[]),
+        usage=None,
+    )
+    fake_responses = SimpleNamespace(kwargs=None)
+
+    def parse(**kwargs):
+        fake_responses.kwargs = kwargs
+        return response
+
+    fake_responses.parse = parse
+    analyzer = OpenAIAnalyzer.__new__(OpenAIAnalyzer)
+    analyzer._client = SimpleNamespace(responses=fake_responses)
+    analyzer._model = "test-model"
+    analyzer._effort = "none"
+    analyzer._pricing = ModelPricing(None, None, None)
+
+    analyzer.analyze(NormalizedInput("", ()), b"\x89PNG\r\n\x1a\ncontent")
+
+    content = fake_responses.kwargs["input"][-1]["content"]
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
 def test_openai_errors_are_wrapped() -> None:
     analyzer = OpenAIAnalyzer.__new__(OpenAIAnalyzer)
     analyzer._client = SimpleNamespace(

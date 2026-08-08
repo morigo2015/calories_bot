@@ -117,15 +117,11 @@ python -m calories_bot.main
 ## Перевірки
 
 ```bash
-pip install -r requirements-dev.txt
-python -m compileall -q calories_bot
-ruff format --check .
-ruff check .
-mypy calories_bot
-python -m pytest --cov=calories_bot --cov-branch
-pip check
-pip-audit
+bash scripts/run_tests.sh
 ```
+
+Платні перевірки реальної моделі та порівняння model/effort описані в
+[`docs/LLM_EVALS.md`](LLM_EVALS.md).
 
 На live-сервері зміни вже знаходяться в `/home/igor/calories-bot`. Після
 налаштування `.env`, Drive-папки та реєстру застосуйте оновлення командою,
