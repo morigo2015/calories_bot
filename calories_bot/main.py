@@ -26,6 +26,7 @@ async def configure_bot_commands(
     admin_user_id: int,
 ) -> None:
     user_commands = [
+        BotCommand("meals", "мої збережені страви"),
         BotCommand("day", "прийоми їжі за сьогодні"),
         BotCommand("week", "підсумок за 7 днів"),
         BotCommand("goal", "встановити денну ціль"),
@@ -126,6 +127,12 @@ def main() -> None:
         CommandHandler("goal", handlers.goal, filters=message_update)
     )
     application.add_handler(
+        CommandHandler("meals", handlers.meals, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("save", handlers.save, filters=message_update)
+    )
+    application.add_handler(
         CommandHandler("invite", handlers.invite, filters=message_update)
     )
     application.add_handler(
@@ -144,7 +151,21 @@ def main() -> None:
         MessageHandler(message_update & filters.COMMAND, handlers.cancel_goal_waiting)
     )
     application.add_handler(
-        CallbackQueryHandler(handlers.delete, pattern=r"^delete:\d+:\d{4}-\d{2}-\d{2}$")
+        CallbackQueryHandler(
+            handlers.delete, pattern=r"^delete:-?\d+:\d{4}-\d{2}-\d{2}$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.save_callback,
+            pattern=r"^save:-?\d+:\d{4}-\d{2}-\d{2}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.library_callback,
+            pattern=r"^(?:meals-|saved-|recent-|manage-|wait-cancel$|invite-cancel$)",
+        )
     )
     application.add_handler(
         CallbackQueryHandler(

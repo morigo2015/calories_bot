@@ -32,6 +32,7 @@ from calories_bot.models import (
     FoodAnalysis,
     FoodItem,
     LLMMetadata,
+    SavedMeal,
     StoredMeal,
     calculate_meal,
 )
@@ -732,9 +733,10 @@ def test_duplicate_photo_is_checked_before_download() -> None:
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
     assert message.reply_kwargs[0]["do_quote"] is False
-    button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
-    assert button.text == "Видалити"
-    assert button.callback_data == "delete:1:2026-08-02"
+    buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0]
+    assert [button.text for button in buttons] == ["⭐ Запам’ятати", "Видалити"]
+    assert buttons[0].callback_data == "save:1:2026-08-02"
+    assert buttons[1].callback_data == "delete:1:2026-08-02"
 
 
 def test_day_handler_passes_telegram_message_date() -> None:
@@ -836,15 +838,21 @@ def test_goal_with_existing_value_can_be_disabled() -> None:
 def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
     class FakeQuery:
         def __init__(self):
+            self.id = "callback-1"
             self.data = data
+            self.message = None
             self.answers = []
             self.edits = []
+            self.markup_edits = []
 
         async def answer(self, text=None, **kwargs):
             self.answers.append((text, kwargs))
 
         async def edit_message_text(self, text, **kwargs):
             self.edits.append((text, kwargs))
+
+        async def edit_message_reply_markup(self, **kwargs):
+            self.markup_edits.append(kwargs)
 
     query = FakeQuery()
     update = SimpleNamespace(
@@ -874,6 +882,51 @@ def test_delete_callback_keeps_source_message_and_leaves_confirmation() -> None:
     assert service.args == (42, date(2026, 8, 2))
     assert query.answers == [(None, {})]
     assert query.edits == [("Видалено\n=== 905 кк", {"reply_markup": None})]
+
+
+def test_saved_add_callback_uses_stable_negative_event_id() -> None:
+    class Service:
+        def __init__(self):
+            self.calls = []
+
+        def add_saved_meal(self, *args):
+            self.calls.append(args)
+            return MealReply("Додано", args[2], date(2026, 8, 2), can_save=False)
+
+    service = Service()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, query = make_callback_update("saved-add:meal1:350")
+    context = SimpleNamespace(user_data={})
+
+    asyncio.run(handlers.library_callback(update, context))
+    asyncio.run(handlers.library_callback(update, context))
+
+    assert len(service.calls) == 2
+    assert service.calls[0][0:2] == ("meal1", 350)
+    assert service.calls[0][2] < 0
+    assert service.calls[0][2] == service.calls[1][2]
+    assert query.answers == [("Додано", {}), ("Додано", {})]
+
+
+def test_save_callback_hides_save_button_but_keeps_delete() -> None:
+    value = calculate_meal(food_analysis())
+    template = SavedMeal(
+        saved_meal_id="meal1",
+        source_message_id=42,
+        display_name="сир",
+        default_total_weight_g=50,
+        base_meal=value,
+    )
+    service = SimpleNamespace(save_source_meal=lambda *args: (template, True))
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, query = make_callback_update("save:42:2026-08-02")
+
+    asyncio.run(handlers.save_callback(update, SimpleNamespace()))
+
+    keyboard = query.markup_edits[0]["reply_markup"].inline_keyboard
+    assert query.answers == [("Запам’ятано: сир", {})]
+    assert keyboard[0][0].text == "Видалити"
+    assert keyboard[0][0].callback_data == "delete:42:2026-08-02"
 
 
 def test_repeated_delete_callback_uses_idempotent_result() -> None:
@@ -1132,6 +1185,58 @@ def test_admin_invite_returns_deep_link() -> None:
     assert message.replies == ["https://t.me/calorie_bot?start=secure-token"]
 
 
+def test_admin_invite_from_menu_consumes_next_text_as_name() -> None:
+    class Bot:
+        async def get_me(self):
+            return SimpleNamespace(username="calorie_bot")
+
+    manager = FakeManager()
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update(user_id=999)
+    context = SimpleNamespace(args=[], user_data={}, bot=Bot())
+
+    asyncio.run(handlers.invite(update, context))
+    message.text = "  Нова   людина "
+    asyncio.run(handlers.text(update, context))
+
+    assert manager.invites == ["Нова людина"]
+    assert message.replies == [
+        "Введи ім’я нового користувача.",
+        "https://t.me/calorie_bot?start=secure-token",
+    ]
+    assert context.user_data == {}
+
+
+def test_meals_command_shows_all_saved_meals_without_pagination() -> None:
+    value = calculate_meal(food_analysis())
+    saved_meals = [
+        SavedMeal(
+            saved_meal_id=f"meal{i}",
+            source_message_id=i,
+            display_name=f"Страва {i}",
+            default_total_weight_g=50,
+            base_meal=value,
+        )
+        for i in range(25)
+    ]
+    service = SimpleNamespace(list_saved_meals=lambda: saved_meals)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+
+    asyncio.run(handlers.meals(update, SimpleNamespace(user_data={})))
+
+    keyboard = message.reply_kwargs[0]["reply_markup"].inline_keyboard
+    assert len(keyboard) == 26
+    assert keyboard[0][0].text == "Страва 0 · 50 г"
+    assert [button.text for button in keyboard[-1]] == [
+        "Нещодавні",
+        "Керувати стравами",
+    ]
+    assert not any(
+        "наступ" in button.text.casefold() for row in keyboard for button in row
+    )
+
+
 def test_admin_help_and_user_list_are_available_without_personal_account() -> None:
     manager = FakeManager({123: user_record()})
     handlers = TelegramHandlers(999, manager)
@@ -1196,7 +1301,7 @@ def test_admin_commands_validate_arguments() -> None:
     asyncio.run(handlers.delete_user_command(update, SimpleNamespace(args=[])))
 
     assert message.replies == [
-        "Формат: /invite <імʼя>",
+        "Введи ім’я нового користувача.",
         "Формат: /block <telegram_user_id>",
         "Формат: /delete <telegram_user_id>",
     ]

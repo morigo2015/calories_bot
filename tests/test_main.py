@@ -71,7 +71,11 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         day=lambda: None,
         week=lambda: None,
         goal=lambda: None,
+        meals=lambda: None,
+        save=lambda: None,
         delete=lambda: None,
+        save_callback=lambda: None,
+        library_callback=lambda: None,
         invite=lambda: None,
         users=lambda: None,
         block=lambda: None,
@@ -125,7 +129,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 17
+    assert len(app.handlers) == 21
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords == {"admin_user_id": 999}
@@ -167,6 +171,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     )
 
     assert [(command.command, command.description) for command in bot.calls[0][0]] == [
+        ("meals", "мої збережені страви"),
         ("day", "прийоми їжі за сьогодні"),
         ("week", "підсумок за 7 днів"),
         ("goal", "встановити денну ціль"),
@@ -174,6 +179,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("tips", "додаткові можливості"),
     ]
     assert [command.command for command in bot.calls[1][0]] == [
+        "meals",
         "day",
         "week",
         "goal",

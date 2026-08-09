@@ -17,6 +17,7 @@ from .models import (
     CalculatedFoodItem,
     LLMMetadata,
     MealResult,
+    RecentMeal,
     StoredMeal,
     round_whole,
 )
@@ -110,6 +111,12 @@ class MealStore(Protocol):
     def get_day_meals(self, day: date) -> list[DayMeal]: ...
 
     def get_daily_totals(self, start_day: date, end_day: date) -> dict[date, float]: ...
+
+    def get_meal(self, day: date, telegram_message_id: int) -> StoredMeal | None: ...
+
+    def get_latest_meal(self) -> RecentMeal | None: ...
+
+    def get_recent_meals(self, limit: int = 8) -> list[RecentMeal]: ...
 
     def delete_meal(
         self, telegram_message_id: int, fallback_day: date
@@ -351,10 +358,9 @@ class GoogleSheetsStore:
         self, row: list[object], telegram_message_id: int, day: date
     ) -> bool:
         try:
-            return (
-                self._message_id(row) == telegram_message_id
-                and self._row_day(row) == day
-            )
+            if self._message_id(row) != telegram_message_id:
+                return False
+            return telegram_message_id < 0 or self._row_day(row) == day
         except (TypeError, ValueError):
             return False
 
@@ -392,6 +398,56 @@ class GoogleSheetsStore:
             existing = self._find_by_message_id(rows, telegram_message_id, day)
             return SheetState(today_total=self._day_total(rows, day), existing=existing)
         except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_meal(self, day: date, telegram_message_id: int) -> StoredMeal | None:
+        try:
+            return self._find_by_message_id(self._data_rows(), telegram_message_id, day)
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_latest_meal(self) -> RecentMeal | None:
+        recent = self.get_recent_meals(limit=1)
+        return recent[0] if recent else None
+
+    def get_recent_meals(self, limit: int = 8) -> list[RecentMeal]:
+        if limit < 1:
+            return []
+        try:
+            result: list[RecentMeal] = []
+            seen: set[str] = set()
+            for row in reversed(self._data_rows()):
+                try:
+                    message_id = self._message_id(row)
+                    if message_id is None:
+                        raise ValueError("Missing message ID")
+                    stored = _meal_from_row(row)
+                    canonical = json.dumps(
+                        stored.meal.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if canonical in seen:
+                        continue
+                    seen.add(canonical)
+                    result.append(
+                        RecentMeal(
+                            telegram_message_id=message_id,
+                            day=self._row_day(row),
+                            meal=stored.meal,
+                            normalized_request=stored.normalized_request,
+                        )
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+                    continue
+                if len(result) >= limit:
+                    break
+            return result
+        except Exception as exc:
+            if isinstance(exc, SheetsReadError):
+                raise
             raise SheetsReadError("Could not read Google Sheets") from exc
 
     def get_day_meals(self, day: date) -> list[DayMeal]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import logging
 import re
@@ -24,7 +25,23 @@ from .analyzer import (
     NormalizedInput,
     normalize_input,
 )
-from .models import CalculatedFoodItem, MealResult, calculate_meal, round_whole
+from .models import (
+    MAX_SAVED_MEAL_NAME_LENGTH,
+    MAX_WEIGHT_G,
+    CalculatedFoodItem,
+    LLMMetadata,
+    MealResult,
+    RecentMeal,
+    SavedMeal,
+    calculate_meal,
+    round_whole,
+    scale_meal,
+)
+from .saved_meals import (
+    SavedMealsReadError,
+    SavedMealStore,
+    SavedMealsWriteError,
+)
 from .sheets import (
     DayMeal,
     MealDeletion,
@@ -74,10 +91,13 @@ GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Сп�
 WEEK_ERROR_TEXT = "Не вдалося сформувати підсумок за 7 днів. Спробуй ще раз."
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуйте ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
+SAVE_CALLBACK_PREFIX = "save:"
 ADMIN_DELETE_CALLBACK_PREFIX = "admin-delete:"
 ADMIN_CANCEL_CALLBACK_PREFIX = "admin-cancel:"
 GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
 GOAL_WAITING_KEY = "awaiting_daily_kcal_goal"
+SAVED_MEAL_WAITING_KEY = "awaiting_saved_meal_value"
+INVITE_WAITING_KEY = "awaiting_invite_name"
 INVITE_ONLY_TEXT = "Доступ лише за запрошенням."
 BLOCKED_TEXT = "Доступ до бота вимкнено."
 ACCESS_ERROR_TEXT = "Не вдалося перевірити доступ. Спробуйте ще раз."
@@ -89,11 +109,16 @@ class NotFoodError(ValueError):
     """Raised when the message does not describe consumed food."""
 
 
+class SavedMealNameError(ValueError):
+    """Raised when an explicitly chosen saved-meal name is unavailable."""
+
+
 @dataclass(frozen=True)
 class MealReply:
     text: str
     telegram_message_id: int
     accounting_day: date
+    can_save: bool = True
 
 
 def _load_content(path: Path, fallback: str) -> str:
@@ -282,6 +307,7 @@ class CaloriesService:
         day_start_time: time,
         photo_storage_dir: Path,
         daily_kcal_goal: int | None = None,
+        saved_store: SavedMealStore | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._store = store
@@ -290,6 +316,7 @@ class CaloriesService:
         self._photo_storage_dir = photo_storage_dir.resolve()
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
         self._daily_kcal_goal = daily_kcal_goal
+        self._saved_store = saved_store
         # A message analysis can take long enough for a deletion callback to be
         # handled in between its first read and the eventual append.  Keep the
         # read/append and deletion operations mutually exclusive, while doing
@@ -413,6 +440,229 @@ class CaloriesService:
                 accounting_day=day,
             )
 
+    def _saved(self) -> SavedMealStore:
+        if self._saved_store is None:
+            raise SavedMealsReadError("Saved-meal store is unavailable")
+        return self._saved_store
+
+    @staticmethod
+    def _normalize_saved_name(name: str) -> str:
+        normalized = " ".join(name.split())
+        if not normalized or len(normalized) > MAX_SAVED_MEAL_NAME_LENGTH:
+            raise SavedMealNameError(
+                f"Назва має містити від 1 до {MAX_SAVED_MEAL_NAME_LENGTH} символів."
+            )
+        return normalized
+
+    def list_saved_meals(self) -> list[SavedMeal]:
+        with self._store_lock:
+            return self._saved().list_meals()
+
+    def list_recent_meals(self) -> list[RecentMeal]:
+        with self._store_lock:
+            return self._store.get_recent_meals(8)
+
+    def get_recent_meal(self, message_id: int, day: date) -> RecentMeal | None:
+        with self._store_lock:
+            stored = self._store.get_meal(day, message_id)
+        if stored is None:
+            return None
+        return RecentMeal(
+            telegram_message_id=message_id,
+            day=day,
+            meal=stored.meal,
+            normalized_request=stored.normalized_request,
+        )
+
+    def save_source_meal(
+        self,
+        message_id: int,
+        day: date,
+        name: str | None = None,
+    ) -> tuple[SavedMeal | None, bool]:
+        explicit_name = name is not None
+        with self._store_lock:
+            saved_store = self._saved()
+            existing = saved_store.find_by_source(message_id)
+            if existing is not None:
+                return existing, False
+            source = self._store.get_meal(day, message_id)
+            if source is None:
+                return None, False
+            if source.normalized_request.startswith("saved_meal:"):
+                source_id = source.normalized_request.split(":", maxsplit=2)[1]
+                return saved_store.get(source_id), False
+            meals = saved_store.list_meals()
+            used_names = {meal.display_name.casefold() for meal in meals}
+            if explicit_name:
+                base_name = self._normalize_saved_name(name or "")
+            else:
+                base_name = " ".join(source.meal.meal_name.split())[
+                    :MAX_SAVED_MEAL_NAME_LENGTH
+                ]
+                if not base_name:
+                    raise SavedMealNameError("Не вдалося визначити назву страви.")
+            display_name = base_name
+            if display_name.casefold() in used_names:
+                if explicit_name:
+                    raise SavedMealNameError(
+                        "Страва з такою назвою вже є. Вибери іншу назву."
+                    )
+                suffix = 2
+                while True:
+                    candidate = f"{base_name} ({suffix})"
+                    if len(candidate) > MAX_SAVED_MEAL_NAME_LENGTH:
+                        prefix_length = (
+                            MAX_SAVED_MEAL_NAME_LENGTH - len(str(suffix)) - 3
+                        )
+                        candidate = f"{base_name[:prefix_length]} ({suffix})"
+                    if candidate.casefold() not in used_names:
+                        display_name = candidate
+                        break
+                    suffix += 1
+            for _ in range(5):
+                saved_meal_id = secrets.token_urlsafe(8)
+                if saved_store.get(saved_meal_id) is None:
+                    break
+            else:
+                raise SavedMealsWriteError("Could not generate a saved-meal ID")
+            saved = SavedMeal(
+                saved_meal_id=saved_meal_id,
+                source_message_id=message_id,
+                display_name=display_name,
+                default_total_weight_g=round_whole(source.meal.total_weight_g),
+                base_meal=source.meal,
+            )
+            return saved_store.append(saved), True
+
+    def save_latest_meal(
+        self, name: str | None = None
+    ) -> tuple[SavedMeal | None, bool]:
+        with self._store_lock:
+            latest = self._store.get_latest_meal()
+        if latest is None:
+            return None, False
+        return self.save_source_meal(latest.telegram_message_id, latest.day, name)
+
+    def _append_reused_meal(
+        self,
+        meal: MealResult,
+        event_id: int,
+        timestamp: datetime,
+        normalized_request: str,
+        metadata_model: str,
+        *,
+        can_save: bool,
+    ) -> MealReply:
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=self._timezone)
+        timestamp = timestamp.astimezone(self._timezone)
+        day = accounting_date(timestamp, self._timezone, self._day_start_time)
+        with self._store_lock:
+            state = self._store.get_state(day, event_id)
+            if state.existing is None:
+                stored = self._store.append_meal(
+                    timestamp,
+                    event_id,
+                    "",
+                    normalized_request,
+                    None,
+                    meal,
+                    LLMMetadata(model=metadata_model, effort="none"),
+                )
+                total = state.today_total + stored.meal.meal_kcal
+            else:
+                stored = state.existing
+                total = state.today_total
+        return MealReply(
+            text=format_reply(stored.meal, total, self._daily_kcal_goal),
+            telegram_message_id=event_id,
+            accounting_day=day,
+            can_save=can_save,
+        )
+
+    def add_saved_meal(
+        self,
+        saved_meal_id: str,
+        weight_g: int,
+        event_id: int,
+        timestamp: datetime,
+    ) -> MealReply | None:
+        with self._store_lock:
+            saved = self._saved().get(saved_meal_id)
+        if saved is None:
+            return None
+        meal = scale_meal(saved.base_meal, weight_g, meal_name=saved.display_name)
+        return self._append_reused_meal(
+            meal,
+            event_id,
+            timestamp,
+            f"saved_meal:{saved_meal_id}:{weight_g}g",
+            "saved_meal",
+            can_save=False,
+        )
+
+    def add_recent_meal(
+        self,
+        message_id: int,
+        source_day: date,
+        weight_g: int,
+        event_id: int,
+        timestamp: datetime,
+    ) -> MealReply | None:
+        recent = self.get_recent_meal(message_id, source_day)
+        if recent is None:
+            return None
+        with self._store_lock:
+            already_saved = self._saved().find_by_source(message_id) is not None
+        meal = scale_meal(recent.meal, weight_g)
+        return self._append_reused_meal(
+            meal,
+            event_id,
+            timestamp,
+            f"recent_meal:{message_id}:{weight_g}g",
+            "recent_meal",
+            can_save=(
+                not already_saved
+                and not recent.normalized_request.startswith("saved_meal:")
+            ),
+        )
+
+    def recent_can_be_saved(self, recent: RecentMeal) -> bool:
+        if recent.normalized_request.startswith("saved_meal:"):
+            return False
+        with self._store_lock:
+            return self._saved().find_by_source(recent.telegram_message_id) is None
+
+    def rename_saved_meal(self, saved_meal_id: str, name: str) -> SavedMeal | None:
+        normalized = self._normalize_saved_name(name)
+        with self._store_lock:
+            store = self._saved()
+            current = store.get(saved_meal_id)
+            if current is None:
+                return None
+            if any(
+                meal.saved_meal_id != saved_meal_id
+                and meal.display_name.casefold() == normalized.casefold()
+                for meal in store.list_meals()
+            ):
+                raise SavedMealNameError(
+                    "Страва з такою назвою вже є. Вибери іншу назву."
+                )
+            return store.rename(saved_meal_id, normalized)
+
+    def set_saved_meal_weight(
+        self, saved_meal_id: str, weight_g: int
+    ) -> SavedMeal | None:
+        if not 1 <= weight_g <= MAX_WEIGHT_G:
+            raise ValueError
+        with self._store_lock:
+            return self._saved().set_default_weight(saved_meal_id, weight_g)
+
+    def delete_saved_meal(self, saved_meal_id: str) -> bool:
+        with self._store_lock:
+            return self._saved().delete(saved_meal_id)
+
     def delete_message(
         self, telegram_message_id: int, fallback_day: date
     ) -> MealDeletion:
@@ -446,6 +696,8 @@ class Workspace(Protocol):
     def open_meal_store(
         self, spreadsheet_id: str, day_start: time, telegram_user_id: int
     ) -> MealStore: ...
+
+    def open_saved_meal_store(self, spreadsheet_id: str) -> SavedMealStore: ...
 
     def create_personal_spreadsheet(
         self, title: str, day_start: time, telegram_user_id: int
@@ -496,6 +748,7 @@ class UserManager:
                     user.day_start,
                     user.telegram_user_id,
                 )
+                saved_store = self._workspace.open_saved_meal_store(user.spreadsheet_id)
                 service = CaloriesService(
                     self._analyzer,
                     store,
@@ -503,6 +756,7 @@ class UserManager:
                     user.day_start,
                     self._photo_storage_dir / str(user.telegram_user_id),
                     user.daily_kcal_goal,
+                    saved_store,
                 )
                 self._services[key] = service
             else:
@@ -621,7 +875,20 @@ class TelegramHandlers:
     def _cancel_goal_wait(
         cls, context: ContextTypes.DEFAULT_TYPE | object | None
     ) -> None:
-        cls._goal_state(context).pop(GOAL_WAITING_KEY, None)
+        state = cls._goal_state(context)
+        state.pop(GOAL_WAITING_KEY, None)
+        state.pop(SAVED_MEAL_WAITING_KEY, None)
+        state.pop(INVITE_WAITING_KEY, None)
+
+    @classmethod
+    def _start_waiting(
+        cls,
+        context: ContextTypes.DEFAULT_TYPE | object | None,
+        key: str,
+        value: object = True,
+    ) -> None:
+        cls._cancel_goal_wait(context)
+        cls._goal_state(context)[key] = value
 
     async def _active_service(
         self, update: Update, *, callback: bool = False
@@ -752,6 +1019,85 @@ class TelegramHandlers:
             reply = WEEK_ERROR_TEXT
         await message.reply_text(reply, do_quote=False)
 
+    @staticmethod
+    def _short_button_name(name: str, limit: int = 34) -> str:
+        return name if len(name) <= limit else f"{name[: limit - 1]}…"
+
+    @classmethod
+    def _saved_meals_keyboard(cls, meals: list[SavedMeal]) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"{cls._short_button_name(meal.display_name)} · "
+                    f"{meal.default_total_weight_g} г",
+                    callback_data=(
+                        f"saved-add:{meal.saved_meal_id}:{meal.default_total_weight_g}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "⚖️", callback_data=f"saved-weight:{meal.saved_meal_id}"
+                ),
+            ]
+            for meal in meals
+        ]
+        rows.append(
+            [
+                InlineKeyboardButton("Нещодавні", callback_data="meals-recent"),
+                InlineKeyboardButton("Керувати стравами", callback_data="meals-manage"),
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+
+    async def meals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._cancel_goal_wait(context)
+        message = update.effective_message
+        if message is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        try:
+            meals = await asyncio.to_thread(service.list_saved_meals)
+        except Exception:
+            LOGGER.exception("Could not list saved meals")
+            await message.reply_text(
+                "Не вдалося прочитати збережені страви. Спробуй ще раз.",
+                do_quote=False,
+            )
+            return
+        text = "Збережені страви:" if meals else "Збережених страв ще немає."
+        await message.reply_text(
+            text, reply_markup=self._saved_meals_keyboard(meals), do_quote=False
+        )
+
+    async def save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._cancel_goal_wait(context)
+        message = update.effective_message
+        if message is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        name = " ".join(context.args or []).strip() or None
+        try:
+            saved, created = await asyncio.to_thread(service.save_latest_meal, name)
+        except SavedMealNameError as exc:
+            await message.reply_text(str(exc), do_quote=False)
+            return
+        except Exception:
+            LOGGER.exception("Could not save the latest meal")
+            await message.reply_text(
+                "Не вдалося запам’ятати страву. Спробуй ще раз.", do_quote=False
+            )
+            return
+        if saved is None:
+            reply = "Немає запису, який можна запам’ятати."
+        elif created:
+            reply = f"Запам’ятано: {saved.display_name} ✓"
+        else:
+            reply = f"Ця страва вже збережена: {saved.display_name}."
+        await message.reply_text(reply, do_quote=False)
+
     async def goal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         user = update.effective_user
@@ -770,7 +1116,7 @@ class TelegramHandlers:
             await self._save_goal(update, args[0])
             return
 
-        self._goal_state(context)[GOAL_WAITING_KEY] = True
+        self._start_waiting(context, GOAL_WAITING_KEY)
         keyboard = None
         if current.daily_kcal_goal is None:
             reply = "Яка твоя денна ціль калорій?\nНадішли ціле число, наприклад: 2000"
@@ -855,9 +1201,357 @@ class TelegramHandlers:
         except Exception:
             LOGGER.warning("Could not edit deletion confirmation", exc_info=True)
 
+    async def save_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        try:
+            message_id, day = self._parse_source_callback(
+                query.data, SAVE_CALLBACK_PREFIX
+            )
+            saved, created = await asyncio.to_thread(
+                service.save_source_meal, message_id, day
+            )
+        except SavedMealNameError as exc:
+            await query.answer(str(exc), show_alert=True)
+            return
+        except Exception:
+            LOGGER.exception("Could not save meal from callback")
+            await query.answer(
+                "Не вдалося запам’ятати страву. Спробуй ще раз.",
+                show_alert=True,
+            )
+            return
+        if saved is None:
+            await query.answer("Цього запису вже немає. Онови список.", show_alert=True)
+            return
+        await query.answer(
+            f"{'Запам’ятано' if created else 'Вже збережено'}: {saved.display_name}"
+        )
+        delete_callback = f"delete:{message_id}:{day.isoformat()}"
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Видалити", callback_data=delete_callback)]]
+                )
+            )
+        except Exception:
+            LOGGER.warning("Could not hide saved-meal button", exc_info=True)
+
+    async def _edit_saved_meals_menu(
+        self, query: object, service: CaloriesService
+    ) -> None:
+        meals = await asyncio.to_thread(service.list_saved_meals)
+        text = "Збережені страви:" if meals else "Збережених страв ще немає."
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            text, reply_markup=self._saved_meals_keyboard(meals)
+        )
+
+    async def _edit_recent_menu(self, query: object, service: CaloriesService) -> None:
+        recent = await asyncio.to_thread(service.list_recent_meals)
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"{self._short_button_name(item.meal.meal_name)} · "
+                    f"{round_whole(item.meal.total_weight_g)} г",
+                    callback_data=(
+                        f"recent-open:{item.telegram_message_id}:{item.day.isoformat()}"
+                    ),
+                )
+            ]
+            for item in recent
+        ]
+        rows.append([InlineKeyboardButton("Назад", callback_data="meals-back")])
+        text = "Нещодавні страви:" if recent else "Нещодавніх страв немає."
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            text, reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    async def _edit_recent_detail(
+        self,
+        query: object,
+        service: CaloriesService,
+        message_id: int,
+        day: date,
+    ) -> bool:
+        recent = await asyncio.to_thread(service.get_recent_meal, message_id, day)
+        if recent is None:
+            return False
+        weight = round_whole(recent.meal.total_weight_g)
+        suffix = f"{message_id}:{day.isoformat()}"
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"Додати {weight} г", callback_data=f"recent-add:{suffix}"
+                ),
+                InlineKeyboardButton(
+                    "Інша вага", callback_data=f"recent-weight:{suffix}"
+                ),
+            ]
+        ]
+        if await asyncio.to_thread(service.recent_can_be_saved, recent):
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "⭐ Запам’ятати", callback_data=f"recent-save:{suffix}"
+                    ),
+                    InlineKeyboardButton("Назад", callback_data="meals-recent"),
+                ]
+            )
+        else:
+            rows.append([InlineKeyboardButton("Назад", callback_data="meals-recent")])
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            f"{recent.meal.meal_name}\n{weight} г · "
+            f"{round_whole(recent.meal.meal_kcal)} кк",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    async def _edit_manage_menu(self, query: object, service: CaloriesService) -> None:
+        meals = await asyncio.to_thread(service.list_saved_meals)
+        rows = [
+            [
+                InlineKeyboardButton(
+                    self._short_button_name(meal.display_name),
+                    callback_data=f"manage-open:{meal.saved_meal_id}",
+                )
+            ]
+            for meal in meals
+        ]
+        rows.append([InlineKeyboardButton("Назад", callback_data="meals-back")])
+        text = "Керування стравами:" if meals else "Збережених страв ще немає."
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            text, reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    async def _edit_manage_detail(
+        self, query: object, service: CaloriesService, saved_meal_id: str
+    ) -> bool:
+        meals = await asyncio.to_thread(service.list_saved_meals)
+        meal = next(
+            (item for item in meals if item.saved_meal_id == saved_meal_id), None
+        )
+        if meal is None:
+            return False
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            f"{meal.display_name}\nСтандартна вага: {meal.default_total_weight_g} г",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Перейменувати",
+                            callback_data=f"manage-rename:{saved_meal_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "Змінити вагу",
+                            callback_data=f"manage-default:{saved_meal_id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "Видалити зі збережених",
+                            callback_data=f"manage-delete:{saved_meal_id}",
+                        )
+                    ],
+                    [InlineKeyboardButton("Назад", callback_data="meals-manage")],
+                ]
+            ),
+        )
+        return True
+
+    async def library_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        data = query.data or ""
+        if data in {"wait-cancel", "invite-cancel"}:
+            self._cancel_goal_wait(context)
+            await query.answer()
+            await query.edit_message_text("Скасовано.", reply_markup=None)
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        try:
+            if data in {"meals-back", "meals-recent", "meals-manage"}:
+                self._cancel_goal_wait(context)
+                await query.answer()
+                if data == "meals-recent":
+                    await self._edit_recent_menu(query, service)
+                elif data == "meals-manage":
+                    await self._edit_manage_menu(query, service)
+                else:
+                    await self._edit_saved_meals_menu(query, service)
+                return
+            if data.startswith("saved-add:"):
+                _, saved_id, weight_raw = data.split(":", maxsplit=2)
+                event_id = self._callback_event_id(query.id)
+                result = await asyncio.to_thread(
+                    service.add_saved_meal,
+                    saved_id,
+                    self._parse_weight(weight_raw),
+                    event_id,
+                    datetime.now(tz=ZoneInfo("UTC")),
+                )
+                if result is None:
+                    raise LookupError
+                await query.answer("Додано")
+                if isinstance(query.message, Message):
+                    await self._send_meal_reply(query.message, result)
+                return
+            if data.startswith("saved-weight:"):
+                saved_id = data.removeprefix("saved-weight:")
+                self._start_waiting(
+                    context,
+                    SAVED_MEAL_WAITING_KEY,
+                    {"kind": "saved_weight", "saved_meal_id": saved_id},
+                )
+                await query.answer()
+                if isinstance(query.message, Message):
+                    await query.message.reply_text(
+                        "Введи загальну вагу в грамах, наприклад: 350",
+                        reply_markup=self._cancel_markup(),
+                        do_quote=False,
+                    )
+                return
+            if data.startswith("recent-open:"):
+                message_id, day = self._parse_source_callback(data, "recent-open:")
+                await query.answer()
+                if not await self._edit_recent_detail(query, service, message_id, day):
+                    raise LookupError
+                return
+            if data.startswith("recent-add:"):
+                message_id, day = self._parse_source_callback(data, "recent-add:")
+                recent = await asyncio.to_thread(
+                    service.get_recent_meal, message_id, day
+                )
+                if recent is None:
+                    raise LookupError
+                result = await asyncio.to_thread(
+                    service.add_recent_meal,
+                    message_id,
+                    day,
+                    round_whole(recent.meal.total_weight_g),
+                    self._callback_event_id(query.id),
+                    datetime.now(tz=ZoneInfo("UTC")),
+                )
+                if result is None:
+                    raise LookupError
+                await query.answer("Додано")
+                if isinstance(query.message, Message):
+                    await self._send_meal_reply(query.message, result)
+                return
+            if data.startswith("recent-weight:"):
+                message_id, day = self._parse_source_callback(data, "recent-weight:")
+                self._start_waiting(
+                    context,
+                    SAVED_MEAL_WAITING_KEY,
+                    {
+                        "kind": "recent_weight",
+                        "message_id": message_id,
+                        "day": day.isoformat(),
+                    },
+                )
+                await query.answer()
+                if isinstance(query.message, Message):
+                    await query.message.reply_text(
+                        "Введи загальну вагу в грамах, наприклад: 350",
+                        reply_markup=self._cancel_markup(),
+                        do_quote=False,
+                    )
+                return
+            if data.startswith("recent-save:"):
+                message_id, day = self._parse_source_callback(data, "recent-save:")
+                saved, created = await asyncio.to_thread(
+                    service.save_source_meal, message_id, day
+                )
+                if saved is None:
+                    raise LookupError
+                await query.answer(
+                    f"{'Запам’ятано' if created else 'Вже збережено'}: "
+                    f"{saved.display_name}"
+                )
+                await self._edit_recent_detail(query, service, message_id, day)
+                return
+            if data.startswith("manage-open:"):
+                saved_id = data.removeprefix("manage-open:")
+                await query.answer()
+                if not await self._edit_manage_detail(query, service, saved_id):
+                    raise LookupError
+                return
+            if data.startswith(("manage-rename:", "manage-default:")):
+                rename = data.startswith("manage-rename:")
+                saved_id = data.split(":", maxsplit=1)[1]
+                self._start_waiting(
+                    context,
+                    SAVED_MEAL_WAITING_KEY,
+                    {
+                        "kind": "rename" if rename else "default_weight",
+                        "saved_meal_id": saved_id,
+                    },
+                )
+                await query.answer()
+                if isinstance(query.message, Message):
+                    await query.message.reply_text(
+                        "Введи нову назву:"
+                        if rename
+                        else "Введи стандартну вагу в грамах:",
+                        reply_markup=self._cancel_markup(),
+                        do_quote=False,
+                    )
+                return
+            if data.startswith("manage-delete:"):
+                saved_id = data.removeprefix("manage-delete:")
+                await query.answer()
+                await query.edit_message_text(
+                    "Видалити цю страву зі збережених?",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "Видалити",
+                                    callback_data=f"manage-delete-do:{saved_id}",
+                                ),
+                                InlineKeyboardButton(
+                                    "Скасувати",
+                                    callback_data=f"manage-open:{saved_id}",
+                                ),
+                            ]
+                        ]
+                    ),
+                )
+                return
+            if data.startswith("manage-delete-do:"):
+                saved_id = data.removeprefix("manage-delete-do:")
+                deleted = await asyncio.to_thread(service.delete_saved_meal, saved_id)
+                await query.answer("Видалено" if deleted else "Уже видалено")
+                await self._edit_manage_menu(query, service)
+                return
+            raise ValueError
+        except LookupError:
+            await query.answer("Цього запису вже немає. Онови список.", show_alert=True)
+        except (ValueError, TypeError):
+            await query.answer("Некоректна кнопка.", show_alert=True)
+        except Exception:
+            LOGGER.exception("Could not handle saved/recent meal callback")
+            await query.answer(
+                "Не вдалося виконати дію. Спробуй ще раз.", show_alert=True
+            )
+
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         if message is None or not message.text:
+            return
+        if self._is_admin(update) and self._goal_state(context).get(INVITE_WAITING_KEY):
+            await self._finish_invite(update, context, message.text)
             return
         service = await self._active_service(update)
         if service is None:
@@ -866,7 +1560,106 @@ class TelegramHandlers:
             if await self._save_goal(update, message.text):
                 self._cancel_goal_wait(context)
             return
+        saved_state = self._goal_state(context).get(SAVED_MEAL_WAITING_KEY)
+        if isinstance(saved_state, dict):
+            await self._handle_saved_waiting(
+                update, context, service, saved_state, message.text
+            )
+            return
         await self._process(service, message, message.text)
+
+    async def _handle_saved_waiting(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        service: CaloriesService,
+        state: dict[str, object],
+        text: str,
+    ) -> None:
+        message = update.effective_message
+        if message is None:
+            return
+        kind = str(state.get("kind", ""))
+        try:
+            if kind == "saved_weight":
+                result = await asyncio.to_thread(
+                    service.add_saved_meal,
+                    str(state["saved_meal_id"]),
+                    self._parse_weight(text),
+                    message.message_id,
+                    message.date,
+                )
+                if result is None:
+                    raise LookupError
+                self._cancel_goal_wait(context)
+                await self._send_meal_reply(message, result)
+                return
+            if kind == "recent_weight":
+                result = await asyncio.to_thread(
+                    service.add_recent_meal,
+                    int(str(state["message_id"])),
+                    date.fromisoformat(str(state["day"])),
+                    self._parse_weight(text),
+                    message.message_id,
+                    message.date,
+                )
+                if result is None:
+                    raise LookupError
+                self._cancel_goal_wait(context)
+                await self._send_meal_reply(message, result)
+                return
+            if kind == "rename":
+                saved = await asyncio.to_thread(
+                    service.rename_saved_meal,
+                    str(state["saved_meal_id"]),
+                    text,
+                )
+                if saved is None:
+                    raise LookupError
+                self._cancel_goal_wait(context)
+                await message.reply_text(
+                    f"Перейменовано: {saved.display_name} ✓", do_quote=False
+                )
+                return
+            if kind == "default_weight":
+                saved = await asyncio.to_thread(
+                    service.set_saved_meal_weight,
+                    str(state["saved_meal_id"]),
+                    self._parse_weight(text),
+                )
+                if saved is None:
+                    raise LookupError
+                self._cancel_goal_wait(context)
+                await message.reply_text(
+                    f"Стандартна вага: {saved.default_total_weight_g} г ✓",
+                    do_quote=False,
+                )
+                return
+            raise ValueError
+        except SavedMealNameError as exc:
+            await message.reply_text(
+                f"{exc}\nСпробуй ще раз або натисни «Скасувати».",
+                reply_markup=self._cancel_markup(),
+                do_quote=False,
+            )
+        except ValueError:
+            await message.reply_text(
+                f"Введи ціле число від 1 до {MAX_WEIGHT_G}, наприклад: 350",
+                reply_markup=self._cancel_markup(),
+                do_quote=False,
+            )
+        except LookupError:
+            self._cancel_goal_wait(context)
+            await message.reply_text(
+                "Цього запису вже немає. Відкрий /meals ще раз.", do_quote=False
+            )
+        except Exception:
+            LOGGER.exception("Could not finish saved-meal input")
+            await message.reply_text(
+                "Не вдалося виконати дію. Спробуй ще раз або скасуй.",
+                reply_markup=self._cancel_markup(),
+                do_quote=False,
+            )
 
     @staticmethod
     def _parse_goal(raw: str) -> int:
@@ -938,19 +1731,35 @@ class TelegramHandlers:
 
     @staticmethod
     async def _send_meal_reply(message: Message, result: MealReply) -> None:
-        callback_data = (
+        delete_callback = (
             f"{DELETE_CALLBACK_PREFIX}{result.telegram_message_id}:"
             f"{result.accounting_day.isoformat()}"
         )
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Видалити", callback_data=callback_data)]]
-        )
+        buttons: list[InlineKeyboardButton] = []
+        if result.can_save:
+            buttons.append(
+                InlineKeyboardButton(
+                    "⭐ Запам’ятати",
+                    callback_data=(
+                        f"{SAVE_CALLBACK_PREFIX}{result.telegram_message_id}:"
+                        f"{result.accounting_day.isoformat()}"
+                    ),
+                )
+            )
+        buttons.append(InlineKeyboardButton("Видалити", callback_data=delete_callback))
+        keyboard = InlineKeyboardMarkup([buttons])
         await message.reply_text(
             result.text,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
             do_quote=False,
         )
+
+    @staticmethod
+    def _callback_event_id(callback_query_id: str) -> int:
+        raw = hashlib.sha256(callback_query_id.encode()).digest()
+        value = int.from_bytes(raw[:7], "big") & ((1 << 52) - 1)
+        return -(value or 1)
 
     async def _process(
         self,
@@ -999,7 +1808,34 @@ class TelegramHandlers:
             return
         display_name = " ".join(context.args or []).strip()
         if not display_name:
-            await message.reply_text("Формат: /invite <імʼя>", do_quote=False)
+            self._start_waiting(context, INVITE_WAITING_KEY)
+            await message.reply_text(
+                "Введи ім’я нового користувача.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Скасувати", callback_data="invite-cancel")]]
+                ),
+                do_quote=False,
+            )
+            return
+        await self._finish_invite(update, context, display_name)
+
+    async def _finish_invite(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        display_name: str,
+    ) -> None:
+        message = update.effective_message
+        if not self._is_admin(update) or message is None:
+            await self._reject_admin_command(update)
+            return
+        display_name = " ".join(display_name.split())
+        if not display_name:
+            await message.reply_text(
+                "Ім’я не може бути порожнім. Введи ім’я або скасуй.",
+                reply_markup=self._cancel_markup(invite=True),
+                do_quote=False,
+            )
             return
         try:
             token = await asyncio.to_thread(self._manager.create_invite, display_name)
@@ -1010,6 +1846,7 @@ class TelegramHandlers:
             LOGGER.exception("Could not create invite")
             await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
             return
+        self._cancel_goal_wait(context)
         await message.reply_text(
             f"https://t.me/{bot_user.username}?start={token}", do_quote=False
         )
@@ -1158,6 +1995,36 @@ class TelegramHandlers:
         return value
 
     @staticmethod
+    def _parse_weight(raw: str) -> int:
+        text = raw.strip()
+        if not text.isascii() or not text.isdecimal():
+            raise ValueError
+        weight = int(text)
+        if not 1 <= weight <= MAX_WEIGHT_G:
+            raise ValueError
+        return weight
+
+    @staticmethod
+    def _cancel_markup(*, invite: bool = False) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Скасувати",
+                        callback_data="invite-cancel" if invite else "wait-cancel",
+                    )
+                ]
+            ]
+        )
+
+    @staticmethod
+    def _parse_source_callback(data: str | None, prefix: str) -> tuple[int, date]:
+        if data is None or not data.startswith(prefix):
+            raise ValueError("Unknown callback")
+        message_id_raw, day_raw = data.removeprefix(prefix).split(":", maxsplit=1)
+        return int(message_id_raw), date.fromisoformat(day_raw)
+
+    @staticmethod
     def _parse_delete_callback(data: str | None) -> tuple[int, date]:
         if data is None or not data.startswith(DELETE_CALLBACK_PREFIX):
             raise ValueError("Unknown callback")
@@ -1165,6 +2032,6 @@ class TelegramHandlers:
             ":", maxsplit=1
         )
         message_id = int(message_id_raw)
-        if message_id <= 0:
+        if message_id == 0:
             raise ValueError("Invalid Telegram message ID")
         return message_id, date.fromisoformat(day_raw)

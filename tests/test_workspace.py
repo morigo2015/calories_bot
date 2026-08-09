@@ -58,6 +58,22 @@ def test_open_store_uses_shared_client_and_runs_legacy_photo_migration(
     assert store.migrations == [((tmp_path / "photos").resolve(), 123)]
 
 
+def test_open_saved_store_uses_shared_client(monkeypatch, tmp_path) -> None:
+    created = {}
+
+    class Store:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr("calories_bot.workspace.GoogleSavedMealStore", Store)
+    client = Client()
+
+    workspace(tmp_path, client).open_saved_meal_store("sheet")
+
+    assert created["client"] is client
+    assert created["spreadsheet_id"] == "sheet"
+
+
 def test_create_sheet_places_it_in_folder_and_initializes_meal_schema(
     monkeypatch, tmp_path
 ) -> None:
@@ -69,12 +85,19 @@ def test_create_sheet_places_it_in_folder_and_initializes_meal_schema(
         "open_meal_store",
         lambda *args: opened.append(args) or SimpleNamespace(),
     )
+    saved_opened = []
+    monkeypatch.setattr(
+        google,
+        "open_saved_meal_store",
+        lambda *args: saved_opened.append(args) or SimpleNamespace(),
+    )
 
     spreadsheet_id = google.create_personal_spreadsheet("Вася — 123", time(1), 123)
 
     assert spreadsheet_id == "sheet-123"
     assert client.created == [("Вася — 123", "folder")]
     assert opened == [("sheet-123", time(1), 123)]
+    assert saved_opened == [("sheet-123",)]
 
 
 def test_workspace_wraps_create_and_open_errors(monkeypatch, tmp_path) -> None:

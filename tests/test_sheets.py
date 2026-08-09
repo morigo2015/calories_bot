@@ -304,6 +304,32 @@ def test_same_message_id_on_same_day_is_a_duplicate() -> None:
     assert state.existing.meal.meal_kcal == 100
 
 
+def test_negative_callback_event_id_is_global_across_accounting_days() -> None:
+    rows = [
+        HEADERS,
+        stored_row(datetime(2026, 8, 1, 12, tzinfo=TZ), -42, 100),
+    ]
+
+    state = build_store(rows).get_state(datetime(2026, 8, 9).date(), -42)
+
+    assert state.existing is not None
+    assert state.existing.meal.meal_kcal == 100
+
+
+def test_recent_meals_are_newest_first_distinct_and_skip_bad_rows() -> None:
+    first = stored_row(datetime(2026, 8, 1, 12, tzinfo=TZ), 1, 60)
+    duplicate = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 2, 60)
+    newest = stored_row(datetime(2026, 8, 3, 12, tzinfo=TZ), 3, 90)
+    newest[2] = "йогурт"
+    newest[4] = 90
+    rows = [HEADERS, first, ["bad"], duplicate, newest]
+
+    recent = build_store(rows).get_recent_meals(8)
+
+    assert [item.telegram_message_id for item in recent] == [3, 2]
+    assert [item.meal.meal_name for item in recent] == ["йогурт", "сир"]
+
+
 def test_malformed_rows_are_skipped_in_total() -> None:
     rows = [
         HEADERS,

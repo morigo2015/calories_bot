@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import gspread
 
+from .saved_meals import GoogleSavedMealStore
 from .sheets import GoogleSheetsStore
 
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,16 @@ class GoogleWorkspace:
         except Exception as exc:
             raise GoogleWorkspaceError("Could not open personal spreadsheet") from exc
 
+    def open_saved_meal_store(self, spreadsheet_id: str) -> GoogleSavedMealStore:
+        try:
+            return GoogleSavedMealStore(
+                credentials_file=None,
+                spreadsheet_id=spreadsheet_id,
+                client=self._client,
+            )
+        except Exception as exc:
+            raise GoogleWorkspaceError("Could not open saved-meals worksheet") from exc
+
     def create_personal_spreadsheet(
         self, title: str, day_start: time, telegram_user_id: int
     ) -> str:
@@ -63,6 +74,7 @@ class GoogleWorkspace:
             # Opening the store creates and validates the meal worksheet before
             # the registry is allowed to mark the user active.
             self.open_meal_store(spreadsheet.id, day_start, telegram_user_id)
+            self.open_saved_meal_store(spreadsheet.id)
             return spreadsheet.id
         except Exception as exc:
             raise GoogleWorkspaceError("Could not create personal spreadsheet") from exc

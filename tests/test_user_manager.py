@@ -112,6 +112,7 @@ class Workspace:
         self.deleted = []
         self.fail_delete = False
         self.opened = []
+        self.saved_opened = []
 
     def create_personal_spreadsheet(self, title, cutoff, user_id):
         self.created.append((title, cutoff, user_id))
@@ -120,6 +121,10 @@ class Workspace:
     def open_meal_store(self, sheet, cutoff, user_id):
         self.opened.append((sheet, cutoff, user_id))
         return SimpleNamespace(sheet=sheet, cutoff=cutoff, user_id=user_id)
+
+    def open_saved_meal_store(self, sheet):
+        self.saved_opened.append(sheet)
+        return SimpleNamespace(sheet=sheet)
 
     def delete_personal_spreadsheet(self, sheet):
         if self.fail_delete:
@@ -172,6 +177,7 @@ def test_service_is_cached_per_personal_sheet_and_day_start(tmp_path) -> None:
 
     assert first is second
     assert workspace.opened == [("sheet", time(3), 123)]
+    assert workspace.saved_opened == ["sheet"]
     assert first._photo_storage_dir == (tmp_path / "photos" / "123").resolve()
 
 

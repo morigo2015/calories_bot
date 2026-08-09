@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
@@ -15,6 +16,7 @@ ValueOrigin = Literal[
 MAX_FOOD_ITEMS = 20
 MAX_ITEM_NAME_LENGTH = 120
 MAX_MEAL_NAME_LENGTH = 160
+MAX_SAVED_MEAL_NAME_LENGTH = 80
 MAX_PORTION_DISPLAY_LENGTH = 40
 MAX_WEIGHT_G = 10_000
 MAX_KCAL_PER_100G = 1_000
@@ -144,6 +146,30 @@ class StoredMeal(BaseModel):
     photo_path: str | None = None
 
 
+class SavedMeal(BaseModel):
+    saved_meal_id: str = Field(min_length=1, max_length=16, pattern=r"^[A-Za-z0-9_-]+$")
+    source_message_id: int
+    display_name: str
+    default_total_weight_g: int = Field(ge=1, le=MAX_WEIGHT_G)
+    base_meal: MealResult
+
+    @model_validator(mode="after")
+    def validate_display_name(self) -> SavedMeal:
+        self.display_name = " ".join(self.display_name.split())
+        if not self.display_name:
+            raise ValueError("Saved meal name cannot be empty")
+        if len(self.display_name) > MAX_SAVED_MEAL_NAME_LENGTH:
+            raise ValueError("Saved meal name is too long")
+        return self
+
+
+class RecentMeal(BaseModel):
+    telegram_message_id: int
+    day: date
+    meal: MealResult
+    normalized_request: str
+
+
 def round_whole(value: float) -> int:
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
@@ -171,4 +197,37 @@ def calculate_meal(analysis: FoodAnalysis) -> MealResult:
         estimated=any(
             item.weight_estimated or item.kcal_estimated for item in analysis.items
         ),
+    )
+
+
+def scale_meal(
+    meal: MealResult,
+    target_weight_g: int,
+    *,
+    meal_name: str | None = None,
+) -> MealResult:
+    """Scale a calculated meal while preserving its nutritional assumptions."""
+    if not 1 <= target_weight_g <= MAX_WEIGHT_G:
+        raise ValueError("Meal weight must be between 1 and 10000 grams")
+    ratio = target_weight_g / meal.total_weight_g
+    changed_weight = target_weight_g != round_whole(meal.total_weight_g)
+    items: list[CalculatedFoodItem] = []
+    for item in meal.items:
+        weight_g = item.weight_g * ratio
+        items.append(
+            CalculatedFoodItem(
+                **item.model_dump(exclude={"weight_g", "calories", "portion_display"}),
+                weight_g=weight_g,
+                calories=weight_g * item.kcal_per_100g / 100,
+                portion_display=None if changed_weight else item.portion_display,
+            )
+        )
+    meal_kcal = sum(item.calories for item in items)
+    return MealResult(
+        meal_name=meal_name or meal.meal_name,
+        items=items,
+        total_weight_g=float(target_weight_g),
+        kcal_per_100g=meal_kcal / target_weight_g * 100,
+        meal_kcal=meal_kcal,
+        estimated=meal.estimated,
     )
