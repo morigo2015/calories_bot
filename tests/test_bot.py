@@ -174,6 +174,30 @@ def test_format_day_reply_handles_empty_day() -> None:
     assert format_day_reply([]) == "Сьогодні ще немає записів."
 
 
+def test_format_day_reply_shows_goal_for_empty_day() -> None:
+    assert format_day_reply([], 1500) == (
+        "=== 0 із 1500 кк · залишилось 1500 кк\nСьогодні ще немає записів."
+    )
+
+
+def test_format_day_reply_includes_daily_goal_and_remaining_calories() -> None:
+    reply = format_day_reply(
+        [DayMeal(meal_name="сир", meal_kcal=360)],
+        daily_kcal_goal=1500,
+    )
+
+    assert reply == "=== 360 із 1500 кк · залишилось 1140 кк\n• 360 кк сир"
+
+
+def test_format_day_reply_hides_negative_remaining_calories() -> None:
+    reply = format_day_reply(
+        [DayMeal(meal_name="піца", meal_kcal=1600)],
+        daily_kcal_goal=1500,
+    )
+
+    assert reply == "=== 1600 із 1500 кк\n• 1600 кк піца"
+
+
 def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     store = FakeStore(
         SheetState(today_total=0, existing=None),
@@ -185,6 +209,25 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
 
     assert store.day.isoformat() == "2026-08-01"
     assert reply == "=== 60 кк\n• 60 кк сир"
+
+
+def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
+    store = FakeStore(
+        SheetState(today_total=0, existing=None),
+        [DayMeal(meal_name="сир", meal_kcal=60)],
+    )
+    service = CaloriesService(
+        FakeAnalyzer(food_analysis()),
+        store,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        daily_kcal_goal=1500,
+    )
+
+    reply = service.get_day_summary(datetime(2026, 8, 2, 12, tzinfo=TZ))
+
+    assert reply == "=== 60 із 1500 кк · залишилось 1440 кк\n• 60 кк сир"
 
 
 def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> None:

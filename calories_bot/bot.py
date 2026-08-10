@@ -191,14 +191,18 @@ def _format_item_calculation(item: CalculatedFoodItem) -> str:
     )
 
 
-def format_daily_total(today_total: float, daily_kcal_goal: int | None) -> str:
+def _format_daily_progress(today_total: float, daily_kcal_goal: int | None) -> str:
     rounded_total = round_whole(today_total)
     if daily_kcal_goal is None:
-        return f"За день: {rounded_total} кк"
-    line = f"За день: {rounded_total} із {daily_kcal_goal} кк"
+        return f"{rounded_total} кк"
+    line = f"{rounded_total} із {daily_kcal_goal} кк"
     if rounded_total <= daily_kcal_goal:
         line += f" · залишилось {daily_kcal_goal - rounded_total} кк"
     return line
+
+
+def format_daily_total(today_total: float, daily_kcal_goal: int | None) -> str:
+    return f"За день: {_format_daily_progress(today_total, daily_kcal_goal)}"
 
 
 def format_reply(
@@ -283,8 +287,13 @@ def format_users_reply(users: list[UserRecord]) -> str:
     return "\n".join(lines)
 
 
-def format_day_reply(meals: list[DayMeal]) -> str:
+def format_day_reply(meals: list[DayMeal], daily_kcal_goal: int | None = None) -> str:
     if not meals:
+        if daily_kcal_goal is not None:
+            return (
+                f"=== {_format_daily_progress(0, daily_kcal_goal)}\n"
+                "Сьогодні ще немає записів."
+            )
         return "Сьогодні ще немає записів."
 
     grouped: dict[str, tuple[str, float, int]] = {}
@@ -297,7 +306,8 @@ def format_day_reply(meals: list[DayMeal]) -> str:
         else:
             grouped[key] = (display_name, meal.meal_kcal, 1)
 
-    lines = [f"=== {round_whole(sum(meal.meal_kcal for meal in meals))} кк"]
+    total = sum(meal.meal_kcal for meal in meals)
+    lines = [f"=== {_format_daily_progress(total, daily_kcal_goal)}"]
     for meal_name, meal_kcal, count in grouped.values():
         count_suffix = f" — ×{count}" if count > 1 else ""
         lines.append(f"• {round_whole(meal_kcal)} кк {meal_name}{count_suffix}")
@@ -338,7 +348,10 @@ class CaloriesService:
             timestamp = timestamp.replace(tzinfo=self._timezone)
         timestamp = timestamp.astimezone(self._timezone)
         day = accounting_date(timestamp, self._timezone, self._day_start_time)
-        return format_day_reply(self._store.get_day_meals(day))
+        return format_day_reply(
+            self._store.get_day_meals(day),
+            self._daily_kcal_goal,
+        )
 
     def get_week_summary(self, timestamp: datetime) -> str:
         if timestamp.tzinfo is None:
