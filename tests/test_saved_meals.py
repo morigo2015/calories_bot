@@ -7,6 +7,7 @@ import pytest
 from calories_bot.bot import (
     CaloriesService,
     CompositeMealWeightError,
+    MealWeightUnchangedError,
     SavedMealNameError,
 )
 from calories_bot.models import (
@@ -499,6 +500,19 @@ def test_change_weight_updates_existing_single_item_and_total(tmp_path) -> None:
     assert meals.rows[0][2].meal.total_weight_g == 100
     assert meals.rows[0][2].meal.meal_kcal == 120
     assert "За день: <b><u>120 кк</u></b>" in result.text
+
+
+def test_change_weight_rejects_unchanged_weight_without_updating_store(
+    tmp_path,
+) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1)
+    app = service(tmp_path, meals, MemorySavedStore())
+
+    with pytest.raises(MealWeightUnchangedError, match="50 grams"):
+        app.change_meal_weight(1, DAY, 50)
+
+    assert meals.rows[0][2].meal.total_weight_g == 50
 
 
 def test_weight_changes_are_rejected_for_composite_meals(tmp_path) -> None:

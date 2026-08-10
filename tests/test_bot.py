@@ -19,6 +19,7 @@ from calories_bot.bot import (
     WRITE_ERROR_TEXT,
     CaloriesService,
     MealReply,
+    MealWeightUnchangedError,
     NotFoodError,
     TelegramHandlers,
     format_day_reply,
@@ -166,20 +167,19 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
     )
 
     assert reply == (
-        "=== <b><u>810 кк</u></b>\n"
-        "• 350 кк вівсянка з бананом — ×2\n"
-        "• 460 кк курка з рисом"
+        "Сьогодні: <b><u>810 кк</u></b>\n"
+        "• вівсянка з бананом ×2 — 350 кк\n"
+        "• курка з рисом — 460 кк"
     )
 
 
 def test_format_day_reply_handles_empty_day() -> None:
-    assert format_day_reply([]) == "Сьогодні ще немає записів."
+    assert format_day_reply([]) == ("Сьогодні: <b><u>0 кк</u></b>\nЗаписів ще немає.")
 
 
 def test_format_day_reply_shows_goal_for_empty_day() -> None:
     assert format_day_reply([], 1500) == (
-        "=== <b><u>0</u></b> із 1500 кк · залишилось 1500 кк\n"
-        "Сьогодні ще немає записів."
+        "Сьогодні: <b><u>0</u></b> із 1500 кк · залишилось 1500 кк\nЗаписів ще немає."
     )
 
 
@@ -190,17 +190,20 @@ def test_format_day_reply_includes_daily_goal_and_remaining_calories() -> None:
     )
 
     assert reply == (
-        "=== <b><u>360</u></b> із 1500 кк · залишилось 1140 кк\n• 360 кк сир"
+        "Сьогодні: <b><u>360</u></b> із 1500 кк · залишилось 1140 кк\n• сир — 360 кк"
     )
 
 
-def test_format_day_reply_hides_negative_remaining_calories() -> None:
+def test_format_day_reply_shows_goal_overage_without_negative_remaining() -> None:
     reply = format_day_reply(
         [DayMeal(meal_name="піца", meal_kcal=1600)],
         daily_kcal_goal=1500,
     )
 
-    assert reply == "=== <b><u>1600</u></b> із 1500 кк\n• 1600 кк піца"
+    assert reply == (
+        "Сьогодні: <b><u>1600</u></b> із 1500 кк · перевищено на 100 кк\n"
+        "• піца — 1600 кк"
+    )
 
 
 def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
@@ -213,7 +216,7 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 0, 30, tzinfo=TZ))
 
     assert store.day.isoformat() == "2026-08-01"
-    assert reply == "=== <b><u>60 кк</u></b>\n• 60 кк сир"
+    assert reply == "Сьогодні: <b><u>60 кк</u></b>\n• сир — 60 кк"
 
 
 def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
@@ -233,7 +236,7 @@ def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 12, tzinfo=TZ))
 
     assert reply == (
-        "=== <b><u>60</u></b> із 1500 кк · залишилось 1440 кк\n• 60 кк сир"
+        "Сьогодні: <b><u>60</u></b> із 1500 кк · залишилось 1440 кк\n• сир — 60 кк"
     )
 
 
@@ -559,14 +562,16 @@ def test_reply_does_not_repeat_weight_already_shown_as_portion() -> None:
     assert reply == (
         "Ковбаски з яловичини та свинини <b><u>≈450 кк</u></b>\n"
         "(150 г × ≈300 кк/100 г)\n\n"
-        "За день: <b><u>2899</u></b> із 1500 кк"
+        "За день: <b><u>2899</u></b> із 1500 кк · перевищено на 1399 кк"
     )
     assert "150 г (150 г)" not in reply
 
 
 def test_daily_goal_does_not_show_negative_remainder() -> None:
     reply = format_reply(calculate_meal(food_analysis()), 2130, 2000)
-    assert reply.endswith("За день: <b><u>2130</u></b> із 2000 кк")
+    assert reply.endswith(
+        "За день: <b><u>2130</u></b> із 2000 кк · перевищено на 130 кк"
+    )
     assert "залишилось" not in reply
 
 
@@ -584,7 +589,7 @@ def test_week_reply_includes_all_days_and_excludes_empty_days_from_stats() -> No
     )
 
     assert reply == (
-        "Останні 7 днів\n\n"
+        "За тиждень\n\n"
         "• 02.08: 1640 кк\n"
         "• 03.08: 1800 кк\n"
         "• 04.08: немає записів\n"
@@ -593,7 +598,7 @@ def test_week_reply_includes_all_days_and_excludes_empty_days_from_stats() -> No
         "• 07.08: немає записів\n"
         "• 08.08: 2310 кк\n\n"
         "Заповнено: 5 із 7 днів\n"
-        "У середньому: 1870 кк/день\n"
+        "У середньому за заповнений день: 1870 кк\n"
         "Денна ціль: 2000 кк\n"
         "У межах цілі: 4 із 5 заповнених днів\n"
         "Найменше: 1640 кк\n"
@@ -602,7 +607,7 @@ def test_week_reply_includes_all_days_and_excludes_empty_days_from_stats() -> No
 
 
 def test_week_reply_handles_no_records() -> None:
-    assert format_week_reply(date(2026, 8, 8), {}) == "За останні 7 днів записів немає."
+    assert format_week_reply(date(2026, 8, 8), {}) == "За тиждень записів немає."
 
 
 def test_user_list_contains_status_ids_and_pending_invites() -> None:
@@ -653,6 +658,30 @@ def test_service_keeps_photo_outside_storage(tmp_path) -> None:
     service.delete_message(42, date(2026, 8, 2))
 
     assert photo.exists()
+
+
+def test_service_formats_deletion_with_goal_and_idempotent_status(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    service = CaloriesService(
+        FakeAnalyzer(food_analysis()),
+        store,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        daily_kcal_goal=1500,
+    )
+
+    deleted = service.format_deletion_reply(
+        MealDeletion(date(2026, 8, 2), 905, None, True)
+    )
+    repeated = service.format_deletion_reply(
+        MealDeletion(date(2026, 8, 2), 905, None, False)
+    )
+
+    assert deleted == (
+        "Видалено\nЗа день: <b><u>905</u></b> із 1500 кк · залишилось 595 кк"
+    )
+    assert repeated.startswith("Цей запис уже видалено\nЗа день:")
 
 
 def test_google_write_failure_is_propagated_without_changing_state(tmp_path) -> None:
@@ -846,7 +875,7 @@ def test_duplicate_photo_is_checked_before_download() -> None:
     assert message.reply_kwargs[0]["do_quote"] is False
     buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0]
     assert [button.text for button in buttons] == [
-        "⭐ Запам’ятати",
+        "⭐ Зберегти",
         "⚖️ Змінити вагу",
     ]
     assert buttons[0].callback_data == "save:1:2026-08-02"
@@ -903,7 +932,7 @@ def test_week_handler_uses_shifted_accounting_day(tmp_path) -> None:
     asyncio.run(handlers.week(update, SimpleNamespace(user_data={})))
 
     assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
-    assert message.replies[0].startswith("Останні 7 днів")
+    assert message.replies[0].startswith("За тиждень")
 
 
 def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
@@ -921,7 +950,9 @@ def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
     context = SimpleNamespace(args=[], user_data={})
 
     asyncio.run(handlers.goal(update, context))
-    assert context.user_data == {"awaiting_daily_kcal_goal": True}
+    assert context.user_data == {"awaiting_daily_kcal_goal": {"kind": "daily_goal"}}
+    goal_buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard
+    assert goal_buttons[0][0].text == "❌ Скасувати"
     message.text = "2000"
     asyncio.run(handlers.text(update, context))
 
@@ -960,6 +991,8 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
                 "day": "2026-08-02",
                 "result_chat_id": 123,
                 "result_message_id": 777,
+                "prompt_chat_id": 123,
+                "prompt_message_id": 778,
             }
         },
         bot=bot,
@@ -970,9 +1003,87 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
     assert service.args == (42, date(2026, 8, 2), 100)
     assert context.user_data == {}
     assert bot.edits[0]["message_id"] == 777
-    assert bot.edits[0]["text"].endswith("За день: 120 кк")
+    assert bot.edits[0]["text"] == "Розрахунок оновлено нижче ↓"
+    assert bot.edits[0]["reply_markup"] is None
+    assert bot.edits[1] == {
+        "chat_id": 123,
+        "message_id": 778,
+        "text": "✅ Вагу змінено на 100 г",
+        "reply_markup": None,
+    }
     assert message.replies == ["Сир 120 кк\n\nЗа день: 120 кк"]
-    assert message.reply_kwargs == [{"parse_mode": ParseMode.HTML, "do_quote": False}]
+    assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
+    assert message.reply_kwargs[0]["reply_markup"] is not None
+    assert message.reply_kwargs[0]["do_quote"] is False
+
+
+def test_meal_weight_state_closes_without_reply_when_weight_is_unchanged() -> None:
+    class WeightService:
+        def change_meal_weight(self, *args):
+            raise MealWeightUnchangedError(args[2])
+
+    class Bot:
+        def __init__(self):
+            self.edits = []
+
+        async def edit_message_text(self, **kwargs):
+            self.edits.append(kwargs)
+
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: WeightService()})
+    )
+    update, message = make_update()
+    message.text = "50 г"
+    bot = Bot()
+    context = SimpleNamespace(
+        user_data={
+            "awaiting_saved_meal_value": {
+                "kind": "meal_weight",
+                "message_id": 42,
+                "day": "2026-08-02",
+                "result_chat_id": 123,
+                "result_message_id": 777,
+                "prompt_chat_id": 123,
+                "prompt_message_id": 778,
+            }
+        },
+        bot=bot,
+    )
+
+    asyncio.run(handlers.text(update, context))
+
+    assert context.user_data == {}
+    assert message.replies == []
+    assert bot.edits == [
+        {
+            "chat_id": 123,
+            "message_id": 778,
+            "text": "Вага вже становить 50 г.",
+            "reply_markup": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize("raw", ["50", "50 г", "50г", "50 гр", "50 грамів"])
+def test_weight_parser_accepts_natural_gram_formats(raw: str) -> None:
+    assert TelegramHandlers._parse_weight(raw) == 50
+
+
+def test_composite_meal_reply_hides_weight_button() -> None:
+    result = MealReply(
+        "Обід",
+        42,
+        date(2026, 8, 2),
+        can_save=True,
+        can_change_weight=False,
+    )
+
+    keyboard = TelegramHandlers._meal_reply_markup(result).inline_keyboard
+
+    assert [[button.text for button in row] for row in keyboard] == [
+        ["⭐ Зберегти"],
+        ["🗑 Видалити"],
+    ]
 
 
 def test_goal_with_existing_value_can_be_disabled() -> None:
@@ -988,6 +1099,8 @@ def test_goal_with_existing_value_can_be_disabled() -> None:
     asyncio.run(handlers.goal(update, context))
     button = message.reply_kwargs[-1]["reply_markup"].inline_keyboard[0][0]
     assert button.callback_data == "goal-disable:123"
+    cancel = message.reply_kwargs[-1]["reply_markup"].inline_keyboard[1][0]
+    assert cancel.callback_data == "wait-cancel"
 
     callback_update, query = make_callback_update("goal-disable:123")
     asyncio.run(handlers.goal_disable_callback(callback_update, context))
@@ -1034,6 +1147,10 @@ def test_delete_callback_keeps_source_message_and_leaves_confirmation() -> None:
             self.args = args
             return MealDeletion(date(2026, 8, 2), 905, None, True)
 
+        def format_deletion_reply(self, deletion):
+            assert deletion.deleted is True
+            return "Видалено\nЗа день: <b><u>905 кк</u></b>"
+
     service = FakeService()
     handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, query = make_callback_update()
@@ -1044,7 +1161,7 @@ def test_delete_callback_keeps_source_message_and_leaves_confirmation() -> None:
     assert query.answers == [(None, {})]
     assert query.edits == [
         (
-            "Видалено\n=== <b><u>905 кк</u></b>",
+            "Видалено\nЗа день: <b><u>905 кк</u></b>",
             {"parse_mode": ParseMode.HTML, "reply_markup": None},
         )
     ]
@@ -1110,7 +1227,7 @@ def test_save_callback_hides_save_button_but_keeps_delete() -> None:
     asyncio.run(handlers.save_callback(update, SimpleNamespace()))
 
     keyboard = query.markup_edits[0]["reply_markup"].inline_keyboard
-    assert query.answers == [("Запам’ятано: сир", {})]
+    assert query.answers == [("Збережено: сир", {})]
     assert keyboard[0][0].text == "⚖️ Змінити вагу"
     assert keyboard[0][0].callback_data == "meal-weight:42:2026-08-02"
     assert keyboard[1][0].text == "🗑 Видалити"
@@ -1167,6 +1284,10 @@ def test_repeated_delete_callback_uses_idempotent_result() -> None:
         def delete_message(self, *args):
             return MealDeletion(date(2026, 8, 2), 905, None, False)
 
+        def format_deletion_reply(self, deletion):
+            assert deletion.deleted is False
+            return "Цей запис уже видалено\nЗа день: <b><u>905 кк</u></b>"
+
     handlers = TelegramHandlers(
         999, FakeManager({123: user_record()}, {123: FakeService()})
     )
@@ -1174,7 +1295,9 @@ def test_repeated_delete_callback_uses_idempotent_result() -> None:
 
     asyncio.run(handlers.delete(update, SimpleNamespace()))
 
-    assert query.edits[0][0] == "Видалено\n=== <b><u>905 кк</u></b>"
+    assert query.edits[0][0] == (
+        "Цей запис уже видалено\nЗа день: <b><u>905 кк</u></b>"
+    )
 
 
 def test_delete_callback_keeps_messages_when_sheets_fail() -> None:
@@ -1460,12 +1583,26 @@ def test_meals_command_shows_all_saved_meals_without_pagination() -> None:
 
     keyboard = message.reply_kwargs[0]["reply_markup"].inline_keyboard
     assert len(keyboard) == 26
-    assert keyboard[0][0].text == "Страва 0 · 50 г"
+    assert keyboard[0][0].text == "➕ Страва 0 · 50 г"
     assert [button.text for button in keyboard[-1]] == ["🗑 Видалити із збережених"]
     assert keyboard[-1][0].callback_data == "meals-manage"
     assert not any(
         "наступ" in button.text.casefold() for row in keyboard for button in row
     )
+
+
+def test_empty_saved_meals_explains_how_to_save_without_delete_button() -> None:
+    service = SimpleNamespace(list_saved_meals=lambda: [])
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+
+    asyncio.run(handlers.meals(update, SimpleNamespace(user_data={})))
+
+    assert message.replies == [
+        "Збережених страв ще немає.\n"
+        "Після розрахунку натисни «⭐ Зберегти», і страва з’явиться тут."
+    ]
+    assert message.reply_kwargs[0]["reply_markup"] is None
 
 
 def test_saved_meal_management_only_offers_deletion() -> None:
@@ -1522,7 +1659,7 @@ def test_saved_meal_button_uses_confident_semantic_icon() -> None:
     asyncio.run(handlers.meals(update, SimpleNamespace(user_data={})))
 
     button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
-    assert button.text == "🧀 Сир · 50 г"
+    assert button.text == "➕ 🧀 Сир · 50 г"
 
 
 def test_recent_command_is_separate_direct_add_list() -> None:
@@ -1542,7 +1679,7 @@ def test_recent_command_is_separate_direct_add_list() -> None:
     asyncio.run(handlers.recent(update, SimpleNamespace(user_data={})))
 
     button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
-    assert button.text == "🍽️ сир · 50 г"
+    assert button.text == "➕ сир · 50 г"
     assert button.callback_data == "recent-add:42:2026-08-02:50"
 
 

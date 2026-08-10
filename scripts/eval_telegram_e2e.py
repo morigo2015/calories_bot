@@ -246,7 +246,7 @@ async def run_journey(
                 ("/start", "Напиши"),
                 ("/help", "/day"),
                 ("/tips", "Скорочений запис"),
-                ("/week", "Останні 7 днів"),
+                ("/week", "За тиждень"),
             ):
                 _, response = await driver.send_text(command)
                 _require(
@@ -292,7 +292,8 @@ async def run_journey(
             expected_total = baseline_total + sum(case[1] for case in exact_cases)
             _, day_response = await driver.send_text("/day")
             _require(
-                f"=== {round_whole(expected_total)} кк" in _message_text(day_response),
+                f"Сьогодні: {round_whole(expected_total)} кк"
+                in _message_text(day_response),
                 "/day total does not match Sheets",
             )
 
