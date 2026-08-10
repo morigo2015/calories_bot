@@ -83,6 +83,19 @@ def pricing_from_env() -> ModelPricing:
     )
 
 
+def timeout_from_env() -> float:
+    raw = os.getenv("OPENAI_TIMEOUT_SECONDS", "90") or "90"
+    try:
+        timeout_seconds = float(raw)
+    except ValueError as exc:
+        raise SystemExit("OPENAI_TIMEOUT_SECONDS must be a number") from exc
+    if not 0 < timeout_seconds <= 600:
+        raise SystemExit(
+            "OPENAI_TIMEOUT_SECONDS must be greater than 0 and at most 600"
+        )
+    return timeout_seconds
+
+
 def load_cases(path: Path, selected: set[str]) -> list[dict[str, Any]]:
     try:
         _, parsed = read_dataset(path)
@@ -484,6 +497,7 @@ def main() -> int:
     dataset_snapshot = build_dataset_snapshot(cases, cases_path)
     configured_model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     configured_pricing = pricing_from_env()
+    timeout_seconds = timeout_from_env()
     unknown_pricing = ModelPricing(None, None, None)
     report_configurations: list[dict[str, Any]] = []
     overall_passed = True
@@ -491,7 +505,7 @@ def main() -> int:
     for model, effort in configs:
         print(f"\n{model}:{effort}")
         pricing = configured_pricing if model == configured_model else unknown_pricing
-        analyzer = OpenAIAnalyzer(api_key, model, effort, pricing)
+        analyzer = OpenAIAnalyzer(api_key, model, effort, timeout_seconds, pricing)
         results: list[CaseResult] = []
         for repeat_index in range(args.repeat):
             for case in cases:

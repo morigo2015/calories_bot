@@ -169,6 +169,13 @@ class _FailingAnalyzer(_PassingAnalyzer):
         raise AnalysisError("controlled failure")
 
 
+class _CapturingAnalyzer(_PassingAnalyzer):
+    init_args: tuple[object, ...] = ()
+
+    def __init__(self, *args: object) -> None:
+        type(self).init_args = args
+
+
 def _run_main(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -225,6 +232,17 @@ def test_confirmed_eval_writes_schema_v2_history(
     assert json.loads(explicit_report.read_text(encoding="utf-8")) == report
     assert "test-only-key" not in serialized
     assert "base64" not in serialized
+
+
+def test_confirmed_eval_passes_configured_timeout_to_analyzer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "45")
+
+    result, _, _ = _run_main(monkeypatch, tmp_path, _CapturingAnalyzer)
+
+    assert result == 0
+    assert _CapturingAnalyzer.init_args[3] == 45
 
 
 def test_failed_eval_still_writes_history(
