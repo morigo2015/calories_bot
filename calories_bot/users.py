@@ -32,6 +32,7 @@ DAILY_KCAL_GOAL_COLUMN = 7
 
 MIN_DAILY_KCAL_GOAL = 1
 MAX_DAILY_KCAL_GOAL = 20_000
+MAX_USER_DISPLAY_NAME_LENGTH = 100
 
 VALID_STATUSES = {"invited", "active", "blocked"}
 _DAY_START_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
@@ -251,8 +252,11 @@ class GoogleUserRegistry:
         self, display_name: str, token: str, day_start: time
     ) -> UserRecord:
         name = display_name.strip()
-        if not name:
-            raise ValueError("display_name cannot be empty")
+        if not name or len(name) > MAX_USER_DISPLAY_NAME_LENGTH:
+            raise ValueError(
+                "display_name must contain between 1 and "
+                f"{MAX_USER_DISPLAY_NAME_LENGTH} characters"
+            )
         with self._lock:
             if any(record.invite_token == token for record in self._records()):
                 raise UserRegistryError("Invite token collision")

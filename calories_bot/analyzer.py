@@ -513,9 +513,10 @@ class OpenAIAnalyzer:
         api_key: str,
         model: str,
         effort: str,
+        timeout_seconds: float,
         pricing: ModelPricing,
     ) -> None:
-        self._client = OpenAI(api_key=api_key)
+        self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
         self._model = model
         self._effort = effort
         self._pricing = pricing

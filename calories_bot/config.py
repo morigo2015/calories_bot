@@ -24,6 +24,7 @@ class Settings:
     openai_api_key: str
     openai_model: str
     openai_reasoning_effort: str
+    openai_timeout_seconds: float
     openai_pricing: ModelPricing
     google_service_account_file: Path
     users_spreadsheet_id: str
@@ -64,6 +65,16 @@ class Settings:
             raise ConfigError(
                 "OPENAI_REASONING_EFFORT must be one of: "
                 + ", ".join(sorted(allowed_efforts))
+            )
+
+        timeout_raw = os.getenv("OPENAI_TIMEOUT_SECONDS", "90") or "90"
+        try:
+            openai_timeout_seconds = float(timeout_raw)
+        except ValueError as exc:
+            raise ConfigError("OPENAI_TIMEOUT_SECONDS must be a number") from exc
+        if not 0 < openai_timeout_seconds <= 600:
+            raise ConfigError(
+                "OPENAI_TIMEOUT_SECONDS must be greater than 0 and at most 600"
             )
 
         def optional_price(name: str) -> Decimal | None:
@@ -109,6 +120,7 @@ class Settings:
             openai_api_key=required["OPENAI_API_KEY"] or "",
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
             openai_reasoning_effort=effort,
+            openai_timeout_seconds=openai_timeout_seconds,
             openai_pricing=pricing,
             google_service_account_file=credentials_path,
             users_spreadsheet_id=required["USERS_SPREADSHEET_ID"] or "",

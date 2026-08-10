@@ -601,3 +601,23 @@ def test_openai_analyzer_requests_structured_meal_icon() -> None:
     assert suggestion == MealIconSuggestion(emoji="🧀", confidence=0.91)
     assert fake_responses.kwargs["text_format"] is MealIconSuggestion
     assert fake_responses.kwargs["store"] is False
+
+
+def test_openai_analyzer_configures_explicit_timeout(monkeypatch) -> None:
+    created = {}
+
+    def build_client(**kwargs):
+        created.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr("calories_bot.analyzer.OpenAI", build_client)
+
+    OpenAIAnalyzer(
+        "key",
+        "test-model",
+        "low",
+        45,
+        ModelPricing(None, None, None),
+    )
+
+    assert created == {"api_key": "key", "timeout": 45}

@@ -47,12 +47,6 @@ class SavedMealStore(Protocol):
 
     def append(self, saved_meal: SavedMeal) -> SavedMeal: ...
 
-    def rename(self, saved_meal_id: str, name: str) -> SavedMeal | None: ...
-
-    def set_default_weight(
-        self, saved_meal_id: str, weight_g: int
-    ) -> SavedMeal | None: ...
-
     def delete(self, saved_meal_id: str) -> bool: ...
 
 
@@ -194,56 +188,6 @@ class GoogleSavedMealStore:
         if stored is None:
             raise SavedMealsWriteError("Saved meal was not found after append")
         return stored
-
-    def rename(self, saved_meal_id: str, name: str) -> SavedMeal | None:
-        return self._update(saved_meal_id, 3, name)
-
-    def set_default_weight(self, saved_meal_id: str, weight_g: int) -> SavedMeal | None:
-        return self._update(saved_meal_id, 4, weight_g)
-
-    def _update(
-        self, saved_meal_id: str, column: int, value: object
-    ) -> SavedMeal | None:
-        rows = self._read_all()
-        target = next(
-            (
-                (row_number, meal)
-                for row_number, meal in rows
-                if meal.saved_meal_id == saved_meal_id
-            ),
-            None,
-        )
-        if target is None:
-            return None
-        row_number, _ = target
-        column_letter = "C" if column == 3 else "D"
-        try:
-            self._worksheet.batch_update(
-                [{"range": f"{column_letter}{row_number}", "values": [[value]]}],
-                raw=True,
-            )
-        except Exception as update_error:
-            try:
-                current = self.get(saved_meal_id)
-            except Exception as verify_error:
-                raise SavedMealsWriteUncertainError(
-                    "Could not verify the saved-meal update"
-                ) from verify_error
-            actual = (
-                current.display_name
-                if column == 3 and current
-                else (current.default_total_weight_g if current else None)
-            )
-            if actual != value:
-                raise SavedMealsWriteError(
-                    "Could not update saved meal"
-                ) from update_error
-        try:
-            return self.get(saved_meal_id)
-        except Exception as verify_error:
-            raise SavedMealsWriteUncertainError(
-                "Saved meal was updated but could not be verified"
-            ) from verify_error
 
     def delete(self, saved_meal_id: str) -> bool:
         target = next(

@@ -177,6 +177,12 @@ def test_format_day_reply_handles_empty_day() -> None:
     assert format_day_reply([]) == ("Сьогодні: <b><u>0 кк</u></b>\nЗаписів ще немає.")
 
 
+def test_format_day_reply_escapes_html_in_meal_names() -> None:
+    reply = format_day_reply([DayMeal(meal_name="<сир & хліб>", meal_kcal=100)])
+
+    assert "• &lt;сир &amp; хліб&gt; — 100 кк" in reply
+
+
 def test_format_day_reply_shows_goal_for_empty_day() -> None:
     assert format_day_reply([], 1500) == (
         "Сьогодні: <b><u>0</u></b> із 1500 кк · залишилось 1500 кк\nЗаписів ще немає."
@@ -610,6 +616,17 @@ def test_week_reply_handles_no_records() -> None:
     assert format_week_reply(date(2026, 8, 8), {}) == "За тиждень записів немає."
 
 
+def test_week_goal_uses_the_same_rounded_total_that_is_displayed() -> None:
+    reply = format_week_reply(
+        date(2026, 8, 8),
+        {date(2026, 8, 8): 2000.4},
+        2000,
+    )
+
+    assert "• 08.08: 2000 кк" in reply
+    assert "У межах цілі: 1 із 1 заповнених днів" in reply
+
+
 def test_user_list_contains_status_ids_and_pending_invites() -> None:
     users = [
         user_record(123, status="active"),
@@ -692,8 +709,33 @@ def test_google_write_failure_is_propagated_without_changing_state(tmp_path) -> 
     store = FailingStore(SheetState(today_total=300, existing=None))
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
     with pytest.raises(SheetsWriteError):
-        service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
+        service.process_message(
+            "сир 50",
+            42,
+            datetime(2026, 8, 2, 12, tzinfo=TZ),
+            image_bytes=b"photo",
+        )
     assert store.state.today_total == 300
+    assert not (tmp_path / "photos" / "2026-08-02-42.jpg").exists()
+
+
+def test_uncertain_google_write_keeps_photo_for_a_possibly_stored_row(tmp_path) -> None:
+    class FailingStore(FakeStore):
+        def append_meal(self, *args):
+            raise SheetsWriteUncertainError("unknown")
+
+    store = FailingStore(SheetState(today_total=300, existing=None))
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    with pytest.raises(SheetsWriteUncertainError):
+        service.process_message(
+            "сир 50",
+            42,
+            datetime(2026, 8, 2, 12, tzinfo=TZ),
+            image_bytes=b"photo",
+        )
+
+    assert (tmp_path / "photos" / "2026-08-02-42.jpg").read_bytes() == b"photo"
 
 
 def user_record(
@@ -985,7 +1027,7 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
     bot = Bot()
     context = SimpleNamespace(
         user_data={
-            "awaiting_saved_meal_value": {
+            "awaiting_meal_weight": {
                 "kind": "meal_weight",
                 "message_id": 42,
                 "day": "2026-08-02",
@@ -1037,7 +1079,7 @@ def test_meal_weight_state_closes_without_reply_when_weight_is_unchanged() -> No
     bot = Bot()
     context = SimpleNamespace(
         user_data={
-            "awaiting_saved_meal_value": {
+            "awaiting_meal_weight": {
                 "kind": "meal_weight",
                 "message_id": 42,
                 "day": "2026-08-02",

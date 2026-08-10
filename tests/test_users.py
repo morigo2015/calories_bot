@@ -212,6 +212,8 @@ def test_status_and_invite_input_validation() -> None:
 
     with pytest.raises(ValueError, match="display_name"):
         registry.create_invite(" ", "token", time(1))
+    with pytest.raises(ValueError, match="display_name"):
+        registry.create_invite("x" * 101, "token", time(1))
     with pytest.raises(ValueError, match="statuses"):
         registry.set_status(123, "invited")
     with pytest.raises(UserRegistryError, match="not found"):

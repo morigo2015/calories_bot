@@ -33,6 +33,7 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         monkeypatch.setenv(name, value)
     for name in (
         "OPENAI_REASONING_EFFORT",
+        "OPENAI_TIMEOUT_SECONDS",
         "OPENAI_INPUT_COST_PER_1M",
         "OPENAI_CACHED_INPUT_COST_PER_1M",
         "OPENAI_OUTPUT_COST_PER_1M",
@@ -48,6 +49,7 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     settings = Settings.from_env()
     assert settings.admin_telegram_user_id == 123
     assert settings.openai_reasoning_effort == "low"
+    assert settings.openai_timeout_seconds == 90
     assert settings.openai_pricing.complete is False
     assert settings.timezone.key == "Europe/Kyiv"
     assert settings.default_day_start.isoformat(timespec="minutes") == "01:00"
@@ -100,6 +102,9 @@ def test_missing_required_value_is_reported(monkeypatch, tmp_path) -> None:
     [
         ("ADMIN_TELEGRAM_USER_ID", "user", "ADMIN_TELEGRAM_USER_ID"),
         ("OPENAI_REASONING_EFFORT", "extreme", "OPENAI_REASONING_EFFORT"),
+        ("OPENAI_TIMEOUT_SECONDS", "never", "OPENAI_TIMEOUT_SECONDS"),
+        ("OPENAI_TIMEOUT_SECONDS", "0", "OPENAI_TIMEOUT_SECONDS"),
+        ("OPENAI_TIMEOUT_SECONDS", "601", "OPENAI_TIMEOUT_SECONDS"),
         ("DEFAULT_DAY_START", "1:00", "DEFAULT_DAY_START"),
         ("APP_TIMEZONE", "Nowhere/Unknown", "APP_TIMEZONE"),
         ("OPENAI_INPUT_COST_PER_1M", "abc", "decimal"),

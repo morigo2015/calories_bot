@@ -8,9 +8,9 @@
 
 - [PRODUCT.md](PRODUCT.md) — продуктова поведінка;
 - [TZ.md](TZ.md) — технічна реалізація;
-- [SAVED_MEALS_PRD.md](SAVED_MEALS_PRD.md) і
-  [SAVED_MEALS_SPECS.md](SAVED_MEALS_SPECS.md) — історичний дизайн попереднього
-  інкременту.
+- [SAVED_MEALS_PRD.md](old_not_actual/SAVED_MEALS_PRD.md) і
+  [SAVED_MEALS_SPECS.md](old_not_actual/SAVED_MEALS_SPECS.md) — історичний
+  дизайн попереднього інкременту.
 
 ## Використання
 
@@ -128,7 +128,8 @@ cp .env.example .env
 - `PHOTO_STORAGE_DIR=./data/photos`;
 - `APP_TIMEZONE=Europe/Kyiv`;
 - `DEFAULT_DAY_START=01:00`;
-- `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT` і тарифи `OPENAI_*_COST_PER_1M`.
+- `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT`, `OPENAI_TIMEOUT_SECONDS` і тарифи
+  `OPENAI_*_COST_PER_1M`.
 
 Окремої env-змінної для `saved_meals` немає. `.env` і
 `service-account.json` повинні мати права `600`.

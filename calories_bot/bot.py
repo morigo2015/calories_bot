@@ -53,6 +53,7 @@ from .sheets import (
     accounting_date,
 )
 from .users import (
+    MAX_USER_DISPLAY_NAME_LENGTH,
     InviteUnavailableError,
     UserAlreadyRegisteredError,
     UserRecord,
@@ -97,7 +98,7 @@ ADMIN_DELETE_CALLBACK_PREFIX = "admin-delete:"
 ADMIN_CANCEL_CALLBACK_PREFIX = "admin-cancel:"
 GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
 GOAL_WAITING_KEY = "awaiting_daily_kcal_goal"
-SAVED_MEAL_WAITING_KEY = "awaiting_saved_meal_value"
+MEAL_WEIGHT_WAITING_KEY = "awaiting_meal_weight"
 INVITE_WAITING_KEY = "awaiting_invite_name"
 INVITE_ONLY_TEXT = "Доступ лише за запрошенням."
 BLOCKED_TEXT = "Доступ до бота вимкнено."
@@ -281,9 +282,8 @@ def format_week_reply(
     for day in days:
         value = f"{rounded[day]} кк" if day in rounded else "немає записів"
         lines.append(f"• {day.strftime('%d.%m')}: {value}")
-    exact_values = list(present.values())
     rounded_values = list(rounded.values())
-    average = round_whole(sum(exact_values) / len(exact_values))
+    average = round_whole(sum(present.values()) / len(present))
     lines.extend(
         [
             "",
@@ -292,7 +292,7 @@ def format_week_reply(
         ]
     )
     if daily_kcal_goal is not None:
-        within_goal = sum(value <= daily_kcal_goal for value in exact_values)
+        within_goal = sum(value <= daily_kcal_goal for value in rounded_values)
         lines.extend(
             [
                 f"Денна ціль: {daily_kcal_goal} кк",
@@ -351,7 +351,9 @@ def format_day_reply(meals: list[DayMeal], daily_kcal_goal: int | None = None) -
     lines = [f"Сьогодні: {_format_daily_progress(total, daily_kcal_goal)}"]
     for meal_name, meal_kcal, count in grouped.values():
         count_suffix = f" ×{count}" if count > 1 else ""
-        lines.append(f"• {meal_name}{count_suffix} — {round_whole(meal_kcal)} кк")
+        lines.append(
+            f"• {html.escape(meal_name)}{count_suffix} — {round_whole(meal_kcal)} кк"
+        )
     return "\n".join(lines)
 
 
@@ -380,25 +382,31 @@ class CaloriesService:
         # the expensive analysis outside the lock.
         self._store_lock = threading.RLock()
 
+    def _local_timestamp(self, timestamp: datetime) -> datetime:
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=self._timezone)
+        return timestamp.astimezone(self._timezone)
+
+    def _accounting_day(self, timestamp: datetime) -> date:
+        return accounting_date(
+            self._local_timestamp(timestamp),
+            self._timezone,
+            self._day_start_time,
+        )
+
     def set_daily_kcal_goal(self, goal: int | None) -> None:
         with self._store_lock:
             self._daily_kcal_goal = goal
 
     def get_day_summary(self, timestamp: datetime) -> str:
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=self._timezone)
-        timestamp = timestamp.astimezone(self._timezone)
-        day = accounting_date(timestamp, self._timezone, self._day_start_time)
+        day = self._accounting_day(timestamp)
         return format_day_reply(
             self._store.get_day_meals(day),
             self._daily_kcal_goal,
         )
 
     def get_week_summary(self, timestamp: datetime) -> str:
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=self._timezone)
-        timestamp = timestamp.astimezone(self._timezone)
-        end_day = accounting_date(timestamp, self._timezone, self._day_start_time)
+        end_day = self._accounting_day(timestamp)
         start_day = end_day - timedelta(days=6)
         totals = self._store.get_daily_totals(start_day, end_day)
         return format_week_reply(end_day, totals, self._daily_kcal_goal)
@@ -406,10 +414,7 @@ class CaloriesService:
     def get_existing_reply(
         self, telegram_message_id: int, timestamp: datetime
     ) -> MealReply | None:
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=self._timezone)
-        timestamp = timestamp.astimezone(self._timezone)
-        day = accounting_date(timestamp, self._timezone, self._day_start_time)
+        day = self._accounting_day(timestamp)
         with self._store_lock:
             state = self._store.get_state(day, telegram_message_id)
         if state.existing is None:
@@ -432,11 +437,8 @@ class CaloriesService:
         timestamp: datetime,
         image_bytes: bytes | None = None,
     ) -> MealReply:
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=self._timezone)
-        timestamp = timestamp.astimezone(self._timezone)
-
-        day = accounting_date(timestamp, self._timezone, self._day_start_time)
+        timestamp = self._local_timestamp(timestamp)
+        day = self._accounting_day(timestamp)
         with self._store_lock:
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
@@ -487,15 +489,22 @@ class CaloriesService:
                 )
                 photo_file.write_bytes(image_bytes)
                 photo_path = str(photo_file)
-            stored = self._store.append_meal(
-                timestamp,
-                telegram_message_id,
-                text,
-                normalized.text,
-                photo_path,
-                meal,
-                result.metadata,
-            )
+            try:
+                stored = self._store.append_meal(
+                    timestamp,
+                    telegram_message_id,
+                    text,
+                    normalized.text,
+                    photo_path,
+                    meal,
+                    result.metadata,
+                )
+            except SheetsWriteUncertainError:
+                raise
+            except SheetsWriteError:
+                if photo_path is not None:
+                    self._delete_photo(photo_path)
+                raise
             today_total = state.today_total + stored.meal.meal_kcal
             return MealReply(
                 text=format_reply(stored.meal, today_total, self._daily_kcal_goal),
@@ -606,11 +615,8 @@ class CaloriesService:
             return saved_store.append(saved), True
 
     def _suggest_saved_meal_icon(self, meal: MealResult) -> str | None:
-        suggest = getattr(self._analyzer, "suggest_meal_icon", None)
-        if not callable(suggest):
-            return None
         try:
-            suggestion = suggest(meal)
+            suggestion = self._analyzer.suggest_meal_icon(meal)
         except Exception:
             LOGGER.warning("Could not generate a saved-meal icon", exc_info=True)
             return None
@@ -639,10 +645,8 @@ class CaloriesService:
         *,
         can_save: bool,
     ) -> MealReply:
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=self._timezone)
-        timestamp = timestamp.astimezone(self._timezone)
-        day = accounting_date(timestamp, self._timezone, self._day_start_time)
+        timestamp = self._local_timestamp(timestamp)
+        day = self._accounting_day(timestamp)
         with self._store_lock:
             state = self._store.get_state(day, event_id)
             if state.existing is None:
@@ -713,37 +717,6 @@ class CaloriesService:
                 and not recent.normalized_request.startswith("saved_meal:")
             ),
         )
-
-    def rename_saved_meal(self, saved_meal_id: str, name: str) -> SavedMeal | None:
-        normalized = self._normalize_saved_name(name)
-        with self._store_lock:
-            store = self._saved()
-            current = store.get(saved_meal_id)
-            if current is None:
-                return None
-            if any(
-                meal.saved_meal_id != saved_meal_id
-                and meal.display_name.casefold() == normalized.casefold()
-                for meal in store.list_meals()
-            ):
-                raise SavedMealNameError(
-                    "Страва з такою назвою вже є. Вибери іншу назву."
-                )
-            return store.rename(saved_meal_id, normalized)
-
-    def set_saved_meal_weight(
-        self, saved_meal_id: str, weight_g: int
-    ) -> SavedMeal | None:
-        if not 1 <= weight_g <= MAX_WEIGHT_G:
-            raise ValueError
-        with self._store_lock:
-            store = self._saved()
-            saved = store.get(saved_meal_id)
-            if saved is None:
-                return None
-            if len(saved.base_meal.items) != 1:
-                raise CompositeMealWeightError
-            return store.set_default_weight(saved_meal_id, weight_g)
 
     def change_meal_weight(
         self, message_id: int, day: date, weight_g: int
@@ -886,17 +859,9 @@ class UserManager:
             return service
 
     def create_invite(self, display_name: str) -> str:
-        for _ in range(3):
-            token = secrets.token_urlsafe(24)
-            try:
-                self._registry.create_invite(
-                    display_name, token, self._default_day_start
-                )
-                return token
-            except UserRegistryError as exc:
-                if "collision" not in str(exc).lower():
-                    raise
-        raise UserRegistryError("Could not generate a unique invite token")
+        token = secrets.token_urlsafe(24)
+        self._registry.create_invite(display_name, token, self._default_day_start)
+        return token
 
     def activate(
         self, token: str, telegram_user_id: int, telegram_username: str
@@ -987,19 +952,19 @@ class TelegramHandlers:
         )
 
     @staticmethod
-    def _goal_state(
+    def _user_state(
         context: ContextTypes.DEFAULT_TYPE | object | None,
     ) -> dict[str, object]:
         data = getattr(context, "user_data", None)
         return data if isinstance(data, dict) else {}
 
     @classmethod
-    def _cancel_goal_wait(
+    def _clear_pending_input(
         cls, context: ContextTypes.DEFAULT_TYPE | object | None
     ) -> None:
-        state = cls._goal_state(context)
+        state = cls._user_state(context)
         state.pop(GOAL_WAITING_KEY, None)
-        state.pop(SAVED_MEAL_WAITING_KEY, None)
+        state.pop(MEAL_WEIGHT_WAITING_KEY, None)
         state.pop(INVITE_WAITING_KEY, None)
 
     @classmethod
@@ -1009,8 +974,8 @@ class TelegramHandlers:
         key: str,
         value: object = True,
     ) -> None:
-        cls._cancel_goal_wait(context)
-        cls._goal_state(context)[key] = value
+        cls._clear_pending_input(context)
+        cls._user_state(context)[key] = value
 
     @staticmethod
     def _remember_prompt(state: dict[str, object], prompt: object) -> None:
@@ -1107,7 +1072,7 @@ class TelegramHandlers:
             await update.effective_message.reply_text(text, do_quote=False)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         user = update.effective_user
         if not self._is_private(update) or message is None or user is None:
@@ -1143,7 +1108,7 @@ class TelegramHandlers:
         await message.reply_text(load_start_text(), do_quote=False)
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1154,7 +1119,7 @@ class TelegramHandlers:
             await message.reply_text(load_help_text(), do_quote=False)
 
     async def tips(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1162,7 +1127,7 @@ class TelegramHandlers:
             await message.reply_text(load_tips_text(), do_quote=False)
 
     async def day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1180,7 +1145,7 @@ class TelegramHandlers:
         await message.reply_text(reply, parse_mode=ParseMode.HTML, do_quote=False)
 
     async def week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1242,7 +1207,7 @@ class TelegramHandlers:
         )
 
     async def meals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1273,7 +1238,7 @@ class TelegramHandlers:
         )
 
     async def recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1297,7 +1262,7 @@ class TelegramHandlers:
         )
 
     async def save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
@@ -1331,11 +1296,11 @@ class TelegramHandlers:
             return
         current = await self._active_user(update)
         if current is None:
-            self._cancel_goal_wait(context)
+            self._clear_pending_input(context)
             return
         args = list(getattr(context, "args", None) or [])
         if args:
-            self._cancel_goal_wait(context)
+            self._clear_pending_input(context)
             if len(args) != 1:
                 await message.reply_text(self._goal_validation_text(), do_quote=False)
                 return
@@ -1393,7 +1358,7 @@ class TelegramHandlers:
             LOGGER.exception("Could not disable daily goal")
             await query.answer(GOAL_ERROR_TEXT, show_alert=True)
             return
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         await query.answer()
         await query.edit_message_text("Денну ціль вимкнено ✓", reply_markup=None)
 
@@ -1516,7 +1481,7 @@ class TelegramHandlers:
             "result_chat_id": query.message.chat_id,
             "result_message_id": query.message.message_id,
         }
-        self._start_waiting(context, SAVED_MEAL_WAITING_KEY, waiting_state)
+        self._start_waiting(context, MEAL_WEIGHT_WAITING_KEY, waiting_state)
         await query.answer()
         prompt = await query.message.reply_text(
             "⚖️ Введи нову вагу, наприклад: 350 г",
@@ -1595,7 +1560,7 @@ class TelegramHandlers:
             return
         data = query.data or ""
         if data in {"wait-cancel", "invite-cancel"}:
-            self._cancel_goal_wait(context)
+            self._clear_pending_input(context)
             await query.answer()
             await query.edit_message_text("Скасовано.", reply_markup=None)
             return
@@ -1604,7 +1569,7 @@ class TelegramHandlers:
             return
         try:
             if data in {"meals-back", "meals-manage"}:
-                self._cancel_goal_wait(context)
+                self._clear_pending_input(context)
                 await query.answer()
                 if data == "meals-manage":
                     await self._edit_manage_menu(query, service)
@@ -1647,7 +1612,7 @@ class TelegramHandlers:
                 if isinstance(query.message, Message):
                     await self._send_meal_reply(query.message, result)
                 return
-            if data.startswith(("manage-open:", "manage-delete:")):
+            if data.startswith("manage-delete:"):
                 saved_id = data.split(":", maxsplit=1)[1]
                 await query.answer()
                 if not await self._edit_delete_confirmation(query, service, saved_id):
@@ -1674,28 +1639,28 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None or not message.text:
             return
-        if self._is_admin(update) and self._goal_state(context).get(INVITE_WAITING_KEY):
+        if self._is_admin(update) and self._user_state(context).get(INVITE_WAITING_KEY):
             await self._finish_invite(update, context, message.text)
             return
         service = await self._active_service(update)
         if service is None:
             return
-        goal_waiting = self._goal_state(context).get(GOAL_WAITING_KEY)
+        goal_waiting = self._user_state(context).get(GOAL_WAITING_KEY)
         if goal_waiting:
             if await self._save_goal(update, message.text):
                 if isinstance(goal_waiting, dict):
                     await self._remove_waiting_prompt_buttons(context, goal_waiting)
-                self._cancel_goal_wait(context)
+                self._clear_pending_input(context)
             return
-        saved_state = self._goal_state(context).get(SAVED_MEAL_WAITING_KEY)
-        if isinstance(saved_state, dict):
-            await self._handle_saved_waiting(
-                update, context, service, saved_state, message.text
+        meal_weight_state = self._user_state(context).get(MEAL_WEIGHT_WAITING_KEY)
+        if isinstance(meal_weight_state, dict):
+            await self._handle_meal_weight_input(
+                update, context, service, meal_weight_state, message.text
             )
             return
         await self._process(service, message, message.text)
 
-    async def _handle_saved_waiting(
+    async def _handle_meal_weight_input(
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -1706,82 +1671,46 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None:
             return
-        kind = str(state.get("kind", ""))
         try:
-            if kind == "meal_weight":
-                weight_g = self._parse_weight(text)
-                result = await asyncio.to_thread(
-                    service.change_meal_weight,
-                    int(str(state["message_id"])),
-                    date.fromisoformat(str(state["day"])),
-                    weight_g,
+            if state.get("kind") != "meal_weight":
+                raise ValueError
+            weight_g = self._parse_weight(text)
+            result = await asyncio.to_thread(
+                service.change_meal_weight,
+                int(str(state["message_id"])),
+                date.fromisoformat(str(state["day"])),
+                weight_g,
+            )
+            if result is None:
+                raise LookupError
+            await self._send_meal_reply(message, result)
+            self._clear_pending_input(context)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=int(str(state["result_chat_id"])),
+                    message_id=int(str(state["result_message_id"])),
+                    text="Розрахунок оновлено нижче ↓",
+                    reply_markup=None,
                 )
-                if result is None:
-                    raise LookupError
-                await self._send_meal_reply(message, result)
-                self._cancel_goal_wait(context)
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=int(str(state["result_chat_id"])),
-                        message_id=int(str(state["result_message_id"])),
-                        text="Розрахунок оновлено нижче ↓",
-                        reply_markup=None,
-                    )
-                except Exception:
-                    LOGGER.warning(
-                        "Meal weight was updated but the old reply could not "
-                        "be archived",
-                        exc_info=True,
-                    )
-                await self._edit_waiting_prompt(
-                    context,
-                    state,
-                    f"✅ Вагу змінено на {weight_g} г",
+            except Exception:
+                LOGGER.warning(
+                    "Meal weight was updated but the old reply could not be archived",
+                    exc_info=True,
                 )
-                return
-            if kind == "rename":
-                saved = await asyncio.to_thread(
-                    service.rename_saved_meal,
-                    str(state["saved_meal_id"]),
-                    text,
-                )
-                if saved is None:
-                    raise LookupError
-                self._cancel_goal_wait(context)
-                await message.reply_text(
-                    f"Перейменовано: {saved.display_name} ✓", do_quote=False
-                )
-                return
-            if kind == "default_weight":
-                saved = await asyncio.to_thread(
-                    service.set_saved_meal_weight,
-                    str(state["saved_meal_id"]),
-                    self._parse_weight(text),
-                )
-                if saved is None:
-                    raise LookupError
-                self._cancel_goal_wait(context)
-                await message.reply_text(
-                    f"Стандартна вага: {saved.default_total_weight_g} г ✓",
-                    do_quote=False,
-                )
-                return
-            raise ValueError
+            await self._edit_waiting_prompt(
+                context,
+                state,
+                f"✅ Вагу змінено на {weight_g} г",
+            )
         except MealWeightUnchangedError as exc:
-            self._cancel_goal_wait(context)
+            self._clear_pending_input(context)
             unchanged_text = f"Вага вже становить {exc.weight_g} г."
             if not await self._edit_waiting_prompt(context, state, unchanged_text):
                 await message.reply_text(unchanged_text, do_quote=False)
         except CompositeMealWeightError:
-            self._cancel_goal_wait(context)
+            self._clear_pending_input(context)
             await message.reply_text(
                 "Змінити вагу можна лише для страви з одного компонента.",
-                do_quote=False,
-            )
-        except SavedMealNameError as exc:
-            await message.reply_text(
-                f"{exc}\nСпробуй ще раз або натисни «Скасувати».",
-                reply_markup=self._cancel_markup(),
                 do_quote=False,
             )
         except ValueError:
@@ -1790,7 +1719,7 @@ class TelegramHandlers:
                 do_quote=False,
             )
         except LookupError:
-            self._cancel_goal_wait(context)
+            self._clear_pending_input(context)
             await message.reply_text(
                 "Цього запису вже немає. Відкрий /meals ще раз.", do_quote=False
             )
@@ -1843,7 +1772,7 @@ class TelegramHandlers:
         return True
 
     async def photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if message is None or not message.photo or message.media_group_id is not None:
             return
@@ -1956,7 +1885,7 @@ class TelegramHandlers:
         await message.reply_text(reply, do_quote=False)
 
     async def invite(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
@@ -1991,9 +1920,10 @@ class TelegramHandlers:
             await self._reject_admin_command(update)
             return
         display_name = " ".join(display_name.split())
-        if not display_name:
+        if not display_name or len(display_name) > MAX_USER_DISPLAY_NAME_LENGTH:
             await message.reply_text(
-                "Ім’я не може бути порожнім. Введи ім’я або скасуй.",
+                "Ім’я має містити від 1 до "
+                f"{MAX_USER_DISPLAY_NAME_LENGTH} символів. Введи інше ім’я або скасуй.",
                 reply_markup=self._cancel_markup(invite=True),
                 do_quote=False,
             )
@@ -2007,13 +1937,13 @@ class TelegramHandlers:
             LOGGER.exception("Could not create invite")
             await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
             return
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         await message.reply_text(
             f"https://t.me/{bot_user.username}?start={token}", do_quote=False
         )
 
     async def users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
@@ -2035,7 +1965,7 @@ class TelegramHandlers:
     async def _set_status_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, status: str
     ) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
@@ -2059,7 +1989,7 @@ class TelegramHandlers:
     async def delete_user_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
         message = update.effective_message
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
@@ -2138,11 +2068,11 @@ class TelegramHandlers:
             return
         await self._send_access_text(update, "Недоступно.", callback=False)
 
-    async def cancel_goal_waiting(
+    async def cancel_pending_input(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         del update
-        self._cancel_goal_wait(context)
+        self._clear_pending_input(context)
 
     @staticmethod
     def _parse_admin_user_id(args: list[str] | None) -> int:

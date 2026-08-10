@@ -156,9 +156,9 @@ class SavedMeal(BaseModel):
 додаванням порожньої останньої колонки. Інша невідома схема відхиляється без
 зміни `food_log`.
 
-Store реалізує `list_meals`, `get`, `find_by_source`, `append`, `rename`,
-`set_default_weight`, `delete`. Після зміни результат перечитується. Помилки
-read, підтвердженого write та невизначеного write розділені.
+Store реалізує `list_meals`, `get`, `find_by_source`, `append` і `delete`.
+Після зміни результат перечитується. Помилки read, підтвердженого write та
+невизначеного write розділені.
 
 Збереження кнопкою, `/save` без назви й з `Нещодавніх` автоматично додає
 суфікс `(2)`, `(3)` при збігу назв. `/save <name>` і rename відхиляють зайняту
@@ -217,7 +217,7 @@ meal-weight:<message_id>:<day>
 
 Handler повторно читає source. Для кількох компонентів він одразу показує
 alert і не створює стан. Для одного компонента встановлюється
-`SAVED_MEAL_WAITING_KEY` із kind `meal_weight`, source ID/day та Telegram ID
+`MEAL_WEIGHT_WAITING_KEY` із kind `meal_weight`, source ID/day та Telegram ID
 бот-повідомлення з результатом.
 
 Наступне ціле число масштабує один компонент. `update_meal()` одним
@@ -256,7 +256,7 @@ recent-add:<message_id>:<day>:<weight_g>
 Очікування зберігаються в `context.user_data` трьома простими ключами:
 
 - `GOAL_WAITING_KEY`;
-- `SAVED_MEAL_WAITING_KEY` з kind `meal_weight` для зміни ваги прийому;
+- `MEAL_WEIGHT_WAITING_KEY` з kind `meal_weight` для зміни ваги прийому;
 - `INVITE_WAITING_KEY`.
 
 Inline-списки `/meals`, `/recent` та видалення будуються цілком, без
@@ -282,7 +282,8 @@ Inline-списки `/meals`, `/recent` та видалення будуютьс
 
 Основні optional env: `USERS_SHEET_NAME`, `MEAL_SHEET_NAME`,
 `PHOTO_STORAGE_DIR`, `APP_TIMEZONE`, `DEFAULT_DAY_START`, модель, reasoning
-effort і тарифи OpenAI. Окремої змінної для `saved_meals` немає.
+effort, `OPENAI_TIMEOUT_SECONDS` і тарифи OpenAI. Окремої змінної для
+`saved_meals` немає.
 
 Безкоштовна перевірка:
 
@@ -290,5 +291,6 @@ effort і тарифи OpenAI. Окремої змінної для `saved_meals
 bash scripts/run_tests.sh
 ```
 
-Вона запускає compileall, Ruff format/check, mypy, pytest із branch coverage та
-`pip check`. Paid LLM eval запускається лише окремо з явним підтвердженням.
+Вона запускає compileall, Ruff format/check, mypy, pytest із branch coverage не
+нижче 75% та `pip check`. Paid LLM eval запускається лише окремо з явним
+підтвердженням.

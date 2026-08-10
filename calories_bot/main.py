@@ -71,6 +71,7 @@ def main() -> None:
         settings.openai_api_key,
         settings.openai_model,
         settings.openai_reasoning_effort,
+        settings.openai_timeout_seconds,
         settings.openai_pricing,
     )
     google_client = gspread.service_account(
@@ -152,7 +153,7 @@ def main() -> None:
         CommandHandler("delete", handlers.delete_user_command, filters=message_update)
     )
     application.add_handler(
-        MessageHandler(message_update & filters.COMMAND, handlers.cancel_goal_waiting)
+        MessageHandler(message_update & filters.COMMAND, handlers.cancel_pending_input)
     )
     application.add_handler(
         CallbackQueryHandler(

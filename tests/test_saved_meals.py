@@ -132,7 +132,7 @@ def sheet_store(rows) -> GoogleSavedMealStore:
     return store
 
 
-def test_saved_meal_store_crud_and_newest_first() -> None:
+def test_saved_meal_store_append_delete_and_newest_first() -> None:
     store = sheet_store([SAVED_MEALS_HEADERS])
 
     store.append(saved("one", 1, "Перша"))
@@ -140,8 +140,6 @@ def test_saved_meal_store_crud_and_newest_first() -> None:
 
     assert [item.saved_meal_id for item in store.list_meals()] == ["two", "one"]
     assert store.find_by_source(1).display_name == "Перша"
-    assert store.rename("one", "Нова назва").display_name == "Нова назва"
-    assert store.set_default_weight("one", 175).default_total_weight_g == 175
     assert store.delete("two") is True
     assert store.delete("two") is False
     assert [item.saved_meal_id for item in store.list_meals()] == ["one"]
@@ -248,22 +246,6 @@ class MemorySavedStore:
     def append(self, item):
         self.items.append(item)
         return item
-
-    def rename(self, saved_id, name):
-        current = self.get(saved_id)
-        if current is None:
-            return None
-        updated = current.model_copy(update={"display_name": name})
-        self.items[self.items.index(current)] = updated
-        return updated
-
-    def set_default_weight(self, saved_id, weight):
-        current = self.get(saved_id)
-        if current is None:
-            return None
-        updated = current.model_copy(update={"default_total_weight_g": weight})
-        self.items[self.items.index(current)] = updated
-        return updated
 
     def delete(self, saved_id):
         current = self.get(saved_id)
@@ -524,5 +506,3 @@ def test_weight_changes_are_rejected_for_composite_meals(tmp_path) -> None:
 
     with pytest.raises(CompositeMealWeightError):
         app.change_meal_weight(1, DAY, 500)
-    with pytest.raises(CompositeMealWeightError):
-        app.set_saved_meal_weight("lunch", 500)

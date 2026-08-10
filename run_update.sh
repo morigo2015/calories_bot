@@ -8,6 +8,9 @@ fi
 
 cd "$(dirname "$0")"
 
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pip check
+
 git add \
     AGENTS.md VPS_HELP.txt .env.example .gitignore \
     pyproject.toml requirements.txt requirements-dev.txt run_update.sh \

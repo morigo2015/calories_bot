@@ -10,7 +10,7 @@ cd "$PROJECT_DIR"
 "$PYTHON_BIN" -m ruff format --check .
 "$PYTHON_BIN" -m ruff check .
 "$PYTHON_BIN" -m mypy calories_bot
-"$PYTHON_BIN" -m pytest --cov=calories_bot --cov-branch
+"$PYTHON_BIN" -m pytest --cov=calories_bot --cov-branch --cov-fail-under=75
 "$PYTHON_BIN" -m pip check
 
 if [[ $# -eq 0 ]]; then
