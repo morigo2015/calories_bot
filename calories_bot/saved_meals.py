@@ -8,13 +8,14 @@ from gspread.utils import ValueInputOption, ValueRenderOption
 
 from .models import MealResult, SavedMeal
 
-SAVED_MEALS_HEADERS = [
+LEGACY_SAVED_MEALS_HEADERS = [
     "saved_meal_id",
     "source_message_id",
     "display_name",
     "default_total_weight_g",
     "meal_json",
 ]
+SAVED_MEALS_HEADERS = [*LEGACY_SAVED_MEALS_HEADERS, "icon"]
 
 
 class SavedMealsError(RuntimeError):
@@ -63,6 +64,7 @@ def _saved_meal_from_row(row: list[object]) -> SavedMeal:
         display_name=str(padded[2]),
         default_total_weight_g=int(str(padded[3])),
         base_meal=MealResult.model_validate_json(str(padded[4])),
+        icon=str(padded[5]).strip() or None,
     )
 
 
@@ -97,6 +99,13 @@ class GoogleSavedMealStore:
                 SAVED_MEALS_HEADERS, value_input_option=ValueInputOption.raw
             )
             return
+        if rows[0] == LEGACY_SAVED_MEALS_HEADERS:
+            self._worksheet.insert_cols(
+                [["icon"]], col=6, value_input_option=ValueInputOption.raw
+            )
+            rows = self._worksheet.get_all_values(
+                value_render_option=ValueRenderOption.unformatted
+            )
         if rows[0] != SAVED_MEALS_HEADERS:
             raise SavedMealsSchemaError(
                 "Saved-meals worksheet headers are incompatible"
@@ -156,6 +165,7 @@ class GoogleSavedMealStore:
             saved_meal.display_name,
             saved_meal.default_total_weight_g,
             saved_meal.base_meal.model_dump_json(),
+            saved_meal.icon or "",
         ]
         try:
             self._worksheet.append_row(row, value_input_option=ValueInputOption.raw)

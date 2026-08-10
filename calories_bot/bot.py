@@ -30,6 +30,7 @@ from .models import (
     MAX_WEIGHT_G,
     CalculatedFoodItem,
     LLMMetadata,
+    MealIconSuggestion,
     MealResult,
     RecentMeal,
     SavedMeal,
@@ -60,6 +61,7 @@ from .users import (
 )
 
 LOGGER = logging.getLogger(__name__)
+SAVED_MEAL_ICON_CONFIDENCE = 0.8
 
 HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
 START_TEXT_FILE = Path(__file__).with_name("start.txt")
@@ -111,6 +113,10 @@ class NotFoodError(ValueError):
 
 class SavedMealNameError(ValueError):
     """Raised when an explicitly chosen saved-meal name is unavailable."""
+
+
+class CompositeMealWeightError(ValueError):
+    """Raised when weight editing is requested for a composite meal."""
 
 
 @dataclass(frozen=True)
@@ -458,6 +464,10 @@ class CaloriesService:
         with self._store_lock:
             return self._saved().list_meals()
 
+    def get_saved_meal(self, saved_meal_id: str) -> SavedMeal | None:
+        with self._store_lock:
+            return self._saved().get(saved_meal_id)
+
     def list_recent_meals(self) -> list[RecentMeal]:
         with self._store_lock:
             return self._store.get_recent_meals(8)
@@ -526,14 +536,31 @@ class CaloriesService:
                     break
             else:
                 raise SavedMealsWriteError("Could not generate a saved-meal ID")
+            icon = self._suggest_saved_meal_icon(source.meal)
             saved = SavedMeal(
                 saved_meal_id=saved_meal_id,
                 source_message_id=message_id,
                 display_name=display_name,
                 default_total_weight_g=round_whole(source.meal.total_weight_g),
                 base_meal=source.meal,
+                icon=icon,
             )
             return saved_store.append(saved), True
+
+    def _suggest_saved_meal_icon(self, meal: MealResult) -> str | None:
+        suggest = getattr(self._analyzer, "suggest_meal_icon", None)
+        if not callable(suggest):
+            return None
+        try:
+            suggestion = suggest(meal)
+        except Exception:
+            LOGGER.warning("Could not generate a saved-meal icon", exc_info=True)
+            return None
+        if not isinstance(suggestion, MealIconSuggestion):
+            return None
+        if suggestion.confidence < SAVED_MEAL_ICON_CONFIDENCE:
+            return None
+        return suggestion.emoji
 
     def save_latest_meal(
         self, name: str | None = None
@@ -628,12 +655,6 @@ class CaloriesService:
             ),
         )
 
-    def recent_can_be_saved(self, recent: RecentMeal) -> bool:
-        if recent.normalized_request.startswith("saved_meal:"):
-            return False
-        with self._store_lock:
-            return self._saved().find_by_source(recent.telegram_message_id) is None
-
     def rename_saved_meal(self, saved_meal_id: str, name: str) -> SavedMeal | None:
         normalized = self._normalize_saved_name(name)
         with self._store_lock:
@@ -657,7 +678,40 @@ class CaloriesService:
         if not 1 <= weight_g <= MAX_WEIGHT_G:
             raise ValueError
         with self._store_lock:
-            return self._saved().set_default_weight(saved_meal_id, weight_g)
+            store = self._saved()
+            saved = store.get(saved_meal_id)
+            if saved is None:
+                return None
+            if len(saved.base_meal.items) != 1:
+                raise CompositeMealWeightError
+            return store.set_default_weight(saved_meal_id, weight_g)
+
+    def change_meal_weight(
+        self, message_id: int, day: date, weight_g: int
+    ) -> MealReply | None:
+        with self._store_lock:
+            source = self._store.get_meal(day, message_id)
+            if source is None:
+                return None
+            if len(source.meal.items) != 1:
+                raise CompositeMealWeightError
+            updated = self._store.update_meal(
+                day, message_id, scale_meal(source.meal, weight_g)
+            )
+            if updated is None:
+                return None
+            can_save = (
+                not source.normalized_request.startswith("saved_meal:")
+                and self._saved().find_by_source(message_id) is None
+            )
+        return MealReply(
+            text=format_reply(
+                updated.meal.meal, updated.day_total, self._daily_kcal_goal
+            ),
+            telegram_message_id=message_id,
+            accounting_day=updated.accounting_day,
+            can_save=can_save,
+        )
 
     def delete_saved_meal(self, saved_meal_id: str) -> bool:
         with self._store_lock:
@@ -1028,25 +1082,39 @@ class TelegramHandlers:
         rows = [
             [
                 InlineKeyboardButton(
+                    f"{f'{meal.icon} ' if meal.icon else ''}"
                     f"{cls._short_button_name(meal.display_name)} · "
                     f"{meal.default_total_weight_g} г",
                     callback_data=(
                         f"saved-add:{meal.saved_meal_id}:{meal.default_total_weight_g}"
                     ),
-                ),
-                InlineKeyboardButton(
-                    "⚖️", callback_data=f"saved-weight:{meal.saved_meal_id}"
-                ),
+                )
             ]
             for meal in meals
         ]
         rows.append(
-            [
-                InlineKeyboardButton("Нещодавні", callback_data="meals-recent"),
-                InlineKeyboardButton("Керувати стравами", callback_data="meals-manage"),
-            ]
+            [InlineKeyboardButton("⚙️ Керувати стравами", callback_data="meals-manage")]
         )
         return InlineKeyboardMarkup(rows)
+
+    @classmethod
+    def _recent_meals_keyboard(cls, recent: list[RecentMeal]) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"🍽️ {cls._short_button_name(item.meal.meal_name)} · "
+                        f"{round_whole(item.meal.total_weight_g)} г",
+                        callback_data=(
+                            f"recent-add:{item.telegram_message_id}:"
+                            f"{item.day.isoformat()}:"
+                            f"{round_whole(item.meal.total_weight_g)}"
+                        ),
+                    )
+                ]
+                for item in recent
+            ]
+        )
 
     async def meals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._cancel_goal_wait(context)
@@ -1068,6 +1136,30 @@ class TelegramHandlers:
         text = "Збережені страви:" if meals else "Збережених страв ще немає."
         await message.reply_text(
             text, reply_markup=self._saved_meals_keyboard(meals), do_quote=False
+        )
+
+    async def recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._cancel_goal_wait(context)
+        message = update.effective_message
+        if message is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        try:
+            recent = await asyncio.to_thread(service.list_recent_meals)
+        except Exception:
+            LOGGER.exception("Could not list recent meals")
+            await message.reply_text(
+                "Не вдалося прочитати нещодавні страви. Спробуй ще раз.",
+                do_quote=False,
+            )
+            return
+        text = "Нещодавні страви:" if recent else "Нещодавніх страв немає."
+        await message.reply_text(
+            text,
+            reply_markup=self._recent_meals_keyboard(recent) if recent else None,
+            do_quote=False,
         )
 
     async def save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1129,7 +1221,7 @@ class TelegramHandlers:
                 [
                     [
                         InlineKeyboardButton(
-                            "Вимкнути ціль",
+                            "🚫 Вимкнути ціль",
                             callback_data=f"{GOAL_DISABLE_CALLBACK_PREFIX}{user.id}",
                         )
                     ]
@@ -1234,15 +1326,65 @@ class TelegramHandlers:
         await query.answer(
             f"{'Запам’ятано' if created else 'Вже збережено'}: {saved.display_name}"
         )
-        delete_callback = f"delete:{message_id}:{day.isoformat()}"
         try:
             await query.edit_message_reply_markup(
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Видалити", callback_data=delete_callback)]]
+                reply_markup=self._meal_reply_markup(
+                    MealReply(
+                        text="",
+                        telegram_message_id=message_id,
+                        accounting_day=day,
+                        can_save=False,
+                    )
                 )
             )
         except Exception:
             LOGGER.warning("Could not hide saved-meal button", exc_info=True)
+
+    async def meal_weight_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        try:
+            message_id, day = self._parse_source_callback(query.data, "meal-weight:")
+            source = await asyncio.to_thread(service.get_recent_meal, message_id, day)
+        except Exception:
+            LOGGER.exception("Could not prepare meal weight editing")
+            await query.answer("Не вдалося прочитати страву.", show_alert=True)
+            return
+        if source is None:
+            await query.answer("Цього запису вже немає.", show_alert=True)
+            return
+        if len(source.meal.items) != 1:
+            await query.answer(
+                "Змінити вагу можна лише для страви з одного компонента.",
+                show_alert=True,
+            )
+            return
+        if not isinstance(query.message, Message):
+            await query.answer("Це повідомлення вже недоступне.", show_alert=True)
+            return
+        self._start_waiting(
+            context,
+            SAVED_MEAL_WAITING_KEY,
+            {
+                "kind": "meal_weight",
+                "message_id": message_id,
+                "day": day.isoformat(),
+                "result_chat_id": query.message.chat_id,
+                "result_message_id": query.message.message_id,
+            },
+        )
+        await query.answer()
+        await query.message.reply_text(
+            "⚖️ Введи нову вагу в грамах, наприклад: 350",
+            reply_markup=self._cancel_markup(),
+            do_quote=False,
+        )
 
     async def _edit_saved_meals_menu(
         self, query: object, service: CaloriesService
@@ -1253,78 +1395,19 @@ class TelegramHandlers:
             text, reply_markup=self._saved_meals_keyboard(meals)
         )
 
-    async def _edit_recent_menu(self, query: object, service: CaloriesService) -> None:
-        recent = await asyncio.to_thread(service.list_recent_meals)
-        rows = [
-            [
-                InlineKeyboardButton(
-                    f"{self._short_button_name(item.meal.meal_name)} · "
-                    f"{round_whole(item.meal.total_weight_g)} г",
-                    callback_data=(
-                        f"recent-open:{item.telegram_message_id}:{item.day.isoformat()}"
-                    ),
-                )
-            ]
-            for item in recent
-        ]
-        rows.append([InlineKeyboardButton("Назад", callback_data="meals-back")])
-        text = "Нещодавні страви:" if recent else "Нещодавніх страв немає."
-        await query.edit_message_text(  # type: ignore[attr-defined]
-            text, reply_markup=InlineKeyboardMarkup(rows)
-        )
-
-    async def _edit_recent_detail(
-        self,
-        query: object,
-        service: CaloriesService,
-        message_id: int,
-        day: date,
-    ) -> bool:
-        recent = await asyncio.to_thread(service.get_recent_meal, message_id, day)
-        if recent is None:
-            return False
-        weight = round_whole(recent.meal.total_weight_g)
-        suffix = f"{message_id}:{day.isoformat()}"
-        rows = [
-            [
-                InlineKeyboardButton(
-                    f"Додати {weight} г", callback_data=f"recent-add:{suffix}"
-                ),
-                InlineKeyboardButton(
-                    "Інша вага", callback_data=f"recent-weight:{suffix}"
-                ),
-            ]
-        ]
-        if await asyncio.to_thread(service.recent_can_be_saved, recent):
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        "⭐ Запам’ятати", callback_data=f"recent-save:{suffix}"
-                    ),
-                    InlineKeyboardButton("Назад", callback_data="meals-recent"),
-                ]
-            )
-        else:
-            rows.append([InlineKeyboardButton("Назад", callback_data="meals-recent")])
-        await query.edit_message_text(  # type: ignore[attr-defined]
-            f"{recent.meal.meal_name}\n{weight} г · "
-            f"{round_whole(recent.meal.meal_kcal)} кк",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
-        return True
-
     async def _edit_manage_menu(self, query: object, service: CaloriesService) -> None:
         meals = await asyncio.to_thread(service.list_saved_meals)
         rows = [
             [
                 InlineKeyboardButton(
-                    self._short_button_name(meal.display_name),
+                    f"{f'{meal.icon} ' if meal.icon else ''}"
+                    f"{self._short_button_name(meal.display_name)}",
                     callback_data=f"manage-open:{meal.saved_meal_id}",
                 )
             ]
             for meal in meals
         ]
-        rows.append([InlineKeyboardButton("Назад", callback_data="meals-back")])
+        rows.append([InlineKeyboardButton("↩️ Назад", callback_data="meals-back")])
         text = "Керування стравами:" if meals else "Збережених страв ще немає."
         await query.edit_message_text(  # type: ignore[attr-defined]
             text, reply_markup=InlineKeyboardMarkup(rows)
@@ -1345,21 +1428,21 @@ class TelegramHandlers:
                 [
                     [
                         InlineKeyboardButton(
-                            "Перейменувати",
+                            "✏️ Перейменувати",
                             callback_data=f"manage-rename:{saved_meal_id}",
                         ),
                         InlineKeyboardButton(
-                            "Змінити вагу",
+                            "⚖️ Змінити вагу",
                             callback_data=f"manage-default:{saved_meal_id}",
                         ),
                     ],
                     [
                         InlineKeyboardButton(
-                            "Видалити зі збережених",
+                            "🗑 Видалити зі збережених",
                             callback_data=f"manage-delete:{saved_meal_id}",
                         )
                     ],
-                    [InlineKeyboardButton("Назад", callback_data="meals-manage")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="meals-manage")],
                 ]
             ),
         )
@@ -1381,12 +1464,10 @@ class TelegramHandlers:
         if service is None:
             return
         try:
-            if data in {"meals-back", "meals-recent", "meals-manage"}:
+            if data in {"meals-back", "meals-manage"}:
                 self._cancel_goal_wait(context)
                 await query.answer()
-                if data == "meals-recent":
-                    await self._edit_recent_menu(query, service)
-                elif data == "meals-manage":
+                if data == "meals-manage":
                     await self._edit_manage_menu(query, service)
                 else:
                     await self._edit_saved_meals_menu(query, service)
@@ -1407,39 +1488,17 @@ class TelegramHandlers:
                 if isinstance(query.message, Message):
                     await self._send_meal_reply(query.message, result)
                 return
-            if data.startswith("saved-weight:"):
-                saved_id = data.removeprefix("saved-weight:")
-                self._start_waiting(
-                    context,
-                    SAVED_MEAL_WAITING_KEY,
-                    {"kind": "saved_weight", "saved_meal_id": saved_id},
-                )
-                await query.answer()
-                if isinstance(query.message, Message):
-                    await query.message.reply_text(
-                        "Введи загальну вагу в грамах, наприклад: 350",
-                        reply_markup=self._cancel_markup(),
-                        do_quote=False,
-                    )
-                return
-            if data.startswith("recent-open:"):
-                message_id, day = self._parse_source_callback(data, "recent-open:")
-                await query.answer()
-                if not await self._edit_recent_detail(query, service, message_id, day):
-                    raise LookupError
-                return
             if data.startswith("recent-add:"):
-                message_id, day = self._parse_source_callback(data, "recent-add:")
-                recent = await asyncio.to_thread(
-                    service.get_recent_meal, message_id, day
-                )
-                if recent is None:
-                    raise LookupError
+                message_id_raw, day_raw, weight_raw = data.removeprefix(
+                    "recent-add:"
+                ).split(":", maxsplit=2)
+                message_id = int(message_id_raw)
+                day = date.fromisoformat(day_raw)
                 result = await asyncio.to_thread(
                     service.add_recent_meal,
                     message_id,
                     day,
-                    round_whole(recent.meal.total_weight_g),
+                    self._parse_weight(weight_raw),
                     self._callback_event_id(query.id),
                     datetime.now(tz=ZoneInfo("UTC")),
                 )
@@ -1448,38 +1507,6 @@ class TelegramHandlers:
                 await query.answer("Додано")
                 if isinstance(query.message, Message):
                     await self._send_meal_reply(query.message, result)
-                return
-            if data.startswith("recent-weight:"):
-                message_id, day = self._parse_source_callback(data, "recent-weight:")
-                self._start_waiting(
-                    context,
-                    SAVED_MEAL_WAITING_KEY,
-                    {
-                        "kind": "recent_weight",
-                        "message_id": message_id,
-                        "day": day.isoformat(),
-                    },
-                )
-                await query.answer()
-                if isinstance(query.message, Message):
-                    await query.message.reply_text(
-                        "Введи загальну вагу в грамах, наприклад: 350",
-                        reply_markup=self._cancel_markup(),
-                        do_quote=False,
-                    )
-                return
-            if data.startswith("recent-save:"):
-                message_id, day = self._parse_source_callback(data, "recent-save:")
-                saved, created = await asyncio.to_thread(
-                    service.save_source_meal, message_id, day
-                )
-                if saved is None:
-                    raise LookupError
-                await query.answer(
-                    f"{'Запам’ятано' if created else 'Вже збережено'}: "
-                    f"{saved.display_name}"
-                )
-                await self._edit_recent_detail(query, service, message_id, day)
                 return
             if data.startswith("manage-open:"):
                 saved_id = data.removeprefix("manage-open:")
@@ -1490,6 +1517,16 @@ class TelegramHandlers:
             if data.startswith(("manage-rename:", "manage-default:")):
                 rename = data.startswith("manage-rename:")
                 saved_id = data.split(":", maxsplit=1)[1]
+                if not rename:
+                    saved = await asyncio.to_thread(service.get_saved_meal, saved_id)
+                    if saved is None:
+                        raise LookupError
+                    if len(saved.base_meal.items) != 1:
+                        await query.answer(
+                            "Змінити вагу можна лише для страви з одного компонента.",
+                            show_alert=True,
+                        )
+                        return
                 self._start_waiting(
                     context,
                     SAVED_MEAL_WAITING_KEY,
@@ -1517,11 +1554,11 @@ class TelegramHandlers:
                         [
                             [
                                 InlineKeyboardButton(
-                                    "Видалити",
+                                    "🗑 Видалити",
                                     callback_data=f"manage-delete-do:{saved_id}",
                                 ),
                                 InlineKeyboardButton(
-                                    "Скасувати",
+                                    "❌ Скасувати",
                                     callback_data=f"manage-open:{saved_id}",
                                 ),
                             ]
@@ -1581,32 +1618,35 @@ class TelegramHandlers:
             return
         kind = str(state.get("kind", ""))
         try:
-            if kind == "saved_weight":
+            if kind == "meal_weight":
                 result = await asyncio.to_thread(
-                    service.add_saved_meal,
-                    str(state["saved_meal_id"]),
-                    self._parse_weight(text),
-                    message.message_id,
-                    message.date,
-                )
-                if result is None:
-                    raise LookupError
-                self._cancel_goal_wait(context)
-                await self._send_meal_reply(message, result)
-                return
-            if kind == "recent_weight":
-                result = await asyncio.to_thread(
-                    service.add_recent_meal,
+                    service.change_meal_weight,
                     int(str(state["message_id"])),
                     date.fromisoformat(str(state["day"])),
                     self._parse_weight(text),
-                    message.message_id,
-                    message.date,
                 )
                 if result is None:
                     raise LookupError
                 self._cancel_goal_wait(context)
-                await self._send_meal_reply(message, result)
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=int(str(state["result_chat_id"])),
+                        message_id=int(str(state["result_message_id"])),
+                        text=result.text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=self._meal_reply_markup(result),
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Meal weight was updated but the reply could not be edited",
+                        exc_info=True,
+                    )
+                    await message.reply_text(
+                        "⚖️ Вагу змінено, але не вдалося оновити попередню відповідь.",
+                        do_quote=False,
+                    )
+                else:
+                    await message.reply_text("⚖️ Вагу змінено ✓", do_quote=False)
                 return
             if kind == "rename":
                 saved = await asyncio.to_thread(
@@ -1636,6 +1676,12 @@ class TelegramHandlers:
                 )
                 return
             raise ValueError
+        except CompositeMealWeightError:
+            self._cancel_goal_wait(context)
+            await message.reply_text(
+                "Змінити вагу можна лише для страви з одного компонента.",
+                do_quote=False,
+            )
         except SavedMealNameError as exc:
             await message.reply_text(
                 f"{exc}\nСпробуй ще раз або натисни «Скасувати».",
@@ -1730,14 +1776,18 @@ class TelegramHandlers:
         await self._process(service, message, message.caption or "", image_bytes)
 
     @staticmethod
-    async def _send_meal_reply(message: Message, result: MealReply) -> None:
+    def _meal_reply_markup(result: MealReply) -> InlineKeyboardMarkup:
         delete_callback = (
             f"{DELETE_CALLBACK_PREFIX}{result.telegram_message_id}:"
             f"{result.accounting_day.isoformat()}"
         )
-        buttons: list[InlineKeyboardButton] = []
+        weight_callback = (
+            f"meal-weight:{result.telegram_message_id}:"
+            f"{result.accounting_day.isoformat()}"
+        )
+        first_row: list[InlineKeyboardButton] = []
         if result.can_save:
-            buttons.append(
+            first_row.append(
                 InlineKeyboardButton(
                     "⭐ Запам’ятати",
                     callback_data=(
@@ -1746,12 +1796,22 @@ class TelegramHandlers:
                     ),
                 )
             )
-        buttons.append(InlineKeyboardButton("Видалити", callback_data=delete_callback))
-        keyboard = InlineKeyboardMarkup([buttons])
+        first_row.append(
+            InlineKeyboardButton("⚖️ Змінити вагу", callback_data=weight_callback)
+        )
+        return InlineKeyboardMarkup(
+            [
+                first_row,
+                [InlineKeyboardButton("🗑 Видалити", callback_data=delete_callback)],
+            ]
+        )
+
+    @classmethod
+    async def _send_meal_reply(cls, message: Message, result: MealReply) -> None:
         await message.reply_text(
             result.text,
             parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
+            reply_markup=cls._meal_reply_markup(result),
             do_quote=False,
         )
 
@@ -1812,7 +1872,13 @@ class TelegramHandlers:
             await message.reply_text(
                 "Введи ім’я нового користувача.",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Скасувати", callback_data="invite-cancel")]]
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "❌ Скасувати", callback_data="invite-cancel"
+                            )
+                        ]
+                    ]
                 ),
                 do_quote=False,
             )
@@ -1921,11 +1987,11 @@ class TelegramHandlers:
             [
                 [
                     InlineKeyboardButton(
-                        "Підтвердити видалення",
+                        "🗑 Підтвердити видалення",
                         callback_data=f"{ADMIN_DELETE_CALLBACK_PREFIX}{telegram_user_id}",
                     ),
                     InlineKeyboardButton(
-                        "Скасувати",
+                        "❌ Скасувати",
                         callback_data=f"{ADMIN_CANCEL_CALLBACK_PREFIX}{telegram_user_id}",
                     ),
                 ]
@@ -2010,7 +2076,7 @@ class TelegramHandlers:
             [
                 [
                     InlineKeyboardButton(
-                        "Скасувати",
+                        "❌ Скасувати",
                         callback_data="invite-cancel" if invite else "wait-cancel",
                     )
                 ]

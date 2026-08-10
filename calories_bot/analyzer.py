@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol, cast
 from openai import OpenAI
 from openai.types.shared import ReasoningEffort
 
-from .models import FoodAnalysis, LLMMetadata
+from .models import FoodAnalysis, LLMMetadata, MealIconSuggestion, MealResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +55,12 @@ Examples:
 - A label photo -> read the product name and kcal/100g; estimate portion if absent.
 - "як справи?" -> is_food=false.
 """
+
+ICON_SYSTEM_PROMPT = """Choose exactly one emoji that visually represents the
+given meal. Return the emoji and a confidence from 0 to 1 that an ordinary user
+would immediately associate it with the meal. Use a food emoji, not a decorative
+symbol. If no specific emoji fits, choose the closest food emoji and give low
+confidence."""
 
 
 class AnalysisError(RuntimeError):
@@ -115,6 +121,8 @@ class Analyzer(Protocol):
     def analyze(
         self, normalized: NormalizedInput, image_bytes: bytes | None = None
     ) -> AnalysisResult: ...
+
+    def suggest_meal_icon(self, meal: MealResult) -> MealIconSuggestion: ...
 
 
 _DECIMAL = re.compile(r"\d+[.,]\d+")
@@ -611,3 +619,30 @@ class OpenAIAnalyzer:
                 ),
             )
         return AnalysisResult(analysis=analysis, metadata=metadata)
+
+    def suggest_meal_icon(self, meal: MealResult) -> MealIconSuggestion:
+        try:
+            response = self._client.responses.parse(
+                model=self._model,
+                reasoning={"effort": cast(ReasoningEffort, self._effort)},
+                store=False,
+                input=cast(
+                    Any,
+                    [
+                        {"role": "system", "content": ICON_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Meal: {meal.meal_name}. Components: "
+                                + ", ".join(item.name for item in meal.items)
+                            ),
+                        },
+                    ],
+                ),
+                text_format=MealIconSuggestion,
+            )
+        except Exception as exc:
+            raise AnalysisError("OpenAI icon request failed") from exc
+        if response.output_parsed is None:
+            raise AnalysisError("OpenAI returned no icon suggestion")
+        return response.output_parsed

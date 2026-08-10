@@ -15,7 +15,13 @@ from calories_bot.analyzer import (
     enforce_explicit_values,
     normalize_input,
 )
-from calories_bot.models import FoodAnalysis, FoodItem, calculate_meal, round_whole
+from calories_bot.models import (
+    FoodAnalysis,
+    FoodItem,
+    MealIconSuggestion,
+    calculate_meal,
+    round_whole,
+)
 
 
 @pytest.mark.parametrize(
@@ -555,3 +561,43 @@ def test_empty_structured_output_is_rejected() -> None:
     analyzer._pricing = ModelPricing(None, None, None)
     with pytest.raises(AnalysisError):
         analyzer.analyze(NormalizedInput("сир", ()))
+
+
+def test_openai_analyzer_requests_structured_meal_icon() -> None:
+    response = SimpleNamespace(
+        output_parsed=MealIconSuggestion(emoji="🧀", confidence=0.91)
+    )
+    fake_responses = SimpleNamespace(kwargs=None)
+
+    def parse(**kwargs):
+        fake_responses.kwargs = kwargs
+        return response
+
+    fake_responses.parse = parse
+    analyzer = OpenAIAnalyzer.__new__(OpenAIAnalyzer)
+    analyzer._client = SimpleNamespace(responses=fake_responses)
+    analyzer._model = "test-model"
+    analyzer._effort = "none"
+    analyzer._pricing = ModelPricing(None, None, None)
+
+    suggestion = analyzer.suggest_meal_icon(
+        calculate_meal(
+            FoodAnalysis(
+                is_food=True,
+                meal_name="сир",
+                items=[
+                    FoodItem(
+                        name="сир",
+                        weight_g=50,
+                        weight_estimated=False,
+                        kcal_per_100g=120,
+                        kcal_estimated=False,
+                    )
+                ],
+            )
+        )
+    )
+
+    assert suggestion == MealIconSuggestion(emoji="🧀", confidence=0.91)
+    assert fake_responses.kwargs["text_format"] is MealIconSuggestion
+    assert fake_responses.kwargs["store"] is False

@@ -152,6 +152,7 @@ class SavedMeal(BaseModel):
     display_name: str
     default_total_weight_g: int = Field(ge=1, le=MAX_WEIGHT_G)
     base_meal: MealResult
+    icon: str | None = None
 
     @model_validator(mode="after")
     def validate_display_name(self) -> SavedMeal:
@@ -160,6 +161,28 @@ class SavedMeal(BaseModel):
             raise ValueError("Saved meal name cannot be empty")
         if len(self.display_name) > MAX_SAVED_MEAL_NAME_LENGTH:
             raise ValueError("Saved meal name is too long")
+        if self.icon is not None:
+            self.icon = self.icon.strip()
+            if (
+                not self.icon
+                or len(self.icon) > 8
+                or any(char.isalnum() or char.isspace() for char in self.icon)
+            ):
+                raise ValueError("Saved meal icon must be one emoji")
+        return self
+
+
+class MealIconSuggestion(BaseModel):
+    emoji: str = Field(min_length=1, max_length=8)
+    confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_emoji(self) -> MealIconSuggestion:
+        self.emoji = self.emoji.strip()
+        if not self.emoji or any(
+            char.isalnum() or char.isspace() for char in self.emoji
+        ):
+            raise ValueError("Icon suggestion must contain one emoji")
         return self
 
 

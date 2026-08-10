@@ -32,6 +32,7 @@ from calories_bot.models import (
     FoodAnalysis,
     FoodItem,
     LLMMetadata,
+    RecentMeal,
     SavedMeal,
     StoredMeal,
     calculate_meal,
@@ -734,9 +735,15 @@ def test_duplicate_photo_is_checked_before_download() -> None:
     assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
     assert message.reply_kwargs[0]["do_quote"] is False
     buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0]
-    assert [button.text for button in buttons] == ["⭐ Запам’ятати", "Видалити"]
+    assert [button.text for button in buttons] == [
+        "⭐ Запам’ятати",
+        "⚖️ Змінити вагу",
+    ]
     assert buttons[0].callback_data == "save:1:2026-08-02"
-    assert buttons[1].callback_data == "delete:1:2026-08-02"
+    assert buttons[1].callback_data == "meal-weight:1:2026-08-02"
+    delete_button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[1][0]
+    assert delete_button.text == "🗑 Видалити"
+    assert delete_button.callback_data == "delete:1:2026-08-02"
 
 
 def test_day_handler_passes_telegram_message_date() -> None:
@@ -812,6 +819,49 @@ def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
     assert service.food_calls == 0
     assert context.user_data == {}
     assert message.replies[-1] == "Денну ціль встановлено: 2000 кк ✓"
+
+
+def test_meal_weight_state_updates_existing_reply_in_place() -> None:
+    class WeightService:
+        def __init__(self):
+            self.args = None
+
+        def change_meal_weight(self, *args):
+            self.args = args
+            return MealReply("Сир 120 кк\n\nЗа день: 120 кк", 42, date(2026, 8, 2))
+
+    class Bot:
+        def __init__(self):
+            self.edits = []
+
+        async def edit_message_text(self, **kwargs):
+            self.edits.append(kwargs)
+
+    service = WeightService()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+    message.text = "100"
+    bot = Bot()
+    context = SimpleNamespace(
+        user_data={
+            "awaiting_saved_meal_value": {
+                "kind": "meal_weight",
+                "message_id": 42,
+                "day": "2026-08-02",
+                "result_chat_id": 123,
+                "result_message_id": 777,
+            }
+        },
+        bot=bot,
+    )
+
+    asyncio.run(handlers.text(update, context))
+
+    assert service.args == (42, date(2026, 8, 2), 100)
+    assert context.user_data == {}
+    assert bot.edits[0]["message_id"] == 777
+    assert bot.edits[0]["text"].endswith("За день: 120 кк")
+    assert message.replies == ["⚖️ Вагу змінено ✓"]
 
 
 def test_goal_with_existing_value_can_be_disabled() -> None:
@@ -908,6 +958,26 @@ def test_saved_add_callback_uses_stable_negative_event_id() -> None:
     assert query.answers == [("Додано", {}), ("Додано", {})]
 
 
+def test_recent_add_callback_uses_weight_printed_on_button() -> None:
+    class Service:
+        def __init__(self):
+            self.args = None
+
+        def add_recent_meal(self, *args):
+            self.args = args
+            return MealReply("Додано", args[3], date(2026, 8, 2))
+
+    service = Service()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, query = make_callback_update("recent-add:42:2026-08-02:175")
+
+    asyncio.run(handlers.library_callback(update, SimpleNamespace(user_data={})))
+
+    assert service.args[0:3] == (42, date(2026, 8, 2), 175)
+    assert service.args[3] < 0
+    assert query.answers == [("Додано", {})]
+
+
 def test_save_callback_hides_save_button_but_keeps_delete() -> None:
     value = calculate_meal(food_analysis())
     template = SavedMeal(
@@ -925,8 +995,55 @@ def test_save_callback_hides_save_button_but_keeps_delete() -> None:
 
     keyboard = query.markup_edits[0]["reply_markup"].inline_keyboard
     assert query.answers == [("Запам’ятано: сир", {})]
-    assert keyboard[0][0].text == "Видалити"
-    assert keyboard[0][0].callback_data == "delete:42:2026-08-02"
+    assert keyboard[0][0].text == "⚖️ Змінити вагу"
+    assert keyboard[0][0].callback_data == "meal-weight:42:2026-08-02"
+    assert keyboard[1][0].text == "🗑 Видалити"
+    assert keyboard[1][0].callback_data == "delete:42:2026-08-02"
+
+
+def test_change_weight_callback_rejects_composite_meal() -> None:
+    composite = calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name="обід",
+            items=[
+                FoodItem(
+                    name="курка",
+                    weight_g=100,
+                    weight_estimated=False,
+                    kcal_per_100g=200,
+                    kcal_estimated=False,
+                ),
+                FoodItem(
+                    name="рис",
+                    weight_g=200,
+                    weight_estimated=False,
+                    kcal_per_100g=100,
+                    kcal_estimated=False,
+                ),
+            ],
+        )
+    )
+    recent = RecentMeal(
+        telegram_message_id=42,
+        day=date(2026, 8, 2),
+        meal=composite,
+        normalized_request="обід",
+    )
+    service = SimpleNamespace(get_recent_meal=lambda *args: recent)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, query = make_callback_update("meal-weight:42:2026-08-02")
+    context = SimpleNamespace(user_data={})
+
+    asyncio.run(handlers.meal_weight_callback(update, context))
+
+    assert context.user_data == {}
+    assert query.answers == [
+        (
+            "Змінити вагу можна лише для страви з одного компонента.",
+            {"show_alert": True},
+        )
+    ]
 
 
 def test_repeated_delete_callback_uses_idempotent_result() -> None:
@@ -1228,13 +1345,54 @@ def test_meals_command_shows_all_saved_meals_without_pagination() -> None:
     keyboard = message.reply_kwargs[0]["reply_markup"].inline_keyboard
     assert len(keyboard) == 26
     assert keyboard[0][0].text == "Страва 0 · 50 г"
-    assert [button.text for button in keyboard[-1]] == [
-        "Нещодавні",
-        "Керувати стравами",
-    ]
+    assert [button.text for button in keyboard[-1]] == ["⚙️ Керувати стравами"]
     assert not any(
         "наступ" in button.text.casefold() for row in keyboard for button in row
     )
+
+
+def test_saved_meal_button_uses_confident_semantic_icon() -> None:
+    value = calculate_meal(food_analysis())
+    service = SimpleNamespace(
+        list_saved_meals=lambda: [
+            SavedMeal(
+                saved_meal_id="cheese",
+                source_message_id=1,
+                display_name="Сир",
+                default_total_weight_g=50,
+                base_meal=value,
+                icon="🧀",
+            )
+        ]
+    )
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+
+    asyncio.run(handlers.meals(update, SimpleNamespace(user_data={})))
+
+    button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "🧀 Сир · 50 г"
+
+
+def test_recent_command_is_separate_direct_add_list() -> None:
+    value = calculate_meal(food_analysis())
+    recent = [
+        RecentMeal(
+            telegram_message_id=42,
+            day=date(2026, 8, 2),
+            meal=value,
+            normalized_request="сир",
+        )
+    ]
+    service = SimpleNamespace(list_recent_meals=lambda: recent)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+
+    asyncio.run(handlers.recent(update, SimpleNamespace(user_data={})))
+
+    button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "🍽️ сир · 50 г"
+    assert button.callback_data == "recent-add:42:2026-08-02:50"
 
 
 def test_admin_help_and_user_list_are_available_without_personal_account() -> None:

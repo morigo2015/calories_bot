@@ -26,20 +26,21 @@ async def configure_bot_commands(
     admin_user_id: int,
 ) -> None:
     user_commands = [
-        BotCommand("meals", "мої збережені страви"),
-        BotCommand("day", "прийоми їжі за сьогодні"),
-        BotCommand("week", "підсумок за 7 днів"),
-        BotCommand("goal", "встановити денну ціль"),
-        BotCommand("help", "як користуватися ботом"),
-        BotCommand("tips", "додаткові можливості"),
+        BotCommand("meals", "⭐ збережені страви"),
+        BotCommand("recent", "🕘 нещодавні страви"),
+        BotCommand("day", "📅 прийоми їжі за сьогодні"),
+        BotCommand("week", "📊 підсумок за 7 днів"),
+        BotCommand("goal", "🎯 встановити денну ціль"),
+        BotCommand("help", "❓ як користуватися ботом"),
+        BotCommand("tips", "💡 додаткові можливості"),
     ]
     admin_commands = [
         *user_commands,
-        BotCommand("invite", "додати користувача"),
-        BotCommand("users", "показати перелік користувачів"),
-        BotCommand("block", "заблокувати користувача"),
-        BotCommand("unblock", "розблокувати користувача"),
-        BotCommand("delete", "повністю видалити користувача"),
+        BotCommand("invite", "➕ додати користувача"),
+        BotCommand("users", "👥 показати перелік користувачів"),
+        BotCommand("block", "⛔ заблокувати користувача"),
+        BotCommand("unblock", "✅ розблокувати користувача"),
+        BotCommand("delete", "🗑 повністю видалити користувача"),
     ]
     await application.bot.set_my_commands(user_commands)
     await application.bot.set_my_commands(
@@ -130,6 +131,9 @@ def main() -> None:
         CommandHandler("meals", handlers.meals, filters=message_update)
     )
     application.add_handler(
+        CommandHandler("recent", handlers.recent, filters=message_update)
+    )
+    application.add_handler(
         CommandHandler("save", handlers.save, filters=message_update)
     )
     application.add_handler(
@@ -159,6 +163,12 @@ def main() -> None:
         CallbackQueryHandler(
             handlers.save_callback,
             pattern=r"^save:-?\d+:\d{4}-\d{2}-\d{2}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.meal_weight_callback,
+            pattern=r"^meal-weight:-?\d+:\d{4}-\d{2}-\d{2}$",
         )
     )
     application.add_handler(

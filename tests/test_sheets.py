@@ -99,12 +99,14 @@ class FakeWorksheet:
         del kwargs
         for update in updates:
             range_name = update["range"]
-            assert range_name[0] in {"B", "J"}
-            row_index = int(range_name[1:]) - 1
-            column_index = 1 if range_name.startswith("B") else 9
-            while len(self.rows[row_index]) <= column_index:
-                self.rows[row_index].append("")
-            self.rows[row_index][column_index] = update["values"][0][0]
+            start = range_name.split(":", maxsplit=1)[0]
+            row_index = int(start[1:]) - 1
+            first_column = ord(start[0]) - ord("A")
+            for offset, value in enumerate(update["values"][0]):
+                column_index = first_column + offset
+                while len(self.rows[row_index]) <= column_index:
+                    self.rows[row_index].append("")
+                self.rows[row_index][column_index] = value
 
     def delete_rows(self, start_index, end_index=None):
         del end_index
@@ -387,6 +389,30 @@ def test_append_allows_blank_photo_usage_and_cost() -> None:
     row = store._worksheet.rows[1]
     assert row[9] == ""
     assert row[14:17] == ["", "", ""]
+
+
+def test_update_meal_replaces_nutrition_and_recalculates_day_total() -> None:
+    timestamp = datetime(2026, 8, 2, 12, tzinfo=TZ)
+    store = build_store([HEADERS, stored_row(timestamp, 42, 60)])
+    updated = make_meal().model_copy(
+        update={
+            "total_weight_g": 100,
+            "meal_kcal": 120,
+            "items": [
+                make_meal()
+                .items[0]
+                .model_copy(update={"weight_g": 100, "calories": 120})
+            ],
+        }
+    )
+
+    result = store.update_meal(datetime(2026, 8, 2).date(), 42, updated)
+
+    assert result is not None
+    assert result.day_total == 120
+    assert result.meal.meal.total_weight_g == 100
+    assert result.meal.meal.items[0].weight_g == 100
+    assert store._worksheet.rows[1][7] == "сир 50 гр 120 ккал/100г"
 
 
 def test_empty_sheet_gets_headers_and_date_time_format() -> None:

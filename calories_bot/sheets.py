@@ -105,6 +105,13 @@ class MealDeletion:
     deleted: bool
 
 
+@dataclass(frozen=True)
+class MealUpdate:
+    accounting_day: date
+    day_total: float
+    meal: StoredMeal
+
+
 class MealStore(Protocol):
     def get_state(self, day: date, telegram_message_id: int) -> SheetState: ...
 
@@ -117,6 +124,10 @@ class MealStore(Protocol):
     def get_latest_meal(self) -> RecentMeal | None: ...
 
     def get_recent_meals(self, limit: int = 8) -> list[RecentMeal]: ...
+
+    def update_meal(
+        self, day: date, telegram_message_id: int, meal: MealResult
+    ) -> MealUpdate | None: ...
 
     def delete_meal(
         self, telegram_message_id: int, fallback_day: date
@@ -449,6 +460,84 @@ class GoogleSheetsStore:
             if isinstance(exc, SheetsReadError):
                 raise
             raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def update_meal(
+        self, day: date, telegram_message_id: int, meal: MealResult
+    ) -> MealUpdate | None:
+        try:
+            rows = self._data_rows()
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+        target_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if self._matches_message(row, telegram_message_id, day)
+            ),
+            None,
+        )
+        if target_index is None:
+            return None
+        target = rows[target_index]
+        try:
+            accounting_day = self._row_day(target)
+        except (TypeError, ValueError):
+            accounting_day = day
+        items_json = json.dumps(
+            [item.model_dump() for item in meal.items],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        row_number = target_index + 2
+        updates = [
+            {
+                "range": f"C{row_number}:F{row_number}",
+                "values": [
+                    [
+                        meal.meal_name,
+                        meal.total_weight_g,
+                        meal.meal_kcal,
+                        meal.kcal_per_100g,
+                    ]
+                ],
+            },
+            {
+                "range": f"K{row_number}:L{row_number}",
+                "values": [[items_json, meal.estimated]],
+            },
+        ]
+        try:
+            self._worksheet.batch_update(updates, raw=True)
+        except Exception as update_error:
+            try:
+                verified_rows = self._data_rows()
+                verified = self._find_by_message_id(
+                    verified_rows, telegram_message_id, day
+                )
+            except Exception as verify_error:
+                raise SheetsWriteUncertainError(
+                    "Could not verify whether Google Sheets updated the row"
+                ) from verify_error
+            if verified is None or verified.meal != meal:
+                raise SheetsWriteError(
+                    "Google Sheets did not update the row"
+                ) from update_error
+            rows = verified_rows
+        else:
+            try:
+                rows = self._data_rows()
+                verified = self._find_by_message_id(rows, telegram_message_id, day)
+            except Exception as verify_error:
+                raise SheetsWriteUncertainError(
+                    "The row was updated but could not be verified"
+                ) from verify_error
+            if verified is None or verified.meal != meal:
+                raise SheetsWriteError("Updated meal did not match the requested meal")
+        return MealUpdate(
+            accounting_day=accounting_day,
+            day_total=self._day_total(rows, accounting_day),
+            meal=verified,
+        )
 
     def get_day_meals(self, day: date) -> list[DayMeal]:
         try:

@@ -4,11 +4,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from calories_bot.bot import CaloriesService, SavedMealNameError
+from calories_bot.bot import (
+    CaloriesService,
+    CompositeMealWeightError,
+    SavedMealNameError,
+)
 from calories_bot.models import (
     FoodAnalysis,
     FoodItem,
     LLMMetadata,
+    MealIconSuggestion,
     RecentMeal,
     SavedMeal,
     StoredMeal,
@@ -16,11 +21,12 @@ from calories_bot.models import (
     scale_meal,
 )
 from calories_bot.saved_meals import (
+    LEGACY_SAVED_MEALS_HEADERS,
     SAVED_MEALS_HEADERS,
     GoogleSavedMealStore,
     SavedMealsSchemaError,
 )
-from calories_bot.sheets import MealDeletion, SheetState
+from calories_bot.sheets import MealDeletion, MealUpdate, SheetState
 
 TZ = ZoneInfo("Europe/Kyiv")
 DAY = date(2026, 8, 9)
@@ -44,13 +50,46 @@ def meal(name: str = "сир"):
     )
 
 
-def saved(saved_id: str, source_id: int, name: str = "сир") -> SavedMeal:
+def composite_meal():
+    return calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name="обід",
+            items=[
+                FoodItem(
+                    name="курка",
+                    weight_g=100,
+                    weight_estimated=False,
+                    kcal_per_100g=200,
+                    kcal_estimated=False,
+                ),
+                FoodItem(
+                    name="рис",
+                    weight_g=200,
+                    weight_estimated=False,
+                    kcal_per_100g=100,
+                    kcal_estimated=False,
+                ),
+            ],
+        )
+    )
+
+
+def saved(
+    saved_id: str,
+    source_id: int,
+    name: str = "сир",
+    *,
+    value=None,
+    icon: str | None = None,
+) -> SavedMeal:
     return SavedMeal(
         saved_meal_id=saved_id,
         source_message_id=source_id,
         display_name=name,
         default_total_weight_g=50,
-        base_meal=meal(name),
+        base_meal=value or meal(name),
+        icon=icon,
     )
 
 
@@ -72,6 +111,13 @@ class Worksheet:
             column = 2 if update["range"].startswith("C") else 3
             row = int(update["range"][1:]) - 1
             self.rows[row][column] = update["values"][0][0]
+
+    def insert_cols(self, values, col=1, **kwargs):
+        del kwargs
+        offset = col - 1
+        for row in self.rows:
+            row.insert(offset, "")
+        self.rows[0][offset] = values[0][0]
 
     def delete_rows(self, row):
         self.rows.pop(row - 1)
@@ -98,6 +144,15 @@ def test_saved_meal_store_crud_and_newest_first() -> None:
     assert [item.saved_meal_id for item in store.list_meals()] == ["one"]
 
 
+def test_saved_meal_store_persists_icon() -> None:
+    store = sheet_store([SAVED_MEALS_HEADERS])
+
+    stored = store.append(saved("one", 1, icon="🧀"))
+
+    assert stored.icon == "🧀"
+    assert store._worksheet.rows[1][-1] == "🧀"
+
+
 def test_saved_meal_store_rejects_unknown_schema() -> None:
     store = sheet_store([["name", "weight"]])
 
@@ -111,6 +166,27 @@ def test_saved_meal_store_initializes_empty_worksheet() -> None:
     store._ensure_headers()
 
     assert store._worksheet.rows == [SAVED_MEALS_HEADERS]
+
+
+def test_saved_meal_store_migrates_previous_schema_with_blank_icon() -> None:
+    existing = saved("one", 1)
+    store = sheet_store(
+        [
+            list(LEGACY_SAVED_MEALS_HEADERS),
+            [
+                existing.saved_meal_id,
+                existing.source_message_id,
+                existing.display_name,
+                existing.default_total_weight_g,
+                existing.base_meal.model_dump_json(),
+            ],
+        ]
+    )
+
+    store._ensure_headers()
+
+    assert store._worksheet.rows[0] == SAVED_MEALS_HEADERS
+    assert store.get("one").icon is None
 
 
 def test_scale_meal_changes_all_components_without_changing_origins() -> None:
@@ -249,6 +325,19 @@ class MemoryMealStore:
     def get_recent_meals(self, limit=8):
         return [self.get_latest_meal()][:limit] if self.rows else []
 
+    def update_meal(self, day, message_id, value):
+        for index, (row_day, row_id, stored) in enumerate(self.rows):
+            if row_id == message_id and (message_id < 0 or row_day == day):
+                updated = stored.model_copy(update={"meal": value})
+                self.rows[index] = (row_day, row_id, updated)
+                total = sum(
+                    row.meal.meal_kcal
+                    for stored_day, _, row in self.rows
+                    if stored_day == row_day
+                )
+                return MealUpdate(row_day, total, updated)
+        return None
+
     def append_meal(
         self,
         timestamp,
@@ -338,3 +427,86 @@ def test_reused_saved_meal_scales_without_llm_and_retry_is_idempotent(tmp_path) 
     assert meals.rows[0][2].meal.total_weight_g == 100
     assert meals.rows[0][2].meal.meal_kcal == 120
     assert meals.rows[0][2].metadata.model == "saved_meal"
+
+
+@pytest.mark.parametrize(("confidence", "expected"), [(0.8, "🧀"), (0.79, None)])
+def test_saved_meal_uses_only_confident_llm_icon(
+    monkeypatch, tmp_path, confidence, expected
+) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1)
+    saved_meals = MemorySavedStore()
+    analyzer = SimpleNamespace(
+        suggest_meal_icon=lambda value: MealIconSuggestion(
+            emoji="🧀", confidence=confidence
+        )
+    )
+    app = CaloriesService(
+        analyzer,
+        meals,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        saved_store=saved_meals,
+    )
+    monkeypatch.setattr(
+        "calories_bot.bot.secrets.token_urlsafe", lambda size: "template"
+    )
+
+    result, created = app.save_source_meal(1, DAY)
+
+    assert created is True
+    assert result.icon == expected
+
+
+def test_icon_failure_does_not_block_saving(monkeypatch, tmp_path) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1)
+    saved_meals = MemorySavedStore()
+    analyzer = SimpleNamespace(
+        suggest_meal_icon=lambda value: (_ for _ in ()).throw(TimeoutError())
+    )
+    app = CaloriesService(
+        analyzer,
+        meals,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        saved_store=saved_meals,
+    )
+    monkeypatch.setattr(
+        "calories_bot.bot.secrets.token_urlsafe", lambda size: "template"
+    )
+
+    result, created = app.save_source_meal(1, DAY)
+
+    assert created is True
+    assert result.icon is None
+
+
+def test_change_weight_updates_existing_single_item_and_total(tmp_path) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1)
+    saved_meals = MemorySavedStore()
+    app = service(tmp_path, meals, saved_meals)
+
+    result = app.change_meal_weight(1, DAY, 100)
+
+    assert result is not None
+    assert len(meals.rows) == 1
+    assert meals.rows[0][2].meal.total_weight_g == 100
+    assert meals.rows[0][2].meal.meal_kcal == 120
+    assert "За день: 120 кк" in result.text
+
+
+def test_weight_changes_are_rejected_for_composite_meals(tmp_path) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1, composite_meal())
+    saved_meals = MemorySavedStore()
+    saved_meals.append(saved("lunch", 1, value=composite_meal()))
+    app = service(tmp_path, meals, saved_meals)
+
+    with pytest.raises(CompositeMealWeightError):
+        app.change_meal_weight(1, DAY, 500)
+    with pytest.raises(CompositeMealWeightError):
+        app.set_saved_meal_weight("lunch", 500)
