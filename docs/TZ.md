@@ -255,12 +255,12 @@ recent-add:<message_id>:<day>:<weight_g>
 Очікування зберігаються в `context.user_data` трьома простими ключами:
 
 - `GOAL_WAITING_KEY`;
-- `SAVED_MEAL_WAITING_KEY` з kind `meal_weight`, `rename` або `default_weight`;
+- `SAVED_MEAL_WAITING_KEY` з kind `meal_weight` для зміни ваги прийому;
 - `INVITE_WAITING_KEY`.
 
-Inline-списки `/meals`, `/recent` та керування будуються цілком, без
-пагінації. `/meals` містить лише страви та `⚙️ Керувати стравами`. Видалення
-шаблону має окреме підтвердження.
+Inline-списки `/meals`, `/recent` та видалення будуються цілком, без
+пагінації. `/meals` містить страви та `🗑 Видалити із збережених`; окреме меню
+пропонує вибрати шаблон і підтвердити видалення.
 
 ## 11. Надійність і помилки
 

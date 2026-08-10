@@ -28,8 +28,8 @@ async def configure_bot_commands(
     user_commands = [
         BotCommand("meals", "⭐ збережені страви"),
         BotCommand("recent", "🕘 нещодавні страви"),
-        BotCommand("day", "📅 прийоми їжі за сьогодні"),
-        BotCommand("week", "📊 підсумок за 7 днів"),
+        BotCommand("day", "📅 Сьогодні"),
+        BotCommand("week", "📊 За тиждень"),
         BotCommand("goal", "🎯 встановити денну ціль"),
         BotCommand("help", "❓ як користуватися ботом"),
         BotCommand("tips", "💡 додаткові можливості"),

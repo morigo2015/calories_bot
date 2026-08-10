@@ -155,7 +155,26 @@ def load_help_text(*, admin: bool = False) -> str:
     return text
 
 
-def _format_item_calculation(item: CalculatedFoodItem) -> str:
+def _highlight_calories(value: str) -> str:
+    return f"<b><u>{value}</u></b>"
+
+
+def _portion_includes_weight(portion: str, weight_g: float) -> bool:
+    weights = re.finditer(
+        r"(?<!\d)(?P<value>\d+(?:[.,]\d+)?)\s*"
+        r"(?:г|гр|грам|грами|грама|грамів)\b",
+        portion,
+        flags=re.IGNORECASE,
+    )
+    return any(
+        abs(float(match.group("value").replace(",", ".")) - weight_g) < 0.5
+        for match in weights
+    )
+
+
+def _format_item_calculation(
+    item: CalculatedFoodItem, *, highlight_total: bool = True
+) -> str:
     weight_g = item.weight_g
     kcal_per_100g = item.kcal_per_100g
     calories = item.calories
@@ -167,6 +186,9 @@ def _format_item_calculation(item: CalculatedFoodItem) -> str:
     result_prefix = "≈" if result_estimated else ""
     display_name = item.name[:1].upper() + item.name[1:]
     name = html.escape(display_name)
+    calorie_total = f"{result_prefix}{round_whole(calories)} кк"
+    if highlight_total:
+        calorie_total = _highlight_calories(calorie_total)
     if item.portion_display:
         portion = html.escape(item.portion_display)
         count_match = re.fullmatch(r"(?P<count>\d+)\s*шт\.?", item.portion_display)
@@ -175,27 +197,33 @@ def _format_item_calculation(item: CalculatedFoodItem) -> str:
             if count > 0:
                 unit_weight = weight_g / count
                 return (
-                    f"{name} {result_prefix}{round_whole(calories)} кк = "
-                    f"{portion} × {weight_prefix}{round_whole(unit_weight)} г/шт. × "
-                    f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
+                    f"{name} {calorie_total}\n"
+                    f"({portion} × {weight_prefix}{round_whole(unit_weight)} г/шт. × "
+                    f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
                 )
+        if _portion_includes_weight(item.portion_display, weight_g):
+            return (
+                f"{name} {calorie_total}\n"
+                f"({portion} × "
+                f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
+            )
         return (
-            f"{name} {result_prefix}{round_whole(calories)} кк = "
-            f"{portion} ({weight_prefix}{round_whole(weight_g)} г) × "
-            f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
+            f"{name} {calorie_total}\n"
+            f"({portion} ({weight_prefix}{round_whole(weight_g)} г) × "
+            f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
         )
     return (
-        f"{name} {result_prefix}{round_whole(calories)} кк = "
-        f"{weight_prefix}{round_whole(weight_g)} г × "
-        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
+        f"{name} {calorie_total}\n"
+        f"({weight_prefix}{round_whole(weight_g)} г × "
+        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
     )
 
 
 def _format_daily_progress(today_total: float, daily_kcal_goal: int | None) -> str:
     rounded_total = round_whole(today_total)
     if daily_kcal_goal is None:
-        return f"{rounded_total} кк"
-    line = f"{rounded_total} із {daily_kcal_goal} кк"
+        return _highlight_calories(f"{rounded_total} кк")
+    line = f"{_highlight_calories(str(rounded_total))} із {daily_kcal_goal} кк"
     if rounded_total <= daily_kcal_goal:
         line += f" · залишилось {daily_kcal_goal - rounded_total} кк"
     return line
@@ -208,16 +236,22 @@ def format_daily_total(today_total: float, daily_kcal_goal: int | None) -> str:
 def format_reply(
     meal: MealResult, today_total: float, daily_kcal_goal: int | None = None
 ) -> str:
-    calculations = [_format_item_calculation(item) for item in meal.items]
     if len(meal.items) > 1:
         prefix = "≈" if meal.estimated else ""
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
+        calculations = [
+            _format_item_calculation(item, highlight_total=False) for item in meal.items
+        ]
         body = [
-            f"{meal_name} {prefix}{round_whole(meal.meal_kcal)} кк",
-            *(f"• {calculation}" for calculation in calculations),
+            f"{meal_name} "
+            f"{_highlight_calories(f'{prefix}{round_whole(meal.meal_kcal)} кк')}",
+            *(
+                f"• {calculation.replace(chr(10), chr(10) + '  ')}"
+                for calculation in calculations
+            ),
         ]
     else:
-        body = calculations
+        body = [_format_item_calculation(meal.items[0])]
     return "\n".join([*body, "", format_daily_total(today_total, daily_kcal_goal)])
 
 
@@ -1069,7 +1103,7 @@ class TelegramHandlers:
         except Exception:
             LOGGER.exception("Unexpected error while handling /day")
             reply = READ_ERROR_TEXT
-        await message.reply_text(reply, do_quote=False)
+        await message.reply_text(reply, parse_mode=ParseMode.HTML, do_quote=False)
 
     async def week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._cancel_goal_wait(context)
@@ -1106,7 +1140,11 @@ class TelegramHandlers:
             for meal in meals
         ]
         rows.append(
-            [InlineKeyboardButton("⚙️ Керувати стравами", callback_data="meals-manage")]
+            [
+                InlineKeyboardButton(
+                    "🗑 Видалити із збережених", callback_data="meals-manage"
+                )
+            ]
         )
         return InlineKeyboardMarkup(rows)
 
@@ -1301,7 +1339,9 @@ class TelegramHandlers:
         await query.answer()
         try:
             await query.edit_message_text(
-                f"Видалено\n=== {deletion.day_total} кк", reply_markup=None
+                f"Видалено\n=== {_format_daily_progress(deletion.day_total, None)}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=None,
             )
         except Exception:
             LOGGER.warning("Could not edit deletion confirmation", exc_info=True)
@@ -1415,18 +1455,18 @@ class TelegramHandlers:
                 InlineKeyboardButton(
                     f"{f'{meal.icon} ' if meal.icon else ''}"
                     f"{self._short_button_name(meal.display_name)}",
-                    callback_data=f"manage-open:{meal.saved_meal_id}",
+                    callback_data=f"manage-delete:{meal.saved_meal_id}",
                 )
             ]
             for meal in meals
         ]
         rows.append([InlineKeyboardButton("↩️ Назад", callback_data="meals-back")])
-        text = "Керування стравами:" if meals else "Збережених страв ще немає."
+        text = "Яку страву видалити?" if meals else "Збережених страв ще немає."
         await query.edit_message_text(  # type: ignore[attr-defined]
             text, reply_markup=InlineKeyboardMarkup(rows)
         )
 
-    async def _edit_manage_detail(
+    async def _edit_delete_confirmation(
         self, query: object, service: CaloriesService, saved_meal_id: str
     ) -> bool:
         meals = await asyncio.to_thread(service.list_saved_meals)
@@ -1436,26 +1476,18 @@ class TelegramHandlers:
         if meal is None:
             return False
         await query.edit_message_text(  # type: ignore[attr-defined]
-            f"{meal.display_name}\nСтандартна вага: {meal.default_total_weight_g} г",
+            f"Видалити «{meal.display_name}» із збережених?",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "✏️ Перейменувати",
-                            callback_data=f"manage-rename:{saved_meal_id}",
+                            "🗑 Видалити",
+                            callback_data=f"manage-delete-do:{saved_meal_id}",
                         ),
                         InlineKeyboardButton(
-                            "⚖️ Змінити вагу",
-                            callback_data=f"manage-default:{saved_meal_id}",
+                            "❌ Скасувати", callback_data="meals-manage"
                         ),
                     ],
-                    [
-                        InlineKeyboardButton(
-                            "🗑 Видалити зі збережених",
-                            callback_data=f"manage-delete:{saved_meal_id}",
-                        )
-                    ],
-                    [InlineKeyboardButton("↩️ Назад", callback_data="meals-manage")],
                 ]
             ),
         )
@@ -1521,63 +1553,11 @@ class TelegramHandlers:
                 if isinstance(query.message, Message):
                     await self._send_meal_reply(query.message, result)
                 return
-            if data.startswith("manage-open:"):
-                saved_id = data.removeprefix("manage-open:")
-                await query.answer()
-                if not await self._edit_manage_detail(query, service, saved_id):
-                    raise LookupError
-                return
-            if data.startswith(("manage-rename:", "manage-default:")):
-                rename = data.startswith("manage-rename:")
+            if data.startswith(("manage-open:", "manage-delete:")):
                 saved_id = data.split(":", maxsplit=1)[1]
-                if not rename:
-                    saved = await asyncio.to_thread(service.get_saved_meal, saved_id)
-                    if saved is None:
-                        raise LookupError
-                    if len(saved.base_meal.items) != 1:
-                        await query.answer(
-                            "Змінити вагу можна лише для страви з одного компонента.",
-                            show_alert=True,
-                        )
-                        return
-                self._start_waiting(
-                    context,
-                    SAVED_MEAL_WAITING_KEY,
-                    {
-                        "kind": "rename" if rename else "default_weight",
-                        "saved_meal_id": saved_id,
-                    },
-                )
                 await query.answer()
-                if isinstance(query.message, Message):
-                    await query.message.reply_text(
-                        "Введи нову назву:"
-                        if rename
-                        else "Введи стандартну вагу в грамах:",
-                        reply_markup=self._cancel_markup(),
-                        do_quote=False,
-                    )
-                return
-            if data.startswith("manage-delete:"):
-                saved_id = data.removeprefix("manage-delete:")
-                await query.answer()
-                await query.edit_message_text(
-                    "Видалити цю страву зі збережених?",
-                    reply_markup=InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    "🗑 Видалити",
-                                    callback_data=f"manage-delete-do:{saved_id}",
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Скасувати",
-                                    callback_data=f"manage-open:{saved_id}",
-                                ),
-                            ]
-                        ]
-                    ),
-                )
+                if not await self._edit_delete_confirmation(query, service, saved_id):
+                    raise LookupError
                 return
             if data.startswith("manage-delete-do:"):
                 saved_id = data.removeprefix("manage-delete-do:")
@@ -1654,12 +1634,11 @@ class TelegramHandlers:
                         "Meal weight was updated but the reply could not be edited",
                         exc_info=True,
                     )
-                    await message.reply_text(
-                        "⚖️ Вагу змінено, але не вдалося оновити попередню відповідь.",
-                        do_quote=False,
-                    )
-                else:
-                    await message.reply_text("⚖️ Вагу змінено ✓", do_quote=False)
+                await message.reply_text(
+                    result.text,
+                    parse_mode=ParseMode.HTML,
+                    do_quote=False,
+                )
                 return
             if kind == "rename":
                 saved = await asyncio.to_thread(

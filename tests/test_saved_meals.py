@@ -498,7 +498,7 @@ def test_change_weight_updates_existing_single_item_and_total(tmp_path) -> None:
     assert len(meals.rows) == 1
     assert meals.rows[0][2].meal.total_weight_g == 100
     assert meals.rows[0][2].meal.meal_kcal == 120
-    assert "За день: 120 кк" in result.text
+    assert "За день: <b><u>120 кк</u></b>" in result.text
 
 
 def test_weight_changes_are_rejected_for_composite_meals(tmp_path) -> None:
