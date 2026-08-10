@@ -112,12 +112,14 @@ class Worksheet:
             row = int(update["range"][1:]) - 1
             self.rows[row][column] = update["values"][0][0]
 
-    def insert_cols(self, values, col=1, **kwargs):
-        del kwargs
-        offset = col - 1
+    def add_cols(self, cols):
         for row in self.rows:
-            row.insert(offset, "")
-        self.rows[0][offset] = values[0][0]
+            row.extend([""] * cols)
+
+    def update(self, values, range_name, **kwargs):
+        del kwargs
+        assert range_name == "F1:F1"
+        self.rows[0][5] = values[0][0]
 
     def delete_rows(self, row):
         self.rows.pop(row - 1)

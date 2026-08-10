@@ -100,8 +100,14 @@ class GoogleSavedMealStore:
             )
             return
         if rows[0] == LEGACY_SAVED_MEALS_HEADERS:
-            self._worksheet.insert_cols(
-                [["icon"]], col=6, value_input_option=ValueInputOption.raw
+            # Google Sheets does not allow insert_cols() at the first position
+            # past the current grid. Legacy worksheets have exactly five
+            # columns, so grow the grid first and then write the new header.
+            self._worksheet.add_cols(1)
+            self._worksheet.update(
+                values=[["icon"]],
+                range_name="F1:F1",
+                raw=True,
             )
             rows = self._worksheet.get_all_values(
                 value_render_option=ValueRenderOption.unformatted
