@@ -66,6 +66,17 @@ def _button_texts(message: Message) -> list[str]:
     return [button.text for row in message.buttons for button in row]
 
 
+def _has_button(message: Message, expected_text: str) -> bool:
+    return any(expected_text in text for text in _button_texts(message))
+
+
+def _expected_day_summary(today_total: float, daily_kcal_goal: int | None) -> str:
+    rounded_total = round_whole(today_total)
+    if daily_kcal_goal is None:
+        return f"Сьогодні: {rounded_total} кк"
+    return f"Сьогодні: {rounded_total} із {daily_kcal_goal} кк"
+
+
 class TelegramDriver:
     def __init__(
         self, client: TelegramClient, bot_username: str, timeout_seconds: float
@@ -92,15 +103,13 @@ class TelegramDriver:
 
     async def click_and_wait_for_edit(self, message: Message, button_text: str) -> str:
         before = _message_text(message)
-        _require(
-            button_text in _button_texts(message), f"button missing: {button_text}"
-        )
-        await message.click(text=button_text)
+        _require(_has_button(message, button_text), f"button missing: {button_text}")
+        await message.click(text=lambda text: button_text in text)
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
             current = await self.client.get_messages(self.bot_username, ids=message.id)
             current_text = _message_text(current)
-            if current_text != before or button_text not in _button_texts(current):
+            if current_text != before or not _has_button(current, button_text):
                 return current_text
             await asyncio.sleep(0.25)
         raise E2EFailure(f"message was not edited after clicking {button_text}")
@@ -282,7 +291,7 @@ async def run_journey(
                 exact_messages.append((sent, response))
                 response_text = _message_text(response)
                 _require(
-                    "Видалити" in _button_texts(response),
+                    _has_button(response, "Видалити"),
                     f"{text}: delete button missing",
                 )
                 for marker in markers:
@@ -291,10 +300,12 @@ async def run_journey(
             baseline_total = probe.day_total(day, baseline_rows)
             expected_total = baseline_total + sum(case[1] for case in exact_cases)
             _, day_response = await driver.send_text("/day")
+            day_text = _message_text(day_response)
+            expected_summary = _expected_day_summary(expected_total, test_goal)
             _require(
-                f"Сьогодні: {round_whole(expected_total)} кк"
-                in _message_text(day_response),
-                "/day total does not match Sheets",
+                expected_summary in day_text,
+                f"/day total does not match Sheets: expected "
+                f"{expected_summary!r}, got {day_text!r}",
             )
 
         await _run_step(results, "two foods + /day + Sheets", exact_foods)
@@ -312,7 +323,7 @@ async def run_journey(
 
         async def invalid_and_non_food() -> None:
             invalid_sent, invalid = await driver.send_text("сир 50.5 г")
-            if "Видалити" in _button_texts(invalid):
+            if _has_button(invalid, "Видалити"):
                 created.append(invalid)
                 created_rows.append((invalid_sent, "сир 50.5 г"))
             _require(
@@ -322,7 +333,7 @@ async def run_journey(
             non_food_sent, non_food = await driver.send_text(
                 "Як справи? Це автоматичний E2E тест."
             )
-            if "Видалити" in _button_texts(non_food):
+            if _has_button(non_food, "Видалити"):
                 created.append(non_food)
                 created_rows.append(
                     (non_food_sent, "Як справи? Це автоматичний E2E тест.")
@@ -341,9 +352,7 @@ async def run_journey(
             response_text = _message_text(response)
             _require("350 г" in response_text, "photo response lost explicit weight")
             _require("кк/100 г" in response_text, "photo calculation is incomplete")
-            _require(
-                "Видалити" in _button_texts(response), "photo delete button missing"
-            )
+            _require(_has_button(response, "Видалити"), "photo delete button missing")
 
         await _run_step(results, "photo with explicit caption", photo_with_caption)
 
@@ -356,7 +365,8 @@ async def run_journey(
             expected_kcal = {case[0]: case[1] for case in exact_cases}
             for sent, request in created_rows:
                 row = probe.row_for_request(rows, sent, request)
-                _require(row is not None, f"Sheets row missing for {request}")
+                if row is None:
+                    raise E2EFailure(f"Sheets row missing for {request}")
                 if request in expected_kcal:
                     _require(
                         abs(float(str(row[MEAL_KCAL_COLUMN])) - expected_kcal[request])
