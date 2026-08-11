@@ -37,6 +37,7 @@ from calories_bot.models import (
     SavedMeal,
     StoredMeal,
     calculate_meal,
+    parse_simple_meal_request,
 )
 from calories_bot.sheets import (
     DayMeal,
@@ -259,8 +260,81 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
         "За день: <b><u>360 кк</u></b>"
     )
     assert reply.accounting_day == date(2026, 8, 2)
-    assert store.appended[0][3] == "сир 50 гр"
+    marker = parse_simple_meal_request(store.appended[0][3])
+    assert marker is not None
+    assert marker.payload == "сир 50 гр"
     assert analyzer.normalized.text == "сир 50 гр"
+
+
+def test_composite_input_is_stored_and_replied_to_per_component(tmp_path) -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="перекус",
+        items=[
+            FoodItem(
+                name="яблуко",
+                weight_g=100,
+                weight_estimated=True,
+                kcal_per_100g=50,
+                kcal_estimated=True,
+            ),
+            FoodItem(
+                name="сир",
+                weight_g=50,
+                weight_estimated=False,
+                kcal_per_100g=120,
+                kcal_estimated=False,
+            ),
+        ],
+    )
+    store = FakeStore(SheetState(today_total=300, existing=None))
+    service = build_service(FakeAnalyzer(analysis), store, tmp_path)
+
+    replies = service.process_message(
+        "яблуко та сир", 42, datetime(2026, 8, 2, 12, tzinfo=TZ)
+    )
+
+    assert isinstance(replies, list)
+    assert len(replies) == 2
+    assert [entry[5].meal_name for entry in store.appended] == ["яблуко", "сир"]
+    assert all(len(entry[5].items) == 1 for entry in store.appended)
+    assert store.appended[0][6].input_tokens == 10
+    assert store.appended[1][6].input_tokens is None
+    assert replies[0].telegram_message_id == 42
+    assert replies[1].telegram_message_id < 0
+    assert all(
+        reply.text.endswith("За день: <b><u>410 кк</u></b>") for reply in replies
+    )
+    markers = [parse_simple_meal_request(entry[3]) for entry in store.appended]
+    assert [marker.component_index for marker in markers if marker] == [0, 1]
+    assert all(marker and marker.component_count == 2 for marker in markers)
+
+
+def test_handler_sends_each_component_with_the_same_standard_buttons() -> None:
+    class Service:
+        def process_message(self, *args):
+            del args
+            return [
+                MealReply("Яблуко", 1, date(2026, 8, 2)),
+                MealReply("Сир", -2, date(2026, 8, 2)),
+            ]
+
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: Service()})
+    )
+    update, message = make_update()
+
+    asyncio.run(handlers.text(update, SimpleNamespace(user_data={})))
+
+    assert message.replies == ["Яблуко", "Сир"]
+    for kwargs in message.reply_kwargs:
+        assert [
+            [button.text for button in row]
+            for row in kwargs["reply_markup"].inline_keyboard
+        ] == [
+            ["⭐ Зберегти", "⚖️ Змінити вагу"],
+            ["🗑 Видалити"],
+        ]
 
 
 def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> None:
@@ -738,6 +812,45 @@ def test_uncertain_google_write_keeps_photo_for_a_possibly_stored_row(tmp_path) 
     assert (tmp_path / "photos" / "2026-08-02-42.jpg").read_bytes() == b"photo"
 
 
+def test_partial_component_write_is_reported_as_uncertain(tmp_path) -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="перекус",
+        items=[
+            FoodItem(
+                name="яблуко",
+                weight_g=100,
+                weight_estimated=False,
+                kcal_per_100g=50,
+                kcal_estimated=False,
+            ),
+            FoodItem(
+                name="сир",
+                weight_g=50,
+                weight_estimated=False,
+                kcal_per_100g=120,
+                kcal_estimated=False,
+            ),
+        ],
+    )
+
+    class PartialStore(FakeStore):
+        def append_meal(self, *args):
+            if self.appended:
+                raise SheetsWriteError("second component failed")
+            return super().append_meal(*args)
+
+    store = PartialStore(SheetState(today_total=0, existing=None))
+    service = build_service(FakeAnalyzer(analysis), store, tmp_path)
+
+    with pytest.raises(SheetsWriteUncertainError, match="part"):
+        service.process_message(
+            "яблуко та сир", 42, datetime(2026, 8, 2, 12, tzinfo=TZ)
+        )
+
+    assert len(store.appended) == 1
+
+
 def user_record(
     user_id=123,
     *,
@@ -1035,6 +1148,7 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
                 "result_message_id": 777,
                 "prompt_chat_id": 123,
                 "prompt_message_id": 778,
+                "accepts_text": True,
             }
         },
         bot=bot,
@@ -1087,6 +1201,7 @@ def test_meal_weight_state_closes_without_reply_when_weight_is_unchanged() -> No
                 "result_message_id": 777,
                 "prompt_chat_id": 123,
                 "prompt_message_id": 778,
+                "accepts_text": True,
             }
         },
         bot=bot,
@@ -1109,6 +1224,46 @@ def test_meal_weight_state_closes_without_reply_when_weight_is_unchanged() -> No
 @pytest.mark.parametrize("raw", ["50", "50 г", "50г", "50 гр", "50 грамів"])
 def test_weight_parser_accepts_natural_gram_formats(raw: str) -> None:
     assert TelegramHandlers._parse_weight(raw) == 50
+
+
+def test_weight_choice_buttons_use_configured_presets() -> None:
+    handlers = TelegramHandlers(999, FakeManager(), (75, 125, 250))
+
+    keyboard = handlers._weight_choice_markup(42, date(2026, 8, 2)).inline_keyboard
+
+    assert [button.text for button in keyboard[0]] == ["75г", "125г", "250г"]
+    assert keyboard[0][1].callback_data == "meal-weight-set:42:2026-08-02:125"
+    assert keyboard[1][0].text == "Інша вага"
+    assert keyboard[1][0].callback_data == "meal-weight-other:42:2026-08-02"
+
+
+def test_weight_text_is_ignored_until_other_weight_is_selected() -> None:
+    class WeightService:
+        def __init__(self):
+            self.calls = 0
+
+        def change_meal_weight(self, *args):
+            self.calls += 1
+
+    service = WeightService()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+    message.text = "125"
+    context = SimpleNamespace(
+        user_data={
+            "awaiting_meal_weight": {
+                "kind": "meal_weight",
+                "message_id": 42,
+                "day": "2026-08-02",
+                "accepts_text": False,
+            }
+        }
+    )
+
+    asyncio.run(handlers.text(update, context))
+
+    assert service.calls == 0
+    assert message.replies == ["Спочатку обери вагу кнопкою або натисни «Інша вага»."]
 
 
 def test_composite_meal_reply_hides_weight_button() -> None:
@@ -1737,6 +1892,18 @@ def test_admin_help_and_user_list_are_available_without_personal_account() -> No
         load_help_text(admin=True),
         "Користувачі (1):\n• User — активний — ID 123 (@user)",
     ]
+
+
+def test_info_shows_release_to_admin_only() -> None:
+    handlers = TelegramHandlers(999, FakeManager())
+    admin_update, admin_message = make_update(user_id=999)
+    user_update, user_message = make_update(user_id=123)
+
+    asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
+    asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
+
+    assert admin_message.replies == ["Версія: 1.0.0"]
+    assert user_message.replies == ["Недоступно."]
 
 
 def test_non_admin_cannot_execute_admin_command() -> None:

@@ -15,7 +15,15 @@ LEGACY_SAVED_MEALS_HEADERS = [
     "default_total_weight_g",
     "meal_json",
 ]
-SAVED_MEALS_HEADERS = [*LEGACY_SAVED_MEALS_HEADERS, "icon"]
+PREVIOUS_SAVED_MEALS_HEADERS = [*LEGACY_SAVED_MEALS_HEADERS, "icon"]
+SAVED_MEALS_HEADERS = [
+    "saved_meal_id",
+    "source_message_id",
+    "display_name",
+    "default_total_weight_g",
+    "simple_meal_json",
+    "icon",
+]
 
 
 class SavedMealsError(RuntimeError):
@@ -93,19 +101,18 @@ class GoogleSavedMealStore:
                 SAVED_MEALS_HEADERS, value_input_option=ValueInputOption.raw
             )
             return
-        if rows[0] == LEGACY_SAVED_MEALS_HEADERS:
-            # Google Sheets does not allow insert_cols() at the first position
-            # past the current grid. Legacy worksheets have exactly five
-            # columns, so grow the grid first and then write the new header.
-            self._worksheet.add_cols(1)
-            self._worksheet.update(
-                values=[["icon"]],
-                range_name="F1:F1",
-                raw=True,
+        if rows[0] in (LEGACY_SAVED_MEALS_HEADERS, PREVIOUS_SAVED_MEALS_HEADERS):
+            # Release 1.0.0 intentionally starts the saved-meal library over:
+            # historical rows may contain composite meals, while the new
+            # contract only permits one item per saved entry.  The renamed
+            # JSON column is the persistent one-time migration marker.
+            if rows[0] == LEGACY_SAVED_MEALS_HEADERS:
+                self._worksheet.add_cols(1)
+            self._worksheet.clear()
+            self._worksheet.append_row(
+                SAVED_MEALS_HEADERS, value_input_option=ValueInputOption.raw
             )
-            rows = self._worksheet.get_all_values(
-                value_render_option=ValueRenderOption.unformatted
-            )
+            rows = [SAVED_MEALS_HEADERS]
         if rows[0] != SAVED_MEALS_HEADERS:
             raise SavedMealsSchemaError(
                 "Saved-meals worksheet headers are incompatible"

@@ -40,6 +40,7 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         "APP_TIMEZONE",
         "DEFAULT_DAY_START",
         "PHOTO_STORAGE_DIR",
+        "MEAL_WEIGHT_PRESETS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -56,6 +57,7 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     assert settings.users_sheet_name == "users"
     assert settings.meal_sheet_name == "food_log"
     assert settings.photo_storage_dir == (Path.cwd() / "data" / "photos").resolve()
+    assert settings.meal_weight_presets == (50, 100, 150, 200)
 
 
 def test_photo_storage_dir_is_resolved(monkeypatch, tmp_path) -> None:
@@ -110,6 +112,8 @@ def test_missing_required_value_is_reported(monkeypatch, tmp_path) -> None:
         ("OPENAI_INPUT_COST_PER_1M", "abc", "decimal"),
         ("OPENAI_INPUT_COST_PER_1M", "-1", "non-negative"),
         ("OPENAI_INPUT_COST_PER_1M", "NaN", "non-negative"),
+        ("MEAL_WEIGHT_PRESETS", "50,abc", "comma-separated"),
+        ("MEAL_WEIGHT_PRESETS", "50,50", "unique"),
     ],
 )
 def test_invalid_configuration(monkeypatch, tmp_path, name, value, message) -> None:

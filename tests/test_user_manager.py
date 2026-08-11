@@ -155,6 +155,15 @@ def test_activation_creates_one_sheet_and_repeat_start_reuses_account(tmp_path) 
     assert workspace.created == [("Вася — 123", time(3), 123)]
 
 
+def test_prepare_release_storage_opens_active_saved_meal_sheet(tmp_path) -> None:
+    registry = Registry(record(user_id=123, status="active", sheet="sheet-123"))
+    workspace = Workspace()
+
+    manager(tmp_path, registry, workspace).prepare_release_storage()
+
+    assert workspace.saved_opened == ["sheet-123"]
+
+
 def test_activation_reuses_spreadsheet_saved_by_partial_attempt(tmp_path) -> None:
     registry = Registry(record(user_id=123, sheet="saved-sheet"))
     workspace = Workspace()

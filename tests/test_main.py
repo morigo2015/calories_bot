@@ -36,6 +36,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         photo_storage_dir=Path("data/photos"),
         timezone=ZoneInfo("Europe/Kyiv"),
         default_day_start=time(1),
+        meal_weight_presets=(50, 100, 150, 200),
     )
     monkeypatch.setattr(main_module.Settings, "from_env", lambda: settings)
 
@@ -63,7 +64,9 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,
         "UserManager",
-        lambda *args: created.setdefault("manager", SimpleNamespace()),
+        lambda *args: created.setdefault(
+            "manager", SimpleNamespace(prepare_release_storage=lambda: None)
+        ),
     )
     handlers = SimpleNamespace(
         start=lambda: None,
@@ -78,7 +81,9 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         delete=lambda: None,
         save_callback=lambda: None,
         meal_weight_callback=lambda: None,
+        meal_weight_choice_callback=lambda: None,
         library_callback=lambda: None,
+        info=lambda: None,
         invite=lambda: None,
         users=lambda: None,
         block=lambda: None,
@@ -132,7 +137,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 23
+    assert len(app.handlers) == 25
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords == {"admin_user_id": 999}
@@ -191,6 +196,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "help",
         "tips",
         "invite",
+        "info",
         "users",
         "block",
         "unblock",

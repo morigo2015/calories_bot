@@ -19,10 +19,12 @@ from calories_bot.models import (
     SavedMeal,
     StoredMeal,
     calculate_meal,
+    format_simple_meal_request,
     scale_meal,
 )
 from calories_bot.saved_meals import (
     LEGACY_SAVED_MEALS_HEADERS,
+    PREVIOUS_SAVED_MEALS_HEADERS,
     SAVED_MEALS_HEADERS,
     GoogleSavedMealStore,
     SavedMealsSchemaError,
@@ -106,6 +108,9 @@ class Worksheet:
         del kwargs
         self.rows.append(list(row))
 
+    def clear(self):
+        self.rows.clear()
+
     def batch_update(self, updates, **kwargs):
         del kwargs
         for update in updates:
@@ -169,7 +174,7 @@ def test_saved_meal_store_initializes_empty_worksheet() -> None:
     assert store._worksheet.rows == [SAVED_MEALS_HEADERS]
 
 
-def test_saved_meal_store_migrates_previous_schema_with_blank_icon() -> None:
+def test_saved_meal_store_clears_previous_schema_once() -> None:
     existing = saved("one", 1)
     store = sheet_store(
         [
@@ -186,8 +191,29 @@ def test_saved_meal_store_migrates_previous_schema_with_blank_icon() -> None:
 
     store._ensure_headers()
 
-    assert store._worksheet.rows[0] == SAVED_MEALS_HEADERS
-    assert store.get("one").icon is None
+    assert store._worksheet.rows == [SAVED_MEALS_HEADERS]
+
+
+def test_saved_meal_store_clears_composite_capable_schema_once() -> None:
+    existing = saved("one", 1)
+    store = sheet_store(
+        [
+            list(PREVIOUS_SAVED_MEALS_HEADERS),
+            [
+                existing.saved_meal_id,
+                existing.source_message_id,
+                existing.display_name,
+                existing.default_total_weight_g,
+                existing.base_meal.model_dump_json(),
+                "",
+            ],
+        ]
+    )
+
+    store._ensure_headers()
+    store._ensure_headers()
+
+    assert store._worksheet.rows == [SAVED_MEALS_HEADERS]
 
 
 def test_scale_meal_changes_all_components_without_changing_origins() -> None:
@@ -259,7 +285,10 @@ class MemoryMealStore:
     def __init__(self):
         self.rows: list[tuple[date, int, StoredMeal]] = []
 
-    def add_source(self, source_id, value=None, normalized="food"):
+    def add_source(self, source_id, value=None, normalized=None):
+        normalized = normalized or format_simple_meal_request(
+            source_id, 0, 1, "analysis", "food"
+        )
         self.rows.append(
             (
                 DAY,
@@ -501,7 +530,6 @@ def test_weight_changes_are_rejected_for_composite_meals(tmp_path) -> None:
     meals = MemoryMealStore()
     meals.add_source(1, composite_meal())
     saved_meals = MemorySavedStore()
-    saved_meals.append(saved("lunch", 1, value=composite_meal()))
     app = service(tmp_path, meals, saved_meals)
 
     with pytest.raises(CompositeMealWeightError):

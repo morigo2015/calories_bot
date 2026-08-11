@@ -37,6 +37,7 @@ async def configure_bot_commands(
     admin_commands = [
         *user_commands,
         BotCommand("invite", "➕ додати користувача"),
+        BotCommand("info", "ℹ️ інформація про реліз"),
         BotCommand("users", "👥 показати перелік користувачів"),
         BotCommand("block", "⛔ заблокувати користувача"),
         BotCommand("unblock", "✅ розблокувати користувача"),
@@ -97,7 +98,12 @@ def main() -> None:
         settings.default_day_start,
         settings.photo_storage_dir,
     )
-    handlers = TelegramHandlers(settings.admin_telegram_user_id, manager)
+    manager.prepare_release_storage()
+    handlers = TelegramHandlers(
+        settings.admin_telegram_user_id,
+        manager,
+        settings.meal_weight_presets,
+    )
 
     application = (
         Application.builder()
@@ -138,6 +144,9 @@ def main() -> None:
         CommandHandler("save", handlers.save, filters=message_update)
     )
     application.add_handler(
+        CommandHandler("info", handlers.info, filters=message_update)
+    )
+    application.add_handler(
         CommandHandler("invite", handlers.invite, filters=message_update)
     )
     application.add_handler(
@@ -170,6 +179,15 @@ def main() -> None:
         CallbackQueryHandler(
             handlers.meal_weight_callback,
             pattern=r"^meal-weight:-?\d+:\d{4}-\d{2}-\d{2}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.meal_weight_choice_callback,
+            pattern=(
+                r"^meal-weight-(?:set|other):-?\d+:\d{4}-\d{2}-\d{2}"
+                r"(?::\d+)?$"
+            ),
         )
     )
     application.add_handler(

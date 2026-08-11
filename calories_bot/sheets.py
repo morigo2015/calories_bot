@@ -14,11 +14,13 @@ import gspread
 from gspread.utils import ValueInputOption, ValueRenderOption
 
 from .models import (
+    SIMPLE_MEAL_REQUEST_PREFIX,
     CalculatedFoodItem,
     LLMMetadata,
     MealResult,
     RecentMeal,
     StoredMeal,
+    parse_simple_meal_request,
     round_whole,
 )
 
@@ -124,6 +126,10 @@ class MealStore(Protocol):
     def get_latest_meal(self) -> RecentMeal | None: ...
 
     def get_recent_meals(self, limit: int = 8) -> list[RecentMeal]: ...
+
+    def get_component_meals(
+        self, day: date, source_message_id: int
+    ) -> list[tuple[int, StoredMeal]]: ...
 
     def update_meal(
         self, day: date, telegram_message_id: int, meal: MealResult
@@ -433,6 +439,10 @@ class GoogleSheetsStore:
                     if message_id is None:
                         raise ValueError("Missing message ID")
                     stored = _meal_from_row(row)
+                    if not stored.normalized_request.startswith(
+                        SIMPLE_MEAL_REQUEST_PREFIX
+                    ):
+                        continue
                     canonical = json.dumps(
                         stored.meal.model_dump(mode="json"),
                         ensure_ascii=False,
@@ -459,6 +469,34 @@ class GoogleSheetsStore:
         except Exception as exc:
             if isinstance(exc, SheetsReadError):
                 raise
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_component_meals(
+        self, day: date, source_message_id: int
+    ) -> list[tuple[int, StoredMeal]]:
+        try:
+            result: list[tuple[int, int, StoredMeal]] = []
+            for row in self._data_rows():
+                try:
+                    if self._row_day(row) != day:
+                        continue
+                    message_id = self._message_id(row)
+                    if message_id is None:
+                        continue
+                    stored = _meal_from_row(row)
+                    marker = parse_simple_meal_request(stored.normalized_request)
+                    if (
+                        marker is None
+                        or marker.source_message_id != source_message_id
+                        or marker.kind != "analysis"
+                    ):
+                        continue
+                    result.append((marker.component_index, message_id, stored))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+            result.sort(key=lambda item: item[0])
+            return [(message_id, stored) for _, message_id, stored in result]
+        except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
 
     def update_meal(
@@ -639,6 +677,12 @@ class GoogleSheetsStore:
                 raise SheetsWriteUncertainError(
                     "The row was deleted but the new daily total could not be read"
                 ) from verify_error
+
+        if photo_path and any(
+            len(row) > PHOTO_PATH_COLUMN and str(row[PHOTO_PATH_COLUMN]) == photo_path
+            for row in rows
+        ):
+            photo_path = None
 
         return MealDeletion(
             accounting_day=day,

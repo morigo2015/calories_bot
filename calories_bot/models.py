@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
@@ -20,6 +21,58 @@ MAX_SAVED_MEAL_NAME_LENGTH = 80
 MAX_PORTION_DISPLAY_LENGTH = 40
 MAX_WEIGHT_G = 10_000
 MAX_KCAL_PER_100G = 1_000
+SIMPLE_MEAL_REQUEST_PREFIX = "simple_meal:v1:"
+
+
+@dataclass(frozen=True)
+class SimpleMealRequest:
+    source_message_id: int
+    component_index: int
+    component_count: int
+    kind: str
+    payload: str
+
+
+def format_simple_meal_request(
+    source_message_id: int,
+    component_index: int,
+    component_count: int,
+    kind: str,
+    payload: str,
+) -> str:
+    if component_count < 1 or not 0 <= component_index < component_count:
+        raise ValueError("Invalid simple-meal component position")
+    if not kind or ":" in kind:
+        raise ValueError("Invalid simple-meal request kind")
+    return (
+        f"{SIMPLE_MEAL_REQUEST_PREFIX}{source_message_id}:{component_index}:"
+        f"{component_count}:{kind}:{payload}"
+    )
+
+
+def parse_simple_meal_request(value: str) -> SimpleMealRequest | None:
+    if not value.startswith(SIMPLE_MEAL_REQUEST_PREFIX):
+        return None
+    try:
+        source_raw, index_raw, count_raw, kind, payload = value.removeprefix(
+            SIMPLE_MEAL_REQUEST_PREFIX
+        ).split(":", maxsplit=4)
+        parsed = SimpleMealRequest(
+            source_message_id=int(source_raw),
+            component_index=int(index_raw),
+            component_count=int(count_raw),
+            kind=kind,
+            payload=payload,
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.component_count < 1
+        or not 0 <= parsed.component_index < parsed.component_count
+        or not parsed.kind
+    ):
+        return None
+    return parsed
 
 
 class FoodItem(BaseModel):
@@ -156,6 +209,8 @@ class SavedMeal(BaseModel):
 
     @model_validator(mode="after")
     def validate_display_name(self) -> SavedMeal:
+        if len(self.base_meal.items) != 1:
+            raise ValueError("A saved meal must contain exactly one item")
         self.display_name = " ".join(self.display_name.split())
         if not self.display_name:
             raise ValueError("Saved meal name cannot be empty")

@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 
 from .analyzer import ModelPricing
 
+DEFAULT_MEAL_WEIGHT_PRESETS = (50, 100, 150, 200)
+MAX_MEAL_WEIGHT_PRESETS = 8
+
 
 class ConfigError(RuntimeError):
     """Raised when required configuration is missing or invalid."""
@@ -34,6 +37,7 @@ class Settings:
     photo_storage_dir: Path
     timezone: ZoneInfo
     default_day_start: time
+    meal_weight_presets: tuple[int, ...]
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -106,6 +110,29 @@ class Settings:
             raise ConfigError("DEFAULT_DAY_START must use HH:MM in 24-hour format")
         default_day_start = time.fromisoformat(day_start_raw)
 
+        presets_raw = os.getenv(
+            "MEAL_WEIGHT_PRESETS",
+            ",".join(str(value) for value in DEFAULT_MEAL_WEIGHT_PRESETS),
+        )
+        try:
+            meal_weight_presets = tuple(
+                int(value.strip()) for value in presets_raw.split(",")
+            )
+        except ValueError as exc:
+            raise ConfigError(
+                "MEAL_WEIGHT_PRESETS must be a comma-separated list of integers"
+            ) from exc
+        if (
+            not meal_weight_presets
+            or len(meal_weight_presets) > MAX_MEAL_WEIGHT_PRESETS
+            or len(set(meal_weight_presets)) != len(meal_weight_presets)
+            or any(not 1 <= value <= 10_000 for value in meal_weight_presets)
+        ):
+            raise ConfigError(
+                "MEAL_WEIGHT_PRESETS must contain 1 to "
+                f"{MAX_MEAL_WEIGHT_PRESETS} unique values from 1 to 10000"
+            )
+
         credentials_path = Path(
             required["GOOGLE_SERVICE_ACCOUNT_FILE"] or ""
         ).expanduser()
@@ -132,4 +159,5 @@ class Settings:
             .resolve(),
             timezone=timezone,
             default_day_start=default_day_start,
+            meal_weight_presets=meal_weight_presets,
         )

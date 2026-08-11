@@ -18,6 +18,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import ContextTypes
 
+from . import __version__
 from .analyzer import (
     AnalysisError,
     Analyzer,
@@ -34,7 +35,10 @@ from .models import (
     MealResult,
     RecentMeal,
     SavedMeal,
+    StoredMeal,
     calculate_meal,
+    format_simple_meal_request,
+    parse_simple_meal_request,
     round_whole,
     scale_meal,
 )
@@ -411,23 +415,79 @@ class CaloriesService:
         totals = self._store.get_daily_totals(start_day, end_day)
         return format_week_reply(end_day, totals, self._daily_kcal_goal)
 
+    @staticmethod
+    def _component_message_id(source_message_id: int, component_index: int) -> int:
+        if component_index == 0:
+            return source_message_id
+        raw = hashlib.sha256(
+            f"meal-component:{source_message_id}:{component_index}".encode()
+        ).digest()
+        value = int.from_bytes(raw[:7], "big") & ((1 << 52) - 1)
+        return -(value or component_index)
+
+    @staticmethod
+    def _single_item_meals(meal: MealResult) -> list[MealResult]:
+        return [
+            MealResult(
+                meal_name=item.name,
+                items=[item],
+                total_weight_g=item.weight_g,
+                kcal_per_100g=item.kcal_per_100g,
+                meal_kcal=item.calories,
+                estimated=item.weight_estimated or item.kcal_estimated,
+            )
+            for item in meal.items
+        ]
+
+    @staticmethod
+    def _reply_collection(replies: list[MealReply]) -> MealReply | list[MealReply]:
+        return replies[0] if len(replies) == 1 else replies
+
+    def _existing_component_replies(
+        self,
+        source_message_id: int,
+        day: date,
+        today_total: float,
+        first: StoredMeal,
+    ) -> MealReply | list[MealReply] | None:
+        marker = parse_simple_meal_request(first.normalized_request)
+        if (
+            marker is None
+            or marker.kind != "analysis"
+            or marker.source_message_id != source_message_id
+        ):
+            return MealReply(
+                text=format_reply(first.meal, today_total, self._daily_kcal_goal),
+                telegram_message_id=source_message_id,
+                accounting_day=day,
+                can_change_weight=len(first.meal.items) == 1,
+            )
+        components = self._store.get_component_meals(day, source_message_id)
+        if len(components) != marker.component_count:
+            return None
+        replies = [
+            MealReply(
+                text=format_reply(stored.meal, today_total, self._daily_kcal_goal),
+                telegram_message_id=message_id,
+                accounting_day=day,
+            )
+            for message_id, stored in components
+        ]
+        return self._reply_collection(replies)
+
     def get_existing_reply(
         self, telegram_message_id: int, timestamp: datetime
-    ) -> MealReply | None:
+    ) -> MealReply | list[MealReply] | None:
         day = self._accounting_day(timestamp)
         with self._store_lock:
             state = self._store.get_state(day, telegram_message_id)
         if state.existing is None:
             return None
-        return MealReply(
-            text=format_reply(
-                state.existing.meal,
-                state.today_total,
-                self._daily_kcal_goal,
-            ),
-            telegram_message_id=telegram_message_id,
-            accounting_day=day,
-            can_change_weight=len(state.existing.meal.items) == 1,
+        return self._existing_component_replies(
+            telegram_message_id,
+            day,
+            state.today_total,
+            state.existing,
         )
 
     def process_message(
@@ -436,22 +496,20 @@ class CaloriesService:
         telegram_message_id: int,
         timestamp: datetime,
         image_bytes: bytes | None = None,
-    ) -> MealReply:
+    ) -> MealReply | list[MealReply]:
         timestamp = self._local_timestamp(timestamp)
         day = self._accounting_day(timestamp)
         with self._store_lock:
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
-                return MealReply(
-                    text=format_reply(
-                        state.existing.meal,
-                        state.today_total,
-                        self._daily_kcal_goal,
-                    ),
-                    telegram_message_id=telegram_message_id,
-                    accounting_day=day,
-                    can_change_weight=len(state.existing.meal.items) == 1,
+                existing_reply = self._existing_component_replies(
+                    telegram_message_id,
+                    day,
+                    state.today_total,
+                    state.existing,
                 )
+                if existing_reply is not None:
+                    return existing_reply
 
         normalized = (
             normalize_input(text)
@@ -464,22 +522,20 @@ class CaloriesService:
         result = self._analyzer.analyze(normalized, image_bytes)
         if not result.analysis.is_food:
             raise NotFoodError
-        meal = calculate_meal(result.analysis)
+        meals = self._single_item_meals(calculate_meal(result.analysis))
         with self._store_lock:
             # Refresh after analysis: a deletion may have completed while the
             # model was working, so the earlier daily total is no longer valid.
             state = self._store.get_state(day, telegram_message_id)
             if state.existing is not None:
-                return MealReply(
-                    text=format_reply(
-                        state.existing.meal,
-                        state.today_total,
-                        self._daily_kcal_goal,
-                    ),
-                    telegram_message_id=telegram_message_id,
-                    accounting_day=day,
-                    can_change_weight=len(state.existing.meal.items) == 1,
+                existing_reply = self._existing_component_replies(
+                    telegram_message_id,
+                    day,
+                    state.today_total,
+                    state.existing,
                 )
+                if existing_reply is not None:
+                    return existing_reply
 
             photo_path: str | None = None
             if image_bytes is not None:
@@ -489,29 +545,71 @@ class CaloriesService:
                 )
                 photo_file.write_bytes(image_bytes)
                 photo_path = str(photo_file)
+            existing_components: dict[int, tuple[int, StoredMeal]] = {}
+            if state.existing is not None:
+                for message_id, stored in self._store.get_component_meals(
+                    day, telegram_message_id
+                ):
+                    marker = parse_simple_meal_request(stored.normalized_request)
+                    if marker is not None:
+                        existing_components[marker.component_index] = (
+                            message_id,
+                            stored,
+                        )
+            stored_components: list[tuple[int, StoredMeal]] = []
+            today_total = state.today_total
             try:
-                stored = self._store.append_meal(
-                    timestamp,
-                    telegram_message_id,
-                    text,
-                    normalized.text,
-                    photo_path,
-                    meal,
-                    result.metadata,
-                )
+                for index, meal in enumerate(meals):
+                    existing = existing_components.get(index)
+                    if existing is not None:
+                        stored_components.append(existing)
+                        continue
+                    component_message_id = self._component_message_id(
+                        telegram_message_id, index
+                    )
+                    stored = self._store.append_meal(
+                        timestamp,
+                        component_message_id,
+                        text,
+                        format_simple_meal_request(
+                            telegram_message_id,
+                            index,
+                            len(meals),
+                            "analysis",
+                            normalized.text,
+                        ),
+                        photo_path,
+                        meal,
+                        (
+                            result.metadata
+                            if index == 0
+                            else LLMMetadata(
+                                model=result.metadata.model,
+                                effort=result.metadata.effort,
+                            )
+                        ),
+                    )
+                    stored_components.append((component_message_id, stored))
+                    today_total += stored.meal.meal_kcal
             except SheetsWriteUncertainError:
                 raise
-            except SheetsWriteError:
-                if photo_path is not None:
+            except SheetsWriteError as exc:
+                if photo_path is not None and not stored_components:
                     self._delete_photo(photo_path)
+                if stored_components:
+                    raise SheetsWriteUncertainError(
+                        "Only part of the component meal was stored"
+                    ) from exc
                 raise
-            today_total = state.today_total + stored.meal.meal_kcal
-            return MealReply(
-                text=format_reply(stored.meal, today_total, self._daily_kcal_goal),
-                telegram_message_id=telegram_message_id,
-                accounting_day=day,
-                can_change_weight=len(stored.meal.items) == 1,
-            )
+            replies = [
+                MealReply(
+                    text=format_reply(stored.meal, today_total, self._daily_kcal_goal),
+                    telegram_message_id=component_message_id,
+                    accounting_day=day,
+                )
+                for component_message_id, stored in stored_components
+            ]
+            return self._reply_collection(replies)
 
     def _saved(self) -> SavedMealStore:
         if self._saved_store is None:
@@ -566,8 +664,11 @@ class CaloriesService:
             source = self._store.get_meal(day, message_id)
             if source is None:
                 return None, False
-            if source.normalized_request.startswith("saved_meal:"):
-                source_id = source.normalized_request.split(":", maxsplit=2)[1]
+            marker = parse_simple_meal_request(source.normalized_request)
+            if marker is None:
+                return None, False
+            if marker.kind == "saved":
+                source_id = marker.payload.split(":", maxsplit=1)[0]
                 return saved_store.get(source_id), False
             meals = saved_store.list_meals()
             used_names = {meal.display_name.casefold() for meal in meals}
@@ -640,7 +741,8 @@ class CaloriesService:
         meal: MealResult,
         event_id: int,
         timestamp: datetime,
-        normalized_request: str,
+        request_kind: str,
+        request_payload: str,
         metadata_model: str,
         *,
         can_save: bool,
@@ -654,7 +756,9 @@ class CaloriesService:
                     timestamp,
                     event_id,
                     "",
-                    normalized_request,
+                    format_simple_meal_request(
+                        event_id, 0, 1, request_kind, request_payload
+                    ),
                     None,
                     meal,
                     LLMMetadata(model=metadata_model, effort="none"),
@@ -687,7 +791,8 @@ class CaloriesService:
             meal,
             event_id,
             timestamp,
-            f"saved_meal:{saved_meal_id}:{weight_g}g",
+            "saved",
+            f"{saved_meal_id}:{weight_g}g",
             "saved_meal",
             can_save=False,
         )
@@ -710,11 +815,16 @@ class CaloriesService:
             meal,
             event_id,
             timestamp,
-            f"recent_meal:{message_id}:{weight_g}g",
+            "recent",
+            f"{message_id}:{weight_g}g",
             "recent_meal",
             can_save=(
                 not already_saved
-                and not recent.normalized_request.startswith("saved_meal:")
+                and (
+                    (marker := parse_simple_meal_request(recent.normalized_request))
+                    is not None
+                    and marker.kind != "saved"
+                )
             ),
         )
 
@@ -734,8 +844,10 @@ class CaloriesService:
             )
             if updated is None:
                 return None
+            marker = parse_simple_meal_request(source.normalized_request)
             can_save = (
-                not source.normalized_request.startswith("saved_meal:")
+                marker is not None
+                and marker.kind != "saved"
                 and self._saved().find_by_source(message_id) is None
             )
         return MealReply(
@@ -820,6 +932,19 @@ class UserManager:
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
         self._services: dict[tuple[int, str, time], CaloriesService] = {}
         self._lock = threading.RLock()
+
+    def prepare_release_storage(self) -> None:
+        """Apply idempotent per-user storage upgrades before polling starts."""
+        for user in self._registry.list_users():
+            if not user.spreadsheet_id:
+                continue
+            try:
+                self._workspace.open_saved_meal_store(user.spreadsheet_id)
+            except Exception:
+                LOGGER.exception(
+                    "Could not prepare saved-meal storage for user %s",
+                    user.telegram_user_id,
+                )
 
     def get_user(self, telegram_user_id: int) -> UserRecord | None:
         return self._registry.get_user(telegram_user_id)
@@ -932,9 +1057,15 @@ class UserManager:
 
 
 class TelegramHandlers:
-    def __init__(self, admin_user_id: int, manager: UserManager) -> None:
+    def __init__(
+        self,
+        admin_user_id: int,
+        manager: UserManager,
+        meal_weight_presets: tuple[int, ...] = (50, 100, 150, 200),
+    ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
+        self._meal_weight_presets = meal_weight_presets
 
     @staticmethod
     def _is_private(update: Update) -> bool:
@@ -1125,6 +1256,14 @@ class TelegramHandlers:
             return
         if self._is_admin(update) or await self._active_service(update) is not None:
             await message.reply_text(load_tips_text(), do_quote=False)
+
+    async def info(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if not self._is_admin(update) or message is None:
+            await self._reject_admin_command(update)
+            return
+        await message.reply_text(f"Версія: {__version__}", do_quote=False)
 
     async def day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -1480,15 +1619,97 @@ class TelegramHandlers:
             "day": day.isoformat(),
             "result_chat_id": query.message.chat_id,
             "result_message_id": query.message.message_id,
+            "accepts_text": False,
         }
         self._start_waiting(context, MEAL_WEIGHT_WAITING_KEY, waiting_state)
         await query.answer()
         prompt = await query.message.reply_text(
-            "⚖️ Введи нову вагу, наприклад: 350 г",
-            reply_markup=self._cancel_markup(),
+            "⚖️ Обери нову вагу:",
+            reply_markup=self._weight_choice_markup(message_id, day),
             do_quote=False,
         )
         self._remember_prompt(waiting_state, prompt)
+
+    def _weight_choice_markup(self, message_id: int, day: date) -> InlineKeyboardMarkup:
+        preset_buttons = [
+            InlineKeyboardButton(
+                f"{weight}г",
+                callback_data=(
+                    f"meal-weight-set:{message_id}:{day.isoformat()}:{weight}"
+                ),
+            )
+            for weight in self._meal_weight_presets
+        ]
+        rows = [
+            preset_buttons[index : index + 4]
+            for index in range(0, len(preset_buttons), 4)
+        ]
+        rows.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Інша вага",
+                        callback_data=(
+                            f"meal-weight-other:{message_id}:{day.isoformat()}"
+                        ),
+                    )
+                ],
+                [InlineKeyboardButton("❌ Скасувати", callback_data="wait-cancel")],
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+
+    async def meal_weight_choice_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        state = self._user_state(context).get(MEAL_WEIGHT_WAITING_KEY)
+        if not isinstance(state, dict) or state.get("kind") != "meal_weight":
+            await query.answer("Цей вибір уже неактивний.", show_alert=True)
+            return
+        data = query.data or ""
+        try:
+            if data.startswith("meal-weight-set:"):
+                message_raw, day_raw, weight_raw = data.removeprefix(
+                    "meal-weight-set:"
+                ).split(":", maxsplit=2)
+                weight_g = self._parse_weight(weight_raw)
+                is_other = False
+            elif data.startswith("meal-weight-other:"):
+                message_raw, day_raw = data.removeprefix("meal-weight-other:").split(
+                    ":", maxsplit=1
+                )
+                weight_g = None
+                is_other = True
+            else:
+                raise ValueError
+            message_id = int(message_raw)
+            day = date.fromisoformat(day_raw)
+            if message_id != int(str(state["message_id"])) or day.isoformat() != str(
+                state["day"]
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            await query.answer("Некоректна кнопка.", show_alert=True)
+            return
+        if is_other:
+            state["accepts_text"] = True
+            await query.answer()
+            await query.edit_message_text(
+                f"⚖️ Введи вагу від 1 до {MAX_WEIGHT_G} г, наприклад: 350 г",
+                reply_markup=self._cancel_markup(),
+            )
+            return
+        if not isinstance(query.message, Message) or weight_g is None:
+            await query.answer("Це повідомлення вже недоступне.", show_alert=True)
+            return
+        await query.answer()
+        await self._apply_meal_weight(query.message, context, service, state, weight_g)
 
     async def _edit_saved_meals_menu(
         self, query: object, service: CaloriesService
@@ -1671,10 +1892,34 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None:
             return
+        if state.get("kind") != "meal_weight":
+            self._clear_pending_input(context)
+            return
+        if state.get("accepts_text") is not True:
+            await message.reply_text(
+                "Спочатку обери вагу кнопкою або натисни «Інша вага».",
+                do_quote=False,
+            )
+            return
         try:
-            if state.get("kind") != "meal_weight":
-                raise ValueError
             weight_g = self._parse_weight(text)
+        except ValueError:
+            await message.reply_text(
+                f"Введи вагу від 1 до {MAX_WEIGHT_G} г, наприклад: 350 г",
+                do_quote=False,
+            )
+            return
+        await self._apply_meal_weight(message, context, service, state, weight_g)
+
+    async def _apply_meal_weight(
+        self,
+        message: Message,
+        context: ContextTypes.DEFAULT_TYPE,
+        service: CaloriesService,
+        state: dict[str, object],
+        weight_g: int,
+    ) -> None:
+        try:
             result = await asyncio.to_thread(
                 service.change_meal_weight,
                 int(str(state["message_id"])),
@@ -1711,11 +1956,6 @@ class TelegramHandlers:
             self._clear_pending_input(context)
             await message.reply_text(
                 "Змінити вагу можна лише для страви з одного компонента.",
-                do_quote=False,
-            )
-        except ValueError:
-            await message.reply_text(
-                f"Введи вагу від 1 до {MAX_WEIGHT_G} г, наприклад: 350 г",
                 do_quote=False,
             )
         except LookupError:
@@ -1788,7 +2028,7 @@ class TelegramHandlers:
             await message.reply_text(READ_ERROR_TEXT, do_quote=False)
             return
         if existing is not None:
-            await self._send_meal_reply(message, existing)
+            await self._send_meal_replies(message, existing)
             return
         try:
             telegram_file = await message.photo[-1].get_file()
@@ -1839,6 +2079,14 @@ class TelegramHandlers:
             do_quote=False,
         )
 
+    @classmethod
+    async def _send_meal_replies(
+        cls, message: Message, result: MealReply | list[MealReply]
+    ) -> None:
+        replies = result if isinstance(result, list) else [result]
+        for reply in replies:
+            await cls._send_meal_reply(message, reply)
+
     @staticmethod
     def _callback_event_id(callback_query_id: str) -> int:
         raw = hashlib.sha256(callback_query_id.encode()).digest()
@@ -1880,7 +2128,7 @@ class TelegramHandlers:
             LOGGER.exception("Unexpected error while handling a Telegram message")
             reply = ANALYSIS_ERROR_TEXT
         else:
-            await self._send_meal_reply(message, result)
+            await self._send_meal_replies(message, result)
             return
         await message.reply_text(reply, do_quote=False)
 

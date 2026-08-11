@@ -4,7 +4,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from calories_bot.models import FoodAnalysis, FoodItem, LLMMetadata, calculate_meal
+from calories_bot.models import (
+    FoodAnalysis,
+    FoodItem,
+    LLMMetadata,
+    calculate_meal,
+    format_simple_meal_request,
+)
 from calories_bot.sheets import (
     HEADERS,
     LEGACY_HEADERS,
@@ -324,12 +330,38 @@ def test_recent_meals_are_newest_first_distinct_and_skip_bad_rows() -> None:
     newest = stored_row(datetime(2026, 8, 3, 12, tzinfo=TZ), 3, 90)
     newest[2] = "йогурт"
     newest[4] = 90
+    first[7] = format_simple_meal_request(1, 0, 1, "analysis", "сир")
+    duplicate[7] = format_simple_meal_request(2, 0, 1, "analysis", "сир")
+    newest[7] = format_simple_meal_request(3, 0, 1, "analysis", "йогурт")
     rows = [HEADERS, first, ["bad"], duplicate, newest]
 
     recent = build_store(rows).get_recent_meals(8)
 
     assert [item.telegram_message_id for item in recent] == [3, 2]
     assert [item.meal.meal_name for item in recent] == ["йогурт", "сир"]
+
+
+def test_recent_meals_ignore_pre_component_history() -> None:
+    old = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 1, 60)
+    current = stored_row(datetime(2026, 8, 3, 12, tzinfo=TZ), 2, 90)
+    current[7] = format_simple_meal_request(2, 0, 1, "analysis", "йогурт")
+
+    recent = build_store([HEADERS, old, current]).get_recent_meals(8)
+
+    assert [item.telegram_message_id for item in recent] == [2]
+
+
+def test_component_meals_are_returned_in_component_order() -> None:
+    second = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), -12, 60)
+    first = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 42, 50)
+    second[7] = format_simple_meal_request(42, 1, 2, "analysis", "перекус")
+    first[7] = format_simple_meal_request(42, 0, 2, "analysis", "перекус")
+
+    components = build_store([HEADERS, second, first]).get_component_meals(
+        datetime(2026, 8, 2).date(), 42
+    )
+
+    assert [message_id for message_id, _ in components] == [42, -12]
 
 
 def test_malformed_rows_are_skipped_in_total() -> None:
@@ -514,6 +546,19 @@ def test_delete_removes_row_and_recalculates_original_day() -> None:
     assert deletion.day_total == 100
     assert deletion.photo_path == "/photos/42.jpg"
     assert [store._message_id(row) for row in store._worksheet.rows[1:]] == [41, 43]
+
+
+def test_shared_component_photo_is_deleted_only_with_last_component() -> None:
+    photo_path = "/photos/42.jpg"
+    first = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 42, 50, photo_path)
+    second = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), -12, 60, photo_path)
+    store = build_store([HEADERS, first, second])
+
+    first_deletion = store.delete_meal(42, datetime(2026, 8, 2).date())
+    second_deletion = store.delete_meal(-12, datetime(2026, 8, 2).date())
+
+    assert first_deletion.photo_path is None
+    assert second_deletion.photo_path == photo_path
 
 
 def test_delete_uses_day_when_message_id_was_reused() -> None:
