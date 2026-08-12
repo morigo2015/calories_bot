@@ -4,6 +4,7 @@ import base64
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol, cast
 
@@ -75,6 +76,18 @@ class AnalysisError(RuntimeError):
 
 class InputFormatError(ValueError):
     """Raised when deterministic input normalization rejects a message."""
+
+
+class UsageRecorder(Protocol):
+    def record_llm_usage(
+        self,
+        recorded_at: datetime,
+        model: str,
+        input_tokens: int,
+        cached_input_tokens: int,
+        output_tokens: int,
+        estimated_cost_usd: Decimal | None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -521,11 +534,49 @@ class OpenAIAnalyzer:
         effort: str,
         timeout_seconds: float,
         pricing: ModelPricing,
+        usage_recorder: UsageRecorder | None = None,
     ) -> None:
         self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
         self._model = model
         self._effort = effort
         self._pricing = pricing
+        self._usage_recorder = usage_recorder
+
+    def _metadata_from_usage(self, usage: Any | None) -> LLMMetadata:
+        if usage is None:
+            LOGGER.warning("OpenAI returned no token usage")
+            return LLMMetadata(model=self._model, effort=self._effort)
+        input_tokens = int(usage.input_tokens)
+        output_tokens = int(usage.output_tokens)
+        details = getattr(usage, "input_tokens_details", None)
+        cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
+        estimated_cost = calculate_llm_cost(
+            input_tokens,
+            cached_tokens,
+            output_tokens,
+            self._pricing,
+        )
+        recorder = getattr(self, "_usage_recorder", None)
+        if recorder is not None:
+            try:
+                recorder.record_llm_usage(
+                    datetime.now(UTC),
+                    self._model,
+                    input_tokens,
+                    cached_tokens,
+                    output_tokens,
+                    estimated_cost,
+                )
+            except Exception:
+                LOGGER.exception("Could not persist OpenAI token usage")
+        return LLMMetadata(
+            model=self._model,
+            effort=self._effort,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_tokens,
+            llm_cost_usd=estimated_cost,
+        )
 
     def analyze(
         self, normalized: NormalizedInput, image_bytes: bytes | None = None
@@ -596,6 +647,8 @@ class OpenAIAnalyzer:
         except Exception as exc:
             raise AnalysisError("OpenAI request failed") from exc
 
+        metadata = self._metadata_from_usage(getattr(response, "usage", None))
+
         parsed = response.output_parsed
         if parsed is None:
             raise AnalysisError("OpenAI returned no structured analysis")
@@ -606,25 +659,6 @@ class OpenAIAnalyzer:
         )
         analysis = apply_household_portions(analysis, normalized.household_portions)
 
-        usage = response.usage
-        if usage is None:
-            LOGGER.warning("OpenAI returned no token usage")
-            metadata = LLMMetadata(model=self._model, effort=self._effort)
-        else:
-            cached_tokens = usage.input_tokens_details.cached_tokens
-            metadata = LLMMetadata(
-                model=self._model,
-                effort=self._effort,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cached_input_tokens=cached_tokens,
-                llm_cost_usd=calculate_llm_cost(
-                    usage.input_tokens,
-                    cached_tokens,
-                    usage.output_tokens,
-                    self._pricing,
-                ),
-            )
         return AnalysisResult(analysis=analysis, metadata=metadata)
 
     def suggest_meal_icon(self, meal: MealResult) -> MealIconSuggestion:
@@ -650,6 +684,7 @@ class OpenAIAnalyzer:
             )
         except Exception as exc:
             raise AnalysisError("OpenAI icon request failed") from exc
+        self._metadata_from_usage(getattr(response, "usage", None))
         if response.output_parsed is None:
             raise AnalysisError("OpenAI returned no icon suggestion")
         return response.output_parsed

@@ -37,9 +37,12 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         "OPENAI_INPUT_COST_PER_1M",
         "OPENAI_CACHED_INPUT_COST_PER_1M",
         "OPENAI_OUTPUT_COST_PER_1M",
+        "OPENAI_ADMIN_API_KEY",
+        "OPENAI_PROJECT_ID",
         "APP_TIMEZONE",
         "DEFAULT_DAY_START",
         "PHOTO_STORAGE_DIR",
+        "STATISTICS_DB_PATH",
         "MEAL_WEIGHT_PRESETS",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -52,11 +55,17 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     assert settings.openai_reasoning_effort == "low"
     assert settings.openai_timeout_seconds == 90
     assert settings.openai_pricing.complete is False
+    assert settings.openai_admin_api_key == ""
+    assert settings.openai_project_id == ""
     assert settings.timezone.key == "Europe/Kyiv"
     assert settings.default_day_start.isoformat(timespec="minutes") == "01:00"
     assert settings.users_sheet_name == "users"
     assert settings.meal_sheet_name == "food_log"
     assert settings.photo_storage_dir == (Path.cwd() / "data" / "photos").resolve()
+    assert (
+        settings.statistics_db_path
+        == (Path.cwd() / "data" / "statistics.sqlite3").resolve()
+    )
     assert settings.meal_weight_presets == (50, 100, 150, 200)
 
 

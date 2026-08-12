@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
 )
 
+from .analytics import AnalyticsStore, BotStatistics, OpenAICostClient
 from .analyzer import OpenAIAnalyzer
 from .bot import TelegramHandlers, UserManager
 from .config import Settings
@@ -68,12 +69,22 @@ def main() -> None:
         logging.getLogger(__name__).warning(
             "OpenAI token pricing is incomplete; llm_cost_usd will be blank"
         )
+    statistics = BotStatistics(
+        AnalyticsStore(settings.statistics_db_path),
+        settings.timezone,
+        OpenAICostClient(
+            settings.openai_admin_api_key,
+            settings.openai_project_id,
+            timeout_seconds=min(settings.openai_timeout_seconds, 15),
+        ),
+    )
     analyzer = OpenAIAnalyzer(
         settings.openai_api_key,
         settings.openai_model,
         settings.openai_reasoning_effort,
         settings.openai_timeout_seconds,
         settings.openai_pricing,
+        statistics,
     )
     google_client = gspread.service_account(
         filename=str(settings.google_service_account_file)
@@ -103,6 +114,7 @@ def main() -> None:
         settings.admin_telegram_user_id,
         manager,
         settings.meal_weight_presets,
+        statistics,
     )
 
     application = (
@@ -118,6 +130,9 @@ def main() -> None:
         .build()
     )
     message_update = filters.UpdateType.MESSAGE
+    application.add_handler(
+        MessageHandler(message_update, handlers.track_message), group=-1
+    )
     application.add_handler(
         CommandHandler("start", handlers.start, filters=message_update)
     )

@@ -433,6 +433,10 @@ def test_openai_analyzer_returns_usage_and_sends_normalized_text() -> None:
     analyzer._model = "test-model"
     analyzer._effort = "none"
     analyzer._pricing = ModelPricing(Decimal("2"), Decimal("1"), Decimal("8"))
+    recorded_usage = []
+    analyzer._usage_recorder = SimpleNamespace(
+        record_llm_usage=lambda *args: recorded_usage.append(args)
+    )
 
     result = analyzer.analyze(normalized)
 
@@ -441,6 +445,13 @@ def test_openai_analyzer_returns_usage_and_sends_normalized_text() -> None:
     assert result.metadata.input_tokens == 100
     assert result.metadata.output_tokens == 20
     assert result.metadata.llm_cost_usd == Decimal("0.00032")
+    assert recorded_usage[0][1:] == (
+        "test-model",
+        100,
+        40,
+        20,
+        Decimal("0.00032"),
+    )
     assert fake_responses.kwargs["input"][-1]["content"] == normalized.text
 
 

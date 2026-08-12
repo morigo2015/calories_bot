@@ -954,7 +954,13 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
     message = FakeMessage()
     return (
         SimpleNamespace(
-            effective_user=SimpleNamespace(id=user_id, username=f"user{user_id}"),
+            update_id=77,
+            message=message,
+            effective_user=SimpleNamespace(
+                id=user_id,
+                username=f"user{user_id}",
+                full_name=f"User {user_id}",
+            ),
             effective_chat=SimpleNamespace(
                 id=user_id if chat_id is None else chat_id, type=chat_type
             ),
@@ -1902,8 +1908,36 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.0.0"]
+    assert admin_message.replies == ["Версія: 1.0.1"]
     assert user_message.replies == ["Недоступно."]
+
+
+def test_tracking_records_incoming_message_and_extended_info() -> None:
+    class Statistics:
+        def __init__(self):
+            self.recorded = None
+
+        def record_message(self, *args):
+            self.recorded = args
+
+        def format_info(self, version):
+            return f"Версія: {version}\nПовідомлення за 24 години: 7"
+
+    statistics = Statistics()
+    handlers = TelegramHandlers(999, FakeManager(), statistics=statistics)
+    update, message = make_update(user_id=999)
+
+    asyncio.run(handlers.track_message(update, SimpleNamespace()))
+    asyncio.run(handlers.info(update, SimpleNamespace(user_data={})))
+
+    assert statistics.recorded == (
+        77,
+        message.date,
+        999,
+        "User 999",
+        "user999",
+    )
+    assert message.replies == ["Версія: 1.0.1\nПовідомлення за 24 години: 7"]
 
 
 def test_non_admin_cannot_execute_admin_command() -> None:

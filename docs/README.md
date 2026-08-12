@@ -71,6 +71,7 @@ Admin-команди працюють тільки в приватному ча�
 
 ```text
 /invite Вася
+/info
 /users
 /block 123456789
 /unblock 123456789
@@ -79,6 +80,8 @@ Admin-команди працюють тільки в приватному ча�
 
 `/invite` без аргументу з Telegram-меню просить ім’я наступним повідомленням і
 має кнопку скасування. `/delete` вимагає inline-підтвердження.
+`/info` показує версію, час останнього запуску, статистику повідомлень за
+24 години й 30 днів та 30-денне використання OpenAI.
 
 Кожен активований користувач має окремий Spreadsheet із worksheet журналу
 `food_log` та worksheet шаблонів `saved_meals`, а також окрему локальну теку
@@ -126,10 +129,13 @@ cp .env.example .env
 - `USERS_SHEET_NAME=users`;
 - `MEAL_SHEET_NAME=food_log`;
 - `PHOTO_STORAGE_DIR=./data/photos`;
+- `STATISTICS_DB_PATH=./data/statistics.sqlite3`;
 - `APP_TIMEZONE=Europe/Kyiv`;
 - `DEFAULT_DAY_START=01:00`;
 - `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT`, `OPENAI_TIMEOUT_SECONDS` і тарифи
   `OPENAI_*_COST_PER_1M`.
+- `OPENAI_ADMIN_API_KEY` для фактичної вартості з OpenAI Costs API та
+  `OPENAI_PROJECT_ID`, щоб обмежити цю вартість проєктом бота.
 
 Окремої env-змінної для `saved_meals` немає. `.env` і
 `service-account.json` повинні мати права `600`.

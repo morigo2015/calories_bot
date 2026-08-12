@@ -25,6 +25,8 @@ class Settings:
     telegram_bot_token: str
     admin_telegram_user_id: int
     openai_api_key: str
+    openai_admin_api_key: str
+    openai_project_id: str
     openai_model: str
     openai_reasoning_effort: str
     openai_timeout_seconds: float
@@ -35,6 +37,7 @@ class Settings:
     google_drive_folder_id: str
     meal_sheet_name: str
     photo_storage_dir: Path
+    statistics_db_path: Path
     timezone: ZoneInfo
     default_day_start: time
     meal_weight_presets: tuple[int, ...]
@@ -145,6 +148,8 @@ class Settings:
             telegram_bot_token=required["TELEGRAM_BOT_TOKEN"] or "",
             admin_telegram_user_id=admin_telegram_user_id,
             openai_api_key=required["OPENAI_API_KEY"] or "",
+            openai_admin_api_key=os.getenv("OPENAI_ADMIN_API_KEY", "").strip(),
+            openai_project_id=os.getenv("OPENAI_PROJECT_ID", "").strip(),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
             openai_reasoning_effort=effort,
             openai_timeout_seconds=openai_timeout_seconds,
@@ -155,6 +160,11 @@ class Settings:
             google_drive_folder_id=required["GOOGLE_DRIVE_FOLDER_ID"] or "",
             meal_sheet_name=os.getenv("MEAL_SHEET_NAME", "food_log"),
             photo_storage_dir=Path(os.getenv("PHOTO_STORAGE_DIR", "./data/photos"))
+            .expanduser()
+            .resolve(),
+            statistics_db_path=Path(
+                os.getenv("STATISTICS_DB_PATH", "./data/statistics.sqlite3")
+            )
             .expanduser()
             .resolve(),
             timezone=timezone,

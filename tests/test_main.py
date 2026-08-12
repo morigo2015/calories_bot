@@ -19,11 +19,13 @@ def test_configure_logging_suppresses_network_request_urls() -> None:
     assert logging.getLogger("httpcore").level == logging.WARNING
 
 
-def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
+def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> None:
     settings = SimpleNamespace(
         telegram_bot_token="token",
         admin_telegram_user_id=999,
         openai_api_key="key",
+        openai_admin_api_key="",
+        openai_project_id="",
         openai_model="model",
         openai_reasoning_effort="none",
         openai_timeout_seconds=90,
@@ -34,6 +36,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         google_drive_folder_id="folder",
         meal_sheet_name="food_log",
         photo_storage_dir=Path("data/photos"),
+        statistics_db_path=tmp_path / "statistics.sqlite3",
         timezone=ZoneInfo("Europe/Kyiv"),
         default_day_start=time(1),
         meal_weight_presets=(50, 100, 150, 200),
@@ -94,6 +97,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         goal_disable_callback=lambda: None,
         text=lambda: None,
         photo=lambda: None,
+        track_message=lambda: None,
     )
     monkeypatch.setattr(
         main_module,
@@ -106,8 +110,8 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
             self.handlers = []
             self.polling = None
 
-        def add_handler(self, handler):
-            self.handlers.append(handler)
+        def add_handler(self, handler, group=0):
+            self.handlers.append((handler, group))
 
         def run_polling(self, **kwargs):
             self.polling = kwargs
@@ -137,7 +141,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 25
+    assert len(app.handlers) == 26
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords == {"admin_user_id": 999}
@@ -149,8 +153,8 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         from_user=User(123, "Igor", False),
         text="сир 50",
     )
-    assert app.handlers[-1].check_update(Update(1, message=message))
-    assert not app.handlers[-1].check_update(Update(2, edited_message=message))
+    assert app.handlers[-1][0].check_update(Update(1, message=message))
+    assert not app.handlers[-1][0].check_update(Update(2, edited_message=message))
 
     command = Message(
         message_id=2,
@@ -161,8 +165,9 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch) -> None:
         entities=[MessageEntity(MessageEntity.BOT_COMMAND, 0, 4)],
     )
     command.set_bot(SimpleNamespace(username="calorie_bot"))
-    assert app.handlers[3].check_update(Update(3, message=command))
-    assert not app.handlers[3].check_update(Update(4, edited_message=command))
+    assert app.handlers[4][0].check_update(Update(3, message=command))
+    assert not app.handlers[4][0].check_update(Update(4, edited_message=command))
+    assert app.handlers[0][1] == -1
 
 
 def test_configure_bot_commands_registers_user_and_admin_menus() -> None:

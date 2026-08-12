@@ -19,6 +19,7 @@ from telegram.constants import ChatType, ParseMode
 from telegram.ext import ContextTypes
 
 from . import __version__
+from .analytics import BotStatistics
 from .analyzer import (
     AnalysisError,
     Analyzer,
@@ -166,6 +167,23 @@ def load_help_text(*, admin: bool = False) -> str:
         admin_text = _load_content(ADMIN_HELP_TEXT_FILE, ADMIN_HELP_FALLBACK_TEXT)
         return f"{text}\n\n{admin_text}"
     return text
+
+
+def _split_telegram_text(text: str, limit: int = 4000) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in text.splitlines():
+        added = len(line) + (1 if current else 0)
+        if current and current_length + added > limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line) + (1 if current_length else 0)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
 
 
 def _highlight_calories(value: str) -> str:
@@ -1062,10 +1080,35 @@ class TelegramHandlers:
         admin_user_id: int,
         manager: UserManager,
         meal_weight_presets: tuple[int, ...] = (50, 100, 150, 200),
+        statistics: BotStatistics | None = None,
     ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
         self._meal_weight_presets = meal_weight_presets
+        self._statistics = statistics
+
+    async def track_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        if (
+            self._statistics is None
+            or update.message is None
+            or update.effective_user is None
+        ):
+            return
+        user = update.effective_user
+        try:
+            await asyncio.to_thread(
+                self._statistics.record_message,
+                update.update_id,
+                update.message.date,
+                user.id,
+                user.full_name,
+                user.username or "",
+            )
+        except Exception:
+            LOGGER.exception("Could not record an incoming Telegram message")
 
     @staticmethod
     def _is_private(update: Update) -> bool:
@@ -1263,7 +1306,16 @@ class TelegramHandlers:
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
             return
-        await message.reply_text(f"Версія: {__version__}", do_quote=False)
+        if self._statistics is None:
+            await message.reply_text(f"Версія: {__version__}", do_quote=False)
+            return
+        try:
+            info = await asyncio.to_thread(self._statistics.format_info, __version__)
+        except Exception:
+            LOGGER.exception("Could not build /info statistics")
+            info = f"Версія: {__version__}\nСтатистика тимчасово недоступна."
+        for chunk in _split_telegram_text(info):
+            await message.reply_text(chunk, do_quote=False)
 
     async def day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)

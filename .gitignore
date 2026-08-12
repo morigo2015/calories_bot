@@ -12,5 +12,5 @@ __pycache__/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
-data/photos/
+data/
 eval-results/
