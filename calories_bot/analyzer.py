@@ -41,14 +41,20 @@ Rules:
 - Values read or estimated from a photo use origin=image and are approximate.
 - For a natural portion such as "2 яйця", "1 тарілка", "жменя" or "половина",
   return a concise Ukrainian portion_display such as "2 шт." or "1 тарілка".
-- Split composite meals into useful ingredients only when the user names
-  multiple components. Do not invent unnecessary ingredients.
+- Split composite meals into useful ingredients when the user names multiple
+  standalone foods. Each explicitly named standalone food must be a separate
+  item even when punctuation is missing, grammar is broken, or a word is
+  repeated. Do not merge a sequence such as "рис курка салат" into one item.
+  Keep an established mixed-dish name such as "салат Цезар" as one item unless
+  the user separately lists its ingredients. Do not invent ingredients.
 - Use concise Ukrainian names. Do not calculate totals; the application does that.
 
 Examples:
 - "сир 150 г" -> one item; assign the weight source and estimate kcal/100g.
 - "сир 150 г, 120 ккал/100 г" -> assign both authoritative sources.
 - "два яйця і бутерброд" -> two named items with estimated missing nutrition.
+- "зїв рис курку і салат салата небагато" -> three items: rice, chicken,
+  and salad; the repeated word does not create a fourth item.
 - "тарілка борщу" -> one item with portion_display="1 тарілка".
 - A meal photo with caption "250 г" -> use the caption weight and recognize food.
 - A meal photo without caption -> recognize and estimate the portion.

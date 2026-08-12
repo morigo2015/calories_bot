@@ -67,6 +67,60 @@ def test_grade_analysis_reports_failed_invariant() -> None:
     assert any(check.name == "required_term" and not check.passed for check in checks)
 
 
+def test_grade_analysis_checks_named_composite_components_and_total_weight() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="Обід",
+        items=[
+            FoodItem(
+                name="Куряче філе",
+                weight_g=120,
+                weight_estimated=False,
+                kcal_per_100g=165,
+                kcal_estimated=True,
+            ),
+            FoodItem(
+                name="Гречка",
+                weight_g=180,
+                weight_estimated=False,
+                kcal_per_100g=110,
+                kcal_estimated=True,
+            ),
+        ],
+    )
+
+    checks = grade_analysis(
+        analysis,
+        {
+            "is_food": True,
+            "item_count": [2, 2],
+            "total_weight_g": [300, 300],
+            "item_expectations": [
+                {"required_terms": ["греч"], "weight_g": [180, 180]},
+                {"required_terms": ["кур"], "weight_g": [120, 120]},
+            ],
+        },
+    )
+
+    assert checks
+    assert all(check.passed for check in checks)
+
+
+def test_grade_analysis_does_not_reuse_item_for_components() -> None:
+    checks = grade_analysis(
+        food_analysis(),
+        {
+            "is_food": True,
+            "item_expectations": [
+                {"required_terms": ["яйц"]},
+                {"required_terms": ["яйц"]},
+            ],
+        },
+    )
+
+    assert any(check.name == "item_2_match" and not check.passed for check in checks)
+
+
 def test_grade_non_food_does_not_calculate_meal() -> None:
     analysis = FoodAnalysis(is_food=False, meal_name="", items=[])
 

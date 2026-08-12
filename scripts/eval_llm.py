@@ -276,6 +276,57 @@ def grade_analysis(
         found = any(str(term).casefold() in portions for term in portion_terms)
         _check(checks, "portion", found, portions or "<empty>", portion_terms)
 
+    unmatched_items = list(analysis.items)
+    for index, component in enumerate(expected.get("item_expectations", []), start=1):
+        alternatives = [
+            str(term).casefold() for term in component.get("required_terms", [])
+        ]
+        matches = [
+            item
+            for item in unmatched_items
+            if any(term in item.name.casefold() for term in alternatives)
+        ]
+        _check(
+            checks,
+            f"item_{index}_match",
+            len(matches) == 1,
+            [item.name for item in matches],
+            component.get("required_terms", []),
+        )
+        if len(matches) != 1:
+            continue
+        item = matches[0]
+        unmatched_items.remove(item)
+        weight_bounds = component.get("weight_g")
+        if weight_bounds is not None:
+            _check(
+                checks,
+                f"item_{index}_weight_g",
+                _in_range(item.weight_g, weight_bounds),
+                item.weight_g,
+                weight_bounds,
+            )
+        kcal_bounds = component.get("kcal_per_100g")
+        if kcal_bounds is not None:
+            _check(
+                checks,
+                f"item_{index}_kcal_per_100g",
+                _in_range(item.kcal_per_100g, kcal_bounds),
+                item.kcal_per_100g,
+                kcal_bounds,
+            )
+        component_portions = component.get("portion_terms")
+        if component_portions:
+            portion = (item.portion_display or "").casefold()
+            found = any(str(term).casefold() in portion for term in component_portions)
+            _check(
+                checks,
+                f"item_{index}_portion",
+                found,
+                portion or "<empty>",
+                component_portions,
+            )
+
     if len(analysis.items) == 1:
         item = analysis.items[0]
         weight_bounds = expected.get("weight_g")
@@ -297,9 +348,19 @@ def grade_analysis(
                 kcal_bounds,
             )
 
+    total_weight_bounds = expected.get("total_weight_g")
     meal_bounds = expected.get("meal_kcal")
-    if meal_bounds is not None:
+    if total_weight_bounds is not None or meal_bounds is not None:
         meal = calculate_meal(analysis)
+    if total_weight_bounds is not None:
+        _check(
+            checks,
+            "total_weight_g",
+            _in_range(meal.total_weight_g, total_weight_bounds),
+            round(meal.total_weight_g, 2),
+            total_weight_bounds,
+        )
+    if meal_bounds is not None:
         _check(
             checks,
             "meal_kcal",
