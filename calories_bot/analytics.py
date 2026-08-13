@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -79,6 +80,15 @@ class AnalyticsStore:
                     );
                     CREATE INDEX IF NOT EXISTS llm_usage_events_recorded_at
                         ON llm_usage_events(recorded_at);
+
+                    CREATE TABLE IF NOT EXISTS daily_total_messages (
+                        chat_id INTEGER NOT NULL,
+                        telegram_message_id INTEGER NOT NULL,
+                        sent_at TEXT NOT NULL,
+                        PRIMARY KEY (chat_id, telegram_message_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS daily_total_messages_chat_message
+                        ON daily_total_messages(chat_id, telegram_message_id);
                     """
                 )
         except sqlite3.Error as exc:
@@ -148,6 +158,66 @@ class AnalyticsStore:
                 )
         except sqlite3.Error as exc:
             raise AnalyticsError("Could not record OpenAI token usage") from exc
+
+    def record_daily_total_message(
+        self,
+        chat_id: int,
+        telegram_message_id: int,
+        sent_at: datetime,
+    ) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO daily_total_messages (
+                        chat_id, telegram_message_id, sent_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (chat_id, telegram_message_id, _utc_iso(sent_at)),
+                )
+        except sqlite3.Error as exc:
+            raise AnalyticsError(
+                "Could not record a Telegram daily-total message"
+            ) from exc
+
+    def daily_total_message_ids_after(
+        self, chat_id: int, telegram_message_id: int
+    ) -> tuple[int, ...]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT telegram_message_id
+                    FROM daily_total_messages
+                    WHERE chat_id = ? AND telegram_message_id > ?
+                    ORDER BY telegram_message_id
+                    """,
+                    (chat_id, telegram_message_id),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise AnalyticsError(
+                "Could not read Telegram daily-total messages"
+            ) from exc
+        return tuple(int(row[0]) for row in rows)
+
+    def forget_daily_total_messages(
+        self, chat_id: int, telegram_message_ids: Sequence[int]
+    ) -> None:
+        if not telegram_message_ids:
+            return
+        try:
+            with self._connect() as connection:
+                connection.executemany(
+                    """
+                    DELETE FROM daily_total_messages
+                    WHERE chat_id = ? AND telegram_message_id = ?
+                    """,
+                    ((chat_id, message_id) for message_id in telegram_message_ids),
+                )
+        except sqlite3.Error as exc:
+            raise AnalyticsError(
+                "Could not forget Telegram daily-total messages"
+            ) from exc
 
     def message_summary(self, since: datetime) -> MessageSummary:
         try:
@@ -324,6 +394,24 @@ class BotStatistics:
             output_tokens,
             estimated_cost_usd,
         )
+
+    def record_daily_total_message(
+        self,
+        chat_id: int,
+        telegram_message_id: int,
+        sent_at: datetime,
+    ) -> None:
+        self._store.record_daily_total_message(chat_id, telegram_message_id, sent_at)
+
+    def daily_total_message_ids_after(
+        self, chat_id: int, telegram_message_id: int
+    ) -> tuple[int, ...]:
+        return self._store.daily_total_message_ids_after(chat_id, telegram_message_id)
+
+    def forget_daily_total_messages(
+        self, chat_id: int, telegram_message_ids: Sequence[int]
+    ) -> None:
+        self._store.forget_daily_total_messages(chat_id, telegram_message_ids)
 
     def format_info(self, version: str, now: datetime | None = None) -> str:
         current = _as_utc(now or datetime.now(UTC))

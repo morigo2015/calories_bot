@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import ContextTypes
 
@@ -68,6 +68,7 @@ from .users import (
 
 LOGGER = logging.getLogger(__name__)
 SAVED_MEAL_ICON_CONFIDENCE = 0.8
+DAILY_TOTAL_DELETE_BATCH_SIZE = 100
 
 HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
 START_TEXT_FILE = Path(__file__).with_name("start.txt")
@@ -913,9 +914,18 @@ class CaloriesService:
         return deletion
 
     def format_deletion_reply(self, deletion: MealDeletion) -> str:
-        status = "Видалено" if deletion.deleted else "Цей запис уже видалено"
+        if not deletion.deleted:
+            return "Цей запис уже видалено"
+        if not deletion.meal_name:
+            return "Видалено страву"
+        meal_name = deletion.meal_name
+        display_name = meal_name[:1].upper() + meal_name[1:]
+        return f"Видалено {html.escape(display_name)}"
+
+    def format_deletion_daily_total(self, deletion: MealDeletion) -> str:
         return (
-            f"{status}\n{format_daily_total(deletion.day_total, self._daily_kcal_goal)}"
+            "Оновлено після видалення\n"
+            f"{format_daily_total(deletion.day_total, self._daily_kcal_goal)}"
         )
 
     def _delete_photo(self, photo_path: str) -> None:
@@ -1350,7 +1360,11 @@ class TelegramHandlers:
         except Exception:
             LOGGER.exception("Unexpected error while handling /day")
             reply = READ_ERROR_TEXT
-        await message.reply_text(reply, parse_mode=ParseMode.HTML, do_quote=False)
+        sent = await message.reply_text(
+            reply, parse_mode=ParseMode.HTML, do_quote=False
+        )
+        if reply.startswith("Сьогодні:"):
+            await self._remember_daily_total_message(sent)
 
     async def week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -1571,7 +1585,6 @@ class TelegramHandlers:
         await query.edit_message_text("Денну ціль вимкнено ✓", reply_markup=None)
 
     async def delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
         query = update.callback_query
         if query is None:
             return
@@ -1605,6 +1618,33 @@ class TelegramHandlers:
             )
         except Exception:
             LOGGER.warning("Could not edit deletion confirmation", exc_info=True)
+        message = query.message
+        source_message_id = getattr(message, "message_id", None)
+        chat_id = getattr(message, "chat_id", None)
+        if not isinstance(chat_id, int) and update.effective_chat is not None:
+            chat_id = update.effective_chat.id
+        if isinstance(chat_id, int) and isinstance(source_message_id, int):
+            await self._delete_daily_totals_after(
+                context.bot, chat_id, source_message_id
+            )
+        if not isinstance(chat_id, int):
+            LOGGER.warning("Could not send updated daily total without a chat ID")
+            return
+        try:
+            daily_total = await asyncio.to_thread(
+                service.format_deletion_daily_total, deletion
+            )
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=daily_total,
+                parse_mode=ParseMode.HTML,
+            )
+            await self._remember_daily_total_message(sent)
+        except Exception:
+            LOGGER.warning(
+                "Could not send the updated daily total after deletion",
+                exc_info=True,
+            )
 
     async def save_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2139,22 +2179,20 @@ class TelegramHandlers:
         rows.append([InlineKeyboardButton("🗑 Видалити", callback_data=delete_callback)])
         return InlineKeyboardMarkup(rows)
 
-    @classmethod
-    async def _send_meal_reply(cls, message: Message, result: MealReply) -> None:
+    async def _send_meal_reply(self, message: Message, result: MealReply) -> None:
         await message.reply_text(
             result.text,
             parse_mode=ParseMode.HTML,
-            reply_markup=cls._meal_reply_markup(result),
+            reply_markup=self._meal_reply_markup(result),
             do_quote=False,
         )
 
-    @classmethod
     async def _send_meal_replies(
-        cls, message: Message, result: MealReply | list[MealReply]
+        self, message: Message, result: MealReply | list[MealReply]
     ) -> None:
         replies = result if isinstance(result, list) else [result]
         for reply in replies:
-            await cls._send_meal_reply(message, reply)
+            await self._send_meal_reply(message, reply)
         daily_total_text = next(
             (
                 reply.daily_total_text
@@ -2164,11 +2202,77 @@ class TelegramHandlers:
             None,
         )
         if daily_total_text is not None:
-            await message.reply_text(
+            sent = await message.reply_text(
                 daily_total_text,
                 parse_mode=ParseMode.HTML,
                 do_quote=False,
             )
+            await self._remember_daily_total_message(sent)
+
+    async def _remember_daily_total_message(self, message: Message) -> None:
+        if self._statistics is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self._statistics.record_daily_total_message,
+                message.chat_id,
+                message.message_id,
+                message.date,
+            )
+        except Exception:
+            LOGGER.warning("Could not remember a daily-total message", exc_info=True)
+
+    async def _delete_daily_totals_after(
+        self, bot: Bot, chat_id: int, telegram_message_id: int
+    ) -> None:
+        if self._statistics is None:
+            return
+        try:
+            message_ids = await asyncio.to_thread(
+                self._statistics.daily_total_message_ids_after,
+                chat_id,
+                telegram_message_id,
+            )
+        except Exception:
+            LOGGER.warning("Could not read daily-total messages", exc_info=True)
+            return
+        for start in range(0, len(message_ids), DAILY_TOTAL_DELETE_BATCH_SIZE):
+            batch = message_ids[start : start + DAILY_TOTAL_DELETE_BATCH_SIZE]
+            deleted_ids: tuple[int, ...] = ()
+            try:
+                deleted = await bot.delete_messages(chat_id=chat_id, message_ids=batch)
+                if not deleted:
+                    raise RuntimeError("Telegram did not delete daily-total messages")
+                deleted_ids = batch
+            except Exception:
+                LOGGER.warning(
+                    "Could not bulk-delete daily-total messages; retrying separately",
+                    exc_info=True,
+                )
+                individually_deleted: list[int] = []
+                for message_id in batch:
+                    try:
+                        if await bot.delete_message(chat_id, message_id):
+                            individually_deleted.append(message_id)
+                    except Exception:
+                        LOGGER.warning(
+                            "Could not delete daily-total message %s",
+                            message_id,
+                            exc_info=True,
+                        )
+                deleted_ids = tuple(individually_deleted)
+            if not deleted_ids:
+                continue
+            try:
+                await asyncio.to_thread(
+                    self._statistics.forget_daily_total_messages,
+                    chat_id,
+                    deleted_ids,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Could not forget deleted daily-total messages", exc_info=True
+                )
 
     @staticmethod
     def _callback_event_id(callback_query_id: str) -> int:

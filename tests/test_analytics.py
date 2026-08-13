@@ -76,6 +76,26 @@ def test_store_sums_llm_usage_and_requires_pricing_for_every_event(tmp_path) -> 
     assert store.llm_summary(NOW - timedelta(days=30)).estimated_cost_usd is None
 
 
+def test_store_tracks_daily_total_message_ids_durably_by_chat(tmp_path) -> None:
+    path = tmp_path / "statistics.sqlite3"
+    store = AnalyticsStore(path)
+    store.record_daily_total_message(10, 100, NOW - timedelta(minutes=3))
+    store.record_daily_total_message(10, 105, NOW - timedelta(minutes=2))
+    store.record_daily_total_message(10, 105, NOW - timedelta(minutes=1))
+    store.record_daily_total_message(20, 110, NOW)
+
+    reopened = AnalyticsStore(path)
+
+    assert reopened.daily_total_message_ids_after(10, 100) == (105,)
+    assert reopened.daily_total_message_ids_after(10, 0) == (100, 105)
+    assert reopened.daily_total_message_ids_after(20, 0) == (110,)
+
+    reopened.forget_daily_total_messages(10, (105,))
+
+    assert store.daily_total_message_ids_after(10, 0) == (100,)
+    assert store.daily_total_message_ids_after(20, 0) == (110,)
+
+
 def test_cost_client_paginates_and_filters_by_project(monkeypatch) -> None:
     calls = []
     payloads = iter(

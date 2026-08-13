@@ -105,6 +105,7 @@ class MealDeletion:
     day_total: int
     photo_path: str | None
     deleted: bool
+    meal_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -643,6 +644,11 @@ class GoogleSheetsStore:
             )
 
         target = rows[target_index]
+        meal_name = (
+            str(target[MEAL_NAME_COLUMN]).strip()
+            if len(target) > MEAL_NAME_COLUMN
+            else ""
+        )
         try:
             day = self._row_day(target)
         except (TypeError, ValueError):
@@ -689,6 +695,7 @@ class GoogleSheetsStore:
             day_total=round_whole(self._day_total(rows, day)),
             photo_path=photo_path,
             deleted=True,
+            meal_name=meal_name or None,
         )
 
     def append_meal(

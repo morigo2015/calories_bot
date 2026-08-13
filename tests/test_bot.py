@@ -344,6 +344,46 @@ def test_handler_sends_each_component_with_the_same_standard_buttons() -> None:
     assert "reply_markup" not in message.reply_kwargs[2]
 
 
+def test_handler_remembers_the_separate_daily_total_message() -> None:
+    class Statistics:
+        def __init__(self):
+            self.recorded = []
+
+        def record_daily_total_message(self, *args):
+            self.recorded.append(args)
+
+    class ReplyingMessage:
+        def __init__(self):
+            self.calls = []
+
+        async def reply_text(self, text, **kwargs):
+            self.calls.append((text, kwargs))
+            return SimpleNamespace(
+                chat_id=123,
+                message_id=500 + len(self.calls),
+                date=datetime(2026, 8, 2, 9, tzinfo=UTC),
+            )
+
+    statistics = Statistics()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager(),
+        statistics=statistics,
+    )
+    message = ReplyingMessage()
+    result = MealReply(
+        "Сир",
+        42,
+        date(2026, 8, 2),
+        daily_total_text="За день: 60 кк",
+    )
+
+    asyncio.run(handlers._send_meal_replies(message, result))
+
+    assert [call[0] for call in message.calls] == ["Сир", "За день: 60 кк"]
+    assert statistics.recorded == [(123, 502, datetime(2026, 8, 2, 9, tzinfo=UTC))]
+
+
 def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> None:
     class BlockingAnalyzer(FakeAnalyzer):
         def __init__(self) -> None:
@@ -720,7 +760,9 @@ def test_service_keeps_photo_outside_storage(tmp_path) -> None:
     assert photo.exists()
 
 
-def test_service_formats_deletion_with_goal_and_idempotent_status(tmp_path) -> None:
+def test_service_formats_deletion_confirmation_and_updated_daily_total(
+    tmp_path,
+) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     service = CaloriesService(
         FakeAnalyzer(food_analysis()),
@@ -732,16 +774,21 @@ def test_service_formats_deletion_with_goal_and_idempotent_status(tmp_path) -> N
     )
 
     deleted = service.format_deletion_reply(
-        MealDeletion(date(2026, 8, 2), 905, None, True)
+        MealDeletion(date(2026, 8, 2), 905, None, True, "сир <міцний>")
+    )
+    daily_total = service.format_deletion_daily_total(
+        MealDeletion(date(2026, 8, 2), 905, None, True, "сир")
     )
     repeated = service.format_deletion_reply(
         MealDeletion(date(2026, 8, 2), 905, None, False)
     )
 
-    assert deleted == (
-        "Видалено\nЗа день: <b><u>905</u></b> із 1500 кк · залишилось 595 кк"
+    assert deleted == "Видалено Сир &lt;міцний&gt;"
+    assert daily_total == (
+        "Оновлено після видалення\n"
+        "За день: <b><u>905</u></b> із 1500 кк · залишилось 595 кк"
     )
-    assert repeated.startswith("Цей запис уже видалено\nЗа день:")
+    assert repeated == "Цей запис уже видалено"
 
 
 def test_google_write_failure_is_propagated_without_changing_state(tmp_path) -> None:
@@ -1029,17 +1076,41 @@ def test_day_handler_passes_telegram_message_date() -> None:
 
         def get_day_summary(self, timestamp):
             self.timestamp = timestamp
-            return "=== 60 кк\n• 60 кк сир"
+            return "Сьогодні: 60 кк\n• сир — 60 кк"
+
+    class Statistics:
+        def __init__(self):
+            self.recorded = []
+
+        def record_daily_total_message(self, *args):
+            self.recorded.append(args)
 
     service = FakeService()
-    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    statistics = Statistics()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        statistics=statistics,
+    )
     update, message = make_update()
+
+    async def reply_text(text, **kwargs):
+        message.replies.append(text)
+        message.reply_kwargs.append(kwargs)
+        return SimpleNamespace(
+            chat_id=123,
+            message_id=600,
+            date=datetime(2026, 8, 2, 9, tzinfo=UTC),
+        )
+
+    message.reply_text = reply_text
 
     asyncio.run(handlers.day(update, None))
 
     assert service.timestamp == message.date
-    assert message.replies == ["=== 60 кк\n• 60 кк сир"]
+    assert message.replies == ["Сьогодні: 60 кк\n• сир — 60 кк"]
     assert message.reply_kwargs == [{"parse_mode": ParseMode.HTML, "do_quote": False}]
+    assert statistics.recorded == [(123, 600, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
 
 def test_day_handler_maps_read_error_to_user_message() -> None:
@@ -1323,33 +1394,88 @@ def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
     return update, query
 
 
-def test_delete_callback_keeps_source_message_and_leaves_confirmation() -> None:
+def test_delete_callback_cleans_stale_totals_and_sends_updated_total() -> None:
     class FakeService:
         def __init__(self):
             self.args = None
 
         def delete_message(self, *args):
             self.args = args
-            return MealDeletion(date(2026, 8, 2), 905, None, True)
+            return MealDeletion(date(2026, 8, 2), 905, None, True, "сир")
 
         def format_deletion_reply(self, deletion):
             assert deletion.deleted is True
-            return "Видалено\nЗа день: <b><u>905 кк</u></b>"
+            return "Видалено Сир"
+
+        def format_deletion_daily_total(self, deletion):
+            assert deletion.day_total == 905
+            return "Оновлено після видалення\nЗа день: 905 кк"
+
+    class Statistics:
+        def __init__(self):
+            self.after_calls = []
+            self.forgotten = []
+            self.recorded = []
+
+        def daily_total_message_ids_after(self, *args):
+            self.after_calls.append(args)
+            return (701, 705)
+
+        def forget_daily_total_messages(self, *args):
+            self.forgotten.append(args)
+
+        def record_daily_total_message(self, *args):
+            self.recorded.append(args)
+
+    class Bot:
+        def __init__(self):
+            self.deleted = []
+            self.sent = []
+
+        async def delete_messages(self, **kwargs):
+            self.deleted.append(kwargs)
+            return True
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs)
+            return SimpleNamespace(
+                chat_id=kwargs["chat_id"],
+                message_id=710,
+                date=datetime(2026, 8, 2, 9, tzinfo=UTC),
+            )
 
     service = FakeService()
-    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    statistics = Statistics()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        statistics=statistics,
+    )
     update, query = make_callback_update()
+    query.message = SimpleNamespace(message_id=700, chat_id=123)
+    bot = Bot()
 
-    asyncio.run(handlers.delete(update, SimpleNamespace()))
+    asyncio.run(handlers.delete(update, SimpleNamespace(bot=bot)))
 
     assert service.args == (42, date(2026, 8, 2))
     assert query.answers == [(None, {})]
     assert query.edits == [
         (
-            "Видалено\nЗа день: <b><u>905 кк</u></b>",
+            "Видалено Сир",
             {"parse_mode": ParseMode.HTML, "reply_markup": None},
         )
     ]
+    assert statistics.after_calls == [(123, 700)]
+    assert bot.deleted == [{"chat_id": 123, "message_ids": (701, 705)}]
+    assert statistics.forgotten == [(123, (701, 705))]
+    assert bot.sent == [
+        {
+            "chat_id": 123,
+            "text": "Оновлено після видалення\nЗа день: 905 кк",
+            "parse_mode": ParseMode.HTML,
+        }
+    ]
+    assert statistics.recorded == [(123, 710, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
 
 def test_saved_add_callback_uses_stable_negative_event_id() -> None:
@@ -1471,7 +1597,7 @@ def test_repeated_delete_callback_uses_idempotent_result() -> None:
 
         def format_deletion_reply(self, deletion):
             assert deletion.deleted is False
-            return "Цей запис уже видалено\nЗа день: <b><u>905 кк</u></b>"
+            return "Цей запис уже видалено"
 
     handlers = TelegramHandlers(
         999, FakeManager({123: user_record()}, {123: FakeService()})
@@ -1480,9 +1606,7 @@ def test_repeated_delete_callback_uses_idempotent_result() -> None:
 
     asyncio.run(handlers.delete(update, SimpleNamespace()))
 
-    assert query.edits[0][0] == (
-        "Цей запис уже видалено\nЗа день: <b><u>905 кк</u></b>"
-    )
+    assert query.edits[0][0] == "Цей запис уже видалено"
 
 
 def test_delete_callback_keeps_messages_when_sheets_fail() -> None:
@@ -1890,7 +2014,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.0.2"]
+    assert admin_message.replies == ["Версія: 1.0.3"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -1919,7 +2043,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.0.2\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.0.3\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_tracking_records_inline_interactions_for_the_clicking_user() -> None:

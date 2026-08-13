@@ -545,6 +545,7 @@ def test_delete_removes_row_and_recalculates_original_day() -> None:
     assert deletion.accounting_day.isoformat() == "2026-08-02"
     assert deletion.day_total == 100
     assert deletion.photo_path == "/photos/42.jpg"
+    assert deletion.meal_name == "сир"
     assert [store._message_id(row) for row in store._worksheet.rows[1:]] == [41, 43]
 
 
