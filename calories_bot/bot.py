@@ -9,7 +9,7 @@ import secrets
 import shutil
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -139,6 +139,7 @@ class MealReply:
     accounting_day: date
     can_save: bool = True
     can_change_weight: bool = True
+    daily_total_text: str | None = None
 
 
 def _load_content(path: Path, fallback: str) -> str:
@@ -229,24 +230,24 @@ def _format_item_calculation(
                 unit_weight = weight_g / count
                 return (
                     f"{name} {calorie_total}\n"
-                    f"({portion} × {weight_prefix}{round_whole(unit_weight)} г/шт. × "
-                    f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
+                    f"{portion} × {weight_prefix}{round_whole(unit_weight)} г/шт. × "
+                    f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
                 )
         if _portion_includes_weight(item.portion_display, weight_g):
             return (
                 f"{name} {calorie_total}\n"
-                f"({portion} × "
-                f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
+                f"{portion} × "
+                f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
             )
         return (
             f"{name} {calorie_total}\n"
-            f"({portion} ({weight_prefix}{round_whole(weight_g)} г) × "
-            f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
+            f"{portion} · {weight_prefix}{round_whole(weight_g)} г × "
+            f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
         )
     return (
         f"{name} {calorie_total}\n"
-        f"({weight_prefix}{round_whole(weight_g)} г × "
-        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г)"
+        f"{weight_prefix}{round_whole(weight_g)} г × "
+        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
     )
 
 
@@ -266,9 +267,7 @@ def format_daily_total(today_total: float, daily_kcal_goal: int | None) -> str:
     return f"За день: {_format_daily_progress(today_total, daily_kcal_goal)}"
 
 
-def format_reply(
-    meal: MealResult, today_total: float, daily_kcal_goal: int | None = None
-) -> str:
+def format_reply(meal: MealResult) -> str:
     if len(meal.items) > 1:
         prefix = "≈" if meal.estimated else ""
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
@@ -285,7 +284,7 @@ def format_reply(
         ]
     else:
         body = [_format_item_calculation(meal.items[0])]
-    return "\n".join([*body, "", format_daily_total(today_total, daily_kcal_goal)])
+    return "\n".join(body)
 
 
 def format_week_reply(
@@ -475,22 +474,29 @@ class CaloriesService:
             or marker.source_message_id != source_message_id
         ):
             return MealReply(
-                text=format_reply(first.meal, today_total, self._daily_kcal_goal),
+                text=format_reply(first.meal),
                 telegram_message_id=source_message_id,
                 accounting_day=day,
                 can_change_weight=len(first.meal.items) == 1,
+                daily_total_text=format_daily_total(today_total, self._daily_kcal_goal),
             )
         components = self._store.get_component_meals(day, source_message_id)
         if len(components) != marker.component_count:
             return None
-        replies = [
-            MealReply(
-                text=format_reply(stored.meal, today_total, self._daily_kcal_goal),
-                telegram_message_id=message_id,
-                accounting_day=day,
+        replies = []
+        for index, (message_id, stored) in enumerate(components):
+            replies.append(
+                MealReply(
+                    text=format_reply(stored.meal),
+                    telegram_message_id=message_id,
+                    accounting_day=day,
+                    daily_total_text=(
+                        format_daily_total(today_total, self._daily_kcal_goal)
+                        if index == len(components) - 1
+                        else None
+                    ),
+                )
             )
-            for message_id, stored in components
-        ]
         return self._reply_collection(replies)
 
     def get_existing_reply(
@@ -619,14 +625,20 @@ class CaloriesService:
                         "Only part of the component meal was stored"
                     ) from exc
                 raise
-            replies = [
-                MealReply(
-                    text=format_reply(stored.meal, today_total, self._daily_kcal_goal),
-                    telegram_message_id=component_message_id,
-                    accounting_day=day,
+            replies = []
+            for index, (component_message_id, stored) in enumerate(stored_components):
+                replies.append(
+                    MealReply(
+                        text=format_reply(stored.meal),
+                        telegram_message_id=component_message_id,
+                        accounting_day=day,
+                        daily_total_text=(
+                            format_daily_total(today_total, self._daily_kcal_goal)
+                            if index == len(stored_components) - 1
+                            else None
+                        ),
+                    )
                 )
-                for component_message_id, stored in stored_components
-            ]
             return self._reply_collection(replies)
 
     def _saved(self) -> SavedMealStore:
@@ -786,11 +798,12 @@ class CaloriesService:
                 stored = state.existing
                 total = state.today_total
         return MealReply(
-            text=format_reply(stored.meal, total, self._daily_kcal_goal),
+            text=format_reply(stored.meal),
             telegram_message_id=event_id,
             accounting_day=day,
             can_save=can_save,
             can_change_weight=len(stored.meal.items) == 1,
+            daily_total_text=format_daily_total(total, self._daily_kcal_goal),
         )
 
     def add_saved_meal(
@@ -869,13 +882,14 @@ class CaloriesService:
                 and self._saved().find_by_source(message_id) is None
             )
         return MealReply(
-            text=format_reply(
-                updated.meal.meal, updated.day_total, self._daily_kcal_goal
-            ),
+            text=format_reply(updated.meal.meal),
             telegram_message_id=message_id,
             accounting_day=updated.accounting_day,
             can_save=can_save,
             can_change_weight=True,
+            daily_total_text=format_daily_total(
+                updated.day_total, self._daily_kcal_goal
+            ),
         )
 
     def delete_saved_meal(self, saved_meal_id: str) -> bool:
@@ -1087,28 +1101,31 @@ class TelegramHandlers:
         self._meal_weight_presets = meal_weight_presets
         self._statistics = statistics
 
-    async def track_message(
+    async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         del context
         if (
             self._statistics is None
-            or update.message is None
             or update.effective_user is None
+            or (update.message is None and update.callback_query is None)
         ):
             return
         user = update.effective_user
+        received_at = (
+            update.message.date if update.message is not None else datetime.now(UTC)
+        )
         try:
             await asyncio.to_thread(
                 self._statistics.record_message,
                 update.update_id,
-                update.message.date,
+                received_at,
                 user.id,
                 user.full_name,
                 user.username or "",
             )
         except Exception:
-            LOGGER.exception("Could not record an incoming Telegram message")
+            LOGGER.exception("Could not record an incoming Telegram interaction")
 
     @staticmethod
     def _is_private(update: Update) -> bool:
@@ -1863,7 +1880,7 @@ class TelegramHandlers:
                     raise LookupError
                 await query.answer("Додано")
                 if isinstance(query.message, Message):
-                    await self._send_meal_reply(query.message, result)
+                    await self._send_meal_replies(query.message, result)
                 return
             if data.startswith("recent-add:"):
                 message_id_raw, day_raw, weight_raw = data.removeprefix(
@@ -1883,7 +1900,7 @@ class TelegramHandlers:
                     raise LookupError
                 await query.answer("Додано")
                 if isinstance(query.message, Message):
-                    await self._send_meal_reply(query.message, result)
+                    await self._send_meal_replies(query.message, result)
                 return
             if data.startswith("manage-delete:"):
                 saved_id = data.split(":", maxsplit=1)[1]
@@ -1980,7 +1997,7 @@ class TelegramHandlers:
             )
             if result is None:
                 raise LookupError
-            await self._send_meal_reply(message, result)
+            await self._send_meal_replies(message, result)
             self._clear_pending_input(context)
             try:
                 await context.bot.edit_message_text(
@@ -2138,6 +2155,20 @@ class TelegramHandlers:
         replies = result if isinstance(result, list) else [result]
         for reply in replies:
             await cls._send_meal_reply(message, reply)
+        daily_total_text = next(
+            (
+                reply.daily_total_text
+                for reply in reversed(replies)
+                if reply.daily_total_text is not None
+            ),
+            None,
+        )
+        if daily_total_text is not None:
+            await message.reply_text(
+                daily_total_text,
+                parse_mode=ParseMode.HTML,
+                do_quote=False,
+            )
 
     @staticmethod
     def _callback_event_id(callback_query_id: str) -> int:

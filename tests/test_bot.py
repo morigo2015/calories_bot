@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,7 @@ from calories_bot.bot import (
     MealWeightUnchangedError,
     NotFoodError,
     TelegramHandlers,
+    format_daily_total,
     format_day_reply,
     format_reply,
     format_users_reply,
@@ -254,11 +255,8 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
 
-    assert reply.text == (
-        "Сир <b><u>60 кк</u></b>\n"
-        "(50 г × 120 кк/100 г)\n\n"
-        "За день: <b><u>360 кк</u></b>"
-    )
+    assert reply.text == ("Сир <b><u>60 кк</u></b>\n50 г × 120 кк/100 г")
+    assert reply.daily_total_text == "За день: <b><u>360 кк</u></b>"
     assert reply.accounting_day == date(2026, 8, 2)
     marker = parse_simple_meal_request(store.appended[0][3])
     assert marker is not None
@@ -302,9 +300,8 @@ def test_composite_input_is_stored_and_replied_to_per_component(tmp_path) -> Non
     assert store.appended[1][6].input_tokens is None
     assert replies[0].telegram_message_id == 42
     assert replies[1].telegram_message_id < 0
-    assert all(
-        reply.text.endswith("За день: <b><u>410 кк</u></b>") for reply in replies
-    )
+    assert replies[0].daily_total_text is None
+    assert replies[1].daily_total_text == "За день: <b><u>410 кк</u></b>"
     markers = [parse_simple_meal_request(entry[3]) for entry in store.appended]
     assert [marker.component_index for marker in markers if marker] == [0, 1]
     assert all(marker and marker.component_count == 2 for marker in markers)
@@ -316,7 +313,12 @@ def test_handler_sends_each_component_with_the_same_standard_buttons() -> None:
             del args
             return [
                 MealReply("Яблуко", 1, date(2026, 8, 2)),
-                MealReply("Сир", -2, date(2026, 8, 2)),
+                MealReply(
+                    "Сир",
+                    -2,
+                    date(2026, 8, 2),
+                    daily_total_text="За день: <b><u>110 кк</u></b>",
+                ),
             ]
 
     handlers = TelegramHandlers(
@@ -326,8 +328,12 @@ def test_handler_sends_each_component_with_the_same_standard_buttons() -> None:
 
     asyncio.run(handlers.text(update, SimpleNamespace(user_data={})))
 
-    assert message.replies == ["Яблуко", "Сир"]
-    for kwargs in message.reply_kwargs:
+    assert message.replies == [
+        "Яблуко",
+        "Сир",
+        "За день: <b><u>110 кк</u></b>",
+    ]
+    for kwargs in message.reply_kwargs[:2]:
         assert [
             [button.text for button in row]
             for row in kwargs["reply_markup"].inline_keyboard
@@ -335,6 +341,7 @@ def test_handler_sends_each_component_with_the_same_standard_buttons() -> None:
             ["⭐ Зберегти", "⚖️ Змінити вагу"],
             ["🗑 Видалити"],
         ]
+    assert "reply_markup" not in message.reply_kwargs[2]
 
 
 def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> None:
@@ -381,7 +388,7 @@ def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> Non
     worker.join(timeout=1)
 
     assert not worker.is_alive()
-    assert result[0].text.endswith("За день: <b><u>334 кк</u></b>")
+    assert result[0].daily_total_text == "За день: <b><u>334 кк</u></b>"
 
 
 def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
@@ -398,11 +405,8 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
     service = build_service(analyzer, store, tmp_path)
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
-    assert reply.text == (
-        "Сир <b><u>60 кк</u></b>\n"
-        "(50 г × 120 кк/100 г)\n\n"
-        "За день: <b><u>360 кк</u></b>"
-    )
+    assert reply.text == ("Сир <b><u>60 кк</u></b>\n50 г × 120 кк/100 г")
+    assert reply.daily_total_text == "За день: <b><u>360 кк</u></b>"
     assert analyzer.calls == 0
     assert store.appended == []
 
@@ -436,11 +440,8 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     )
 
     photo_path = store.appended[0][4]
-    assert reply.text == (
-        "Сир <b><u>60 кк</u></b>\n"
-        "(50 г × 120 кк/100 г)\n\n"
-        "За день: <b><u>360 кк</u></b>"
-    )
+    assert reply.text == ("Сир <b><u>60 кк</u></b>\n50 г × 120 кк/100 г")
+    assert reply.daily_total_text == "За день: <b><u>360 кк</u></b>"
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
     expected_photo = tmp_path / "photos" / "2026-08-02-42.jpg"
@@ -457,23 +458,16 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
         "", 43, datetime(2026, 8, 2, 12, tzinfo=TZ), b"jpeg-data"
     )
 
-    assert reply.text == (
-        "Сир <b><u>≈60 кк</u></b>\n"
-        "(≈50 г × ≈120 кк/100 г)\n\n"
-        "За день: <b><u>60 кк</u></b>"
-    )
+    assert reply.text == ("Сир <b><u>≈60 кк</u></b>\n≈50 г × ≈120 кк/100 г")
+    assert reply.daily_total_text == "За день: <b><u>60 кк</u></b>"
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
 
 
 def test_estimate_is_marked_in_reply() -> None:
     meal = calculate_meal(food_analysis(estimated=True))
-    reply = format_reply(meal, 60)
-    assert reply == (
-        "Сир <b><u>≈60 кк</u></b>\n"
-        "(≈50 г × ≈120 кк/100 г)\n\n"
-        "За день: <b><u>60 кк</u></b>"
-    )
+    reply = format_reply(meal)
+    assert reply == ("Сир <b><u>≈60 кк</u></b>\n≈50 г × ≈120 кк/100 г")
 
 
 def test_reply_uses_compact_requested_format() -> None:
@@ -491,13 +485,9 @@ def test_reply_uses_compact_requested_format() -> None:
         ],
     )
 
-    reply = format_reply(calculate_meal(analysis), 110)
+    reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "Яблучні оладки <b><u>≈110 кк</u></b>\n"
-        "(50 г × ≈220 кк/100 г)\n\n"
-        "За день: <b><u>110 кк</u></b>"
-    )
+    assert reply == ("Яблучні оладки <b><u>≈110 кк</u></b>\n50 г × ≈220 кк/100 г")
 
 
 def test_composite_reply_stays_compact() -> None:
@@ -521,14 +511,13 @@ def test_composite_reply_stays_compact() -> None:
             ),
         ],
     )
-    reply = format_reply(calculate_meal(analysis), 110)
+    reply = format_reply(calculate_meal(analysis))
     assert reply == (
         "Перекус <b><u>≈110 кк</u></b>\n"
         "• Яблуко ≈50 кк\n"
-        "  (≈100 г × ≈50 кк/100 г)\n"
+        "  ≈100 г × ≈50 кк/100 г\n"
         "• Сир 60 кк\n"
-        "  (50 г × 120 кк/100 г)\n\n"
-        "За день: <b><u>110 кк</u></b>"
+        "  50 г × 120 кк/100 г"
     )
 
 
@@ -536,15 +525,11 @@ def test_reply_escapes_html_in_item_name() -> None:
     analysis = food_analysis()
     analysis.items[0].name = "сир <міцний>"
     meal = calculate_meal(analysis)
-    reply = format_reply(meal, 60)
-    assert reply == (
-        "Сир &lt;міцний&gt; <b><u>60 кк</u></b>\n"
-        "(50 г × 120 кк/100 г)\n\n"
-        "За день: <b><u>60 кк</u></b>"
-    )
+    reply = format_reply(meal)
+    assert reply == ("Сир &lt;міцний&gt; <b><u>60 кк</u></b>\n50 г × 120 кк/100 г")
 
 
-def test_reply_uses_portion_display_and_daily_goal() -> None:
+def test_reply_uses_portion_display() -> None:
     analysis = FoodAnalysis(
         is_food=True,
         meal_name="яйця",
@@ -562,13 +547,9 @@ def test_reply_uses_portion_display_and_daily_goal() -> None:
         ],
     )
 
-    reply = format_reply(calculate_meal(analysis), 860, 2000)
+    reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "Яйця <b><u>≈140 кк</u></b>\n"
-        "(2 шт. × ≈50 г/шт. × ≈140 кк/100 г)\n\n"
-        "За день: <b><u>860</u></b> із 2000 кк · залишилось 1140 кк"
-    )
+    assert reply == ("Яйця <b><u>≈140 кк</u></b>\n2 шт. × ≈50 г/шт. × ≈140 кк/100 г")
 
 
 def test_reply_explains_estimated_weight_per_piece() -> None:
@@ -587,13 +568,9 @@ def test_reply_explains_estimated_weight_per_piece() -> None:
         ],
     )
 
-    reply = format_reply(calculate_meal(analysis), 625, 1500)
+    reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "Сирники <b><u>≈63 кк</u></b>\n"
-        "(5 шт. × ≈50 г/шт. × 25 кк/100 г)\n\n"
-        "За день: <b><u>625</u></b> із 1500 кк · залишилось 875 кк"
-    )
+    assert reply == ("Сирники <b><u>≈63 кк</u></b>\n5 шт. × ≈50 г/шт. × 25 кк/100 г")
 
 
 def test_reply_explains_non_count_portion_weight() -> None:
@@ -612,13 +589,9 @@ def test_reply_explains_non_count_portion_weight() -> None:
         ],
     )
 
-    reply = format_reply(calculate_meal(analysis), 120)
+    reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "Борщ <b><u>≈120 кк</u></b>\n"
-        "(1 тарілка (≈300 г) × ≈40 кк/100 г)\n\n"
-        "За день: <b><u>120 кк</u></b>"
-    )
+    assert reply == ("Борщ <b><u>≈120 кк</u></b>\n1 тарілка · ≈300 г × ≈40 кк/100 г")
 
 
 def test_reply_does_not_repeat_weight_already_shown_as_portion() -> None:
@@ -637,21 +610,17 @@ def test_reply_does_not_repeat_weight_already_shown_as_portion() -> None:
         ],
     )
 
-    reply = format_reply(calculate_meal(analysis), 2899, 1500)
+    reply = format_reply(calculate_meal(analysis))
 
     assert reply == (
-        "Ковбаски з яловичини та свинини <b><u>≈450 кк</u></b>\n"
-        "(150 г × ≈300 кк/100 г)\n\n"
-        "За день: <b><u>2899</u></b> із 1500 кк · перевищено на 1399 кк"
+        "Ковбаски з яловичини та свинини <b><u>≈450 кк</u></b>\n150 г × ≈300 кк/100 г"
     )
     assert "150 г (150 г)" not in reply
 
 
 def test_daily_goal_does_not_show_negative_remainder() -> None:
-    reply = format_reply(calculate_meal(food_analysis()), 2130, 2000)
-    assert reply.endswith(
-        "За день: <b><u>2130</u></b> із 2000 кк · перевищено на 130 кк"
-    )
+    reply = format_daily_total(2130, 2000)
+    assert reply == "За день: <b><u>2130</u></b> із 2000 кк · перевищено на 130 кк"
     assert "залишилось" not in reply
 
 
@@ -1001,16 +970,23 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
 
         def process_message(self, *args):
             self.args = args
-            return MealReply("reply", 1, date(2026, 8, 2))
+            return MealReply(
+                "reply",
+                1,
+                date(2026, 8, 2),
+                daily_total_text="За день: 60 кк",
+            )
 
     service = FakeService()
     handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, message = make_update()
     asyncio.run(handlers.text(update, None))
     assert service.args[2] == message.date
-    assert message.replies == ["reply"]
+    assert message.replies == ["reply", "За день: 60 кк"]
     assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
     assert message.reply_kwargs[0]["do_quote"] is False
+    assert message.reply_kwargs[0]["reply_markup"] is not None
+    assert "reply_markup" not in message.reply_kwargs[1]
 
 
 def test_duplicate_photo_is_checked_before_download() -> None:
@@ -1130,7 +1106,12 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
 
         def change_meal_weight(self, *args):
             self.args = args
-            return MealReply("Сир 120 кк\n\nЗа день: 120 кк", 42, date(2026, 8, 2))
+            return MealReply(
+                "Сир 120 кк",
+                42,
+                date(2026, 8, 2),
+                daily_total_text="За день: 120 кк",
+            )
 
     class Bot:
         def __init__(self):
@@ -1173,10 +1154,11 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
         "text": "✅ Вагу змінено на 100 г",
         "reply_markup": None,
     }
-    assert message.replies == ["Сир 120 кк\n\nЗа день: 120 кк"]
+    assert message.replies == ["Сир 120 кк", "За день: 120 кк"]
     assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert message.reply_kwargs[0]["do_quote"] is False
+    assert "reply_markup" not in message.reply_kwargs[1]
 
 
 def test_meal_weight_state_closes_without_reply_when_weight_is_unchanged() -> None:
@@ -1908,11 +1890,11 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.0.1"]
+    assert admin_message.replies == ["Версія: 1.0.2"]
     assert user_message.replies == ["Недоступно."]
 
 
-def test_tracking_records_incoming_message_and_extended_info() -> None:
+def test_tracking_records_incoming_interaction_and_extended_info() -> None:
     class Statistics:
         def __init__(self):
             self.recorded = None
@@ -1921,13 +1903,13 @@ def test_tracking_records_incoming_message_and_extended_info() -> None:
             self.recorded = args
 
         def format_info(self, version):
-            return f"Версія: {version}\nПовідомлення за 24 години: 7"
+            return f"Версія: {version}\nЗапити за 24 години:\n• разом: 7"
 
     statistics = Statistics()
     handlers = TelegramHandlers(999, FakeManager(), statistics=statistics)
     update, message = make_update(user_id=999)
 
-    asyncio.run(handlers.track_message(update, SimpleNamespace()))
+    asyncio.run(handlers.track_interaction(update, SimpleNamespace()))
     asyncio.run(handlers.info(update, SimpleNamespace(user_data={})))
 
     assert statistics.recorded == (
@@ -1937,7 +1919,35 @@ def test_tracking_records_incoming_message_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.0.1\nПовідомлення за 24 години: 7"]
+    assert message.replies == ["Версія: 1.0.2\nЗапити за 24 години:\n• разом: 7"]
+
+
+def test_tracking_records_inline_interactions_for_the_clicking_user() -> None:
+    class Statistics:
+        def __init__(self):
+            self.recorded = None
+
+        def record_message(self, *args):
+            self.recorded = args
+
+    statistics = Statistics()
+    handlers = TelegramHandlers(999, FakeManager(), statistics=statistics)
+    update = SimpleNamespace(
+        update_id=88,
+        message=None,
+        callback_query=SimpleNamespace(),
+        effective_user=SimpleNamespace(
+            id=123,
+            full_name="Юля",
+            username="yulia",
+        ),
+    )
+
+    asyncio.run(handlers.track_interaction(update, SimpleNamespace()))
+
+    assert statistics.recorded[0] == 88
+    assert statistics.recorded[2:] == (123, "Юля", "yulia")
+    assert datetime.now(UTC) - statistics.recorded[1] < timedelta(seconds=1)
 
 
 def test_non_admin_cannot_execute_admin_command() -> None:

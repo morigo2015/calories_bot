@@ -97,7 +97,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         goal_disable_callback=lambda: None,
         text=lambda: None,
         photo=lambda: None,
-        track_message=lambda: None,
+        track_interaction=lambda: None,
     )
     monkeypatch.setattr(
         main_module,
@@ -168,6 +168,12 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     assert app.handlers[4][0].check_update(Update(3, message=command))
     assert not app.handlers[4][0].check_update(Update(4, edited_message=command))
     assert app.handlers[0][1] == -1
+
+    callback = Update(
+        5,
+        callback_query=SimpleNamespace(from_user=User(456, "Yulia", False)),
+    )
+    assert app.handlers[0][0].check_update(callback)
 
 
 def test_configure_bot_commands_registers_user_and_admin_menus() -> None:

@@ -136,8 +136,8 @@ def test_info_formats_restart_messages_tokens_and_missing_admin_key(tmp_path) ->
 
     assert "Версія: 1.0.1" in text
     assert "Останній перезапуск: 12.08.2026 12:00:00 EEST" in text
-    assert "Повідомлення за 24 години: 1" in text
-    assert "Повідомлення за 30 днів: 2" in text
+    assert "Запити за 24 години:\n• разом: 1" in text
+    assert "Запити за 30 днів:\n• разом: 2" in text
     assert "Анна (@anna) · ID 10: 1" in text
     assert "Богдан · ID 20: 1" in text
     assert "вхідні токени: 1 200" in text

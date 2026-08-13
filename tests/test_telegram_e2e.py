@@ -75,6 +75,19 @@ def test_expected_day_summary_supports_goal_and_no_goal_modes() -> None:
     assert e2e._expected_day_summary(319.5, 1600) == "Сьогодні: 320 із 1600 кк"
 
 
+def test_split_meal_responses_separates_daily_total_from_components() -> None:
+    component = SimpleNamespace(
+        raw_text="Сир 60 кк",
+        buttons=[[SimpleNamespace(text="🗑 Видалити")]],
+    )
+    summary = SimpleNamespace(raw_text="За день: 360 кк", buttons=None)
+
+    meals, summaries = e2e._split_meal_responses([component, summary])
+
+    assert meals == [component]
+    assert summaries == [summary]
+
+
 def test_sheet_probe_removes_only_suffix_created_after_baseline() -> None:
     calls = []
     probe = e2e.SheetProbe.__new__(e2e.SheetProbe)

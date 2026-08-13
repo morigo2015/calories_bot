@@ -110,6 +110,18 @@ def _expected_day_summary(today_total: float, daily_kcal_goal: int | None) -> st
     return f"Сьогодні: {rounded_total} із {daily_kcal_goal} кк"
 
 
+def _split_meal_responses(
+    responses: list[Message],
+) -> tuple[list[Message], list[Message]]:
+    meals = [response for response in responses if _has_button(response, "Видалити")]
+    summaries = [
+        response
+        for response in responses
+        if _message_text(response).startswith("За день:")
+    ]
+    return meals, summaries
+
+
 class TelegramDriver:
     def __init__(
         self, client: TelegramClient, bot_username: str, timeout_seconds: float
@@ -546,10 +558,15 @@ async def run_journey(
 
         async def exact_composite_lifecycle() -> None:
             text = "гречка 180 г, куряче філе 120 г і салат 100 г"
-            sent, responses = await driver.send_text_responses(text)
+            sent, all_responses = await driver.send_text_responses(text)
+            responses, summaries = _split_meal_responses(all_responses)
             _require(
                 len(responses) == 3,
                 f"exact composite returned {len(responses)} responses instead of 3",
+            )
+            _require(
+                len(summaries) == 1,
+                f"exact composite returned {len(summaries)} daily totals instead of 1",
             )
             track_created(*responses)
             created_rows.append((sent, text))
@@ -716,11 +733,16 @@ async def run_journey(
                 ),
             )
             for text, count_bounds, required in cases:
-                sent, responses = await driver.send_text_responses(text)
+                sent, all_responses = await driver.send_text_responses(text)
+                responses, summaries = _split_meal_responses(all_responses)
                 _require(
                     count_bounds[0] <= len(responses) <= count_bounds[1],
                     f"{text!r}: got {len(responses)} components, "
                     f"expected {count_bounds}",
+                )
+                _require(
+                    len(summaries) == 1,
+                    f"{text!r}: got {len(summaries)} daily totals instead of 1",
                 )
                 searchable = " ".join(_message_text(response) for response in responses)
                 searchable = searchable.casefold()

@@ -338,9 +338,9 @@ class BotStatistics:
                 "%d.%m.%Y %H:%M:%S %Z"
             ),
             "",
-            *_format_message_period("Повідомлення за 24 години", day),
+            *_format_message_period("Запити за 24 години", day),
             "",
-            *_format_message_period("Повідомлення за 30 днів", month),
+            *_format_message_period("Запити за 30 днів", month),
             "",
             "OpenAI за 30 днів:",
             f"• вхідні токени: {_format_integer(llm.input_tokens)}",
@@ -368,9 +368,9 @@ class BotStatistics:
 
 
 def _format_message_period(title: str, summary: MessageSummary) -> list[str]:
-    lines = [f"{title}: {_format_integer(summary.total)}"]
+    lines = [f"{title}:", f"• разом: {_format_integer(summary.total)}"]
     if not summary.users:
-        lines.append("• користувачі: немає повідомлень")
+        lines.append("• користувачі: немає запитів")
         return lines
     for user in summary.users:
         label = user.display_name or f"ID {user.telegram_user_id}"

@@ -5,12 +5,13 @@ from functools import partial
 from typing import Any
 
 import gspread
-from telegram import BotCommand, BotCommandScopeChat
+from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -130,9 +131,7 @@ def main() -> None:
         .build()
     )
     message_update = filters.UpdateType.MESSAGE
-    application.add_handler(
-        MessageHandler(message_update, handlers.track_message), group=-1
-    )
+    application.add_handler(TypeHandler(Update, handlers.track_interaction), group=-1)
     application.add_handler(
         CommandHandler("start", handlers.start, filters=message_update)
     )
