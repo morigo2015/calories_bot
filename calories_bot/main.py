@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import time
 from functools import partial
 from typing import Any
 
@@ -10,6 +12,7 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     TypeHandler,
     filters,
@@ -19,6 +22,7 @@ from .analytics import AnalyticsStore, BotStatistics, OpenAICostClient
 from .analyzer import OpenAIAnalyzer
 from .bot import TelegramHandlers, UserManager
 from .config import Settings
+from .garmin import GarminCalorieStore
 from .users import GoogleUserRegistry
 from .workspace import GoogleWorkspace
 
@@ -26,6 +30,8 @@ from .workspace import GoogleWorkspace
 async def configure_bot_commands(
     application: Application[Any, Any, Any, Any, Any, Any],
     admin_user_id: int,
+    garmin_calories: GarminCalorieStore | None = None,
+    garmin_refresh_time: time | None = None,
 ) -> None:
     user_commands = [
         BotCommand("meals", "⭐ збережені страви"),
@@ -38,6 +44,7 @@ async def configure_bot_commands(
     ]
     admin_commands = [
         *user_commands,
+        BotCommand("burned", "🔥 витрата калорій"),
         BotCommand("invite", "➕ додати користувача"),
         BotCommand("info", "ℹ️ інформація про реліз"),
         BotCommand("users", "👥 показати перелік користувачів"),
@@ -50,6 +57,35 @@ async def configure_bot_commands(
         admin_commands,
         scope=BotCommandScopeChat(chat_id=admin_user_id),
     )
+    if garmin_calories is not None:
+        if application.job_queue is None or garmin_refresh_time is None:
+            raise RuntimeError("Garmin refresh requires JobQueue and a refresh time")
+        application.job_queue.run_daily(
+            refresh_garmin_calories,
+            time=garmin_refresh_time,
+            data=garmin_calories,
+            name="garmin-calorie-refresh",
+        )
+        await _refresh_garmin_calories(garmin_calories)
+
+
+async def refresh_garmin_calories(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    store = job.data if job is not None else None
+    if not isinstance(store, GarminCalorieStore):
+        logging.getLogger(__name__).error("Garmin refresh job has no calorie store")
+        return
+    await _refresh_garmin_calories(store)
+
+
+async def _refresh_garmin_calories(store: GarminCalorieStore) -> None:
+    try:
+        refreshed = await asyncio.to_thread(store.refresh_if_due)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not refresh Garmin calorie cache")
+        return
+    if refreshed:
+        logging.getLogger(__name__).info("Garmin calorie cache refreshed")
 
 
 def configure_logging() -> None:
@@ -111,11 +147,18 @@ def main() -> None:
         settings.photo_storage_dir,
     )
     manager.prepare_release_storage()
+    garmin_calories = GarminCalorieStore(
+        settings.garmin_tokenstore,
+        settings.garmin_calorie_cache_path,
+        settings.timezone,
+        settings.default_day_start,
+    )
     handlers = TelegramHandlers(
         settings.admin_telegram_user_id,
         manager,
         settings.meal_weight_presets,
         statistics,
+        garmin_calories,
     )
 
     application = (
@@ -126,6 +169,10 @@ def main() -> None:
             partial(
                 configure_bot_commands,
                 admin_user_id=settings.admin_telegram_user_id,
+                garmin_calories=garmin_calories,
+                garmin_refresh_time=settings.default_day_start.replace(
+                    tzinfo=settings.timezone
+                ),
             )
         )
         .build()
@@ -159,6 +206,9 @@ def main() -> None:
     )
     application.add_handler(
         CommandHandler("info", handlers.info, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("burned", handlers.burned, filters=message_update)
     )
     application.add_handler(
         CommandHandler("invite", handlers.invite, filters=message_update)

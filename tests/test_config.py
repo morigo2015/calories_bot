@@ -43,6 +43,8 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         "DEFAULT_DAY_START",
         "PHOTO_STORAGE_DIR",
         "STATISTICS_DB_PATH",
+        "GARMIN_TOKENSTORE",
+        "GARMIN_CALORIE_CACHE_PATH",
         "MEAL_WEIGHT_PRESETS",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -65,6 +67,11 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     assert (
         settings.statistics_db_path
         == (Path.cwd() / "data" / "statistics.sqlite3").resolve()
+    )
+    assert settings.garmin_tokenstore == Path("~/.garminconnect").expanduser()
+    assert (
+        settings.garmin_calorie_cache_path
+        == (Path.cwd() / "data" / "garmin_calories.json").resolve()
     )
     assert settings.meal_weight_presets == (50, 100, 150, 200)
 

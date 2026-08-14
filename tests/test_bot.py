@@ -2014,7 +2014,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.0.3"]
+    assert admin_message.replies == ["Версія: 1.1.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2043,7 +2043,20 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.0.3\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.1.0\nЗапити за 24 години:\n• разом: 7"]
+
+
+def test_only_admin_can_read_cached_garmin_calories() -> None:
+    garmin = SimpleNamespace(format_weekly_report=lambda: "Garmin report")
+    handlers = TelegramHandlers(999, FakeManager(), garmin_calories=garmin)
+    admin_update, admin_message = make_update(user_id=999)
+    user_update, user_message = make_update(user_id=123)
+
+    asyncio.run(handlers.burned(admin_update, SimpleNamespace(user_data={})))
+    asyncio.run(handlers.burned(user_update, SimpleNamespace(user_data={})))
+
+    assert admin_message.replies == ["Garmin report"]
+    assert user_message.replies == ["Недоступно."]
 
 
 def test_tracking_records_inline_interactions_for_the_clicking_user() -> None:

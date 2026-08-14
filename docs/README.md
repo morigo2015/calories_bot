@@ -138,12 +138,19 @@ cp .env.example .env
 - `MEAL_SHEET_NAME=food_log`;
 - `PHOTO_STORAGE_DIR=./data/photos`;
 - `STATISTICS_DB_PATH=./data/statistics.sqlite3`;
+- `GARMIN_TOKENSTORE=~/.garminconnect` — приватна папка з renewable-токенами Garmin;
+- `GARMIN_CALORIE_CACHE_PATH=./data/garmin_calories.json` — локальний кеш витрати
+  калорій за сім завершених днів;
 - `APP_TIMEZONE=Europe/Kyiv`;
 - `DEFAULT_DAY_START=01:00`;
 - `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT`, `OPENAI_TIMEOUT_SECONDS` і тарифи
   `OPENAI_*_COST_PER_1M`.
 - `OPENAI_ADMIN_API_KEY` для фактичної вартості з OpenAI Costs API та
   `OPENAI_PROJECT_ID`, щоб обмежити цю вартість проєктом бота.
+
+Команда адміністратора `/burned` читає лише локальний кеш. Бот оновлює кеш із
+Garmin один раз на початку кожної бот-доби (`DEFAULT_DAY_START`, типово 01:00),
+а після перезапуску надолужує оновлення, тільки якщо воно ще не виконувалося.
 
 Окремої env-змінної для `saved_meals` немає. `.env` і
 `service-account.json` повинні мати права `600`.

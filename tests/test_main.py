@@ -10,6 +10,7 @@ from telegram.constants import ChatType
 
 from calories_bot import main as main_module
 from calories_bot.analyzer import ModelPricing
+from calories_bot.garmin import GarminCalorieStore
 
 
 def test_configure_logging_suppresses_network_request_urls() -> None:
@@ -37,6 +38,8 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         meal_sheet_name="food_log",
         photo_storage_dir=Path("data/photos"),
         statistics_db_path=tmp_path / "statistics.sqlite3",
+        garmin_tokenstore=tmp_path / "garmin-tokens",
+        garmin_calorie_cache_path=tmp_path / "garmin-calories.json",
         timezone=ZoneInfo("Europe/Kyiv"),
         default_day_start=time(1),
         meal_weight_presets=(50, 100, 150, 200),
@@ -71,6 +74,11 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
             "manager", SimpleNamespace(prepare_release_storage=lambda: None)
         ),
     )
+    monkeypatch.setattr(
+        main_module,
+        "GarminCalorieStore",
+        lambda *args: created.setdefault("garmin", SimpleNamespace()),
+    )
     handlers = SimpleNamespace(
         start=lambda: None,
         help=lambda: None,
@@ -87,6 +95,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         meal_weight_choice_callback=lambda: None,
         library_callback=lambda: None,
         info=lambda: None,
+        burned=lambda: None,
         invite=lambda: None,
         users=lambda: None,
         block=lambda: None,
@@ -141,10 +150,14 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 26
+    assert len(app.handlers) == 27
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
-    assert created["post_init"].keywords == {"admin_user_id": 999}
+    assert created["post_init"].keywords["admin_user_id"] == 999
+    assert created["post_init"].keywords["garmin_calories"] is created["garmin"]
+    assert created["post_init"].keywords["garmin_refresh_time"] == time(
+        1, tzinfo=ZoneInfo("Europe/Kyiv")
+    )
 
     message = Message(
         message_id=1,
@@ -206,6 +219,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "goal",
         "help",
         "tips",
+        "burned",
         "invite",
         "info",
         "users",
@@ -214,3 +228,55 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "delete",
     ]
     assert bot.calls[1][1]["scope"].chat_id == 999
+
+
+def test_configure_bot_commands_schedules_daily_garmin_refresh(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeBot:
+        async def set_my_commands(self, commands, **kwargs):
+            del commands, kwargs
+
+    class FakeJobQueue:
+        def __init__(self):
+            self.calls = []
+
+        def run_daily(self, callback, **kwargs):
+            self.calls.append((callback, kwargs))
+
+    store = GarminCalorieStore(
+        tmp_path / "tokens",
+        tmp_path / "cache.json",
+        ZoneInfo("Europe/Kyiv"),
+        time(1),
+    )
+    refreshes = []
+    monkeypatch.setattr(store, "refresh_if_due", lambda: refreshes.append(True) or True)
+
+    async def run_inline(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(main_module.asyncio, "to_thread", run_inline)
+    queue = FakeJobQueue()
+    refresh_time = time(1, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    asyncio.run(
+        main_module.configure_bot_commands(
+            SimpleNamespace(bot=FakeBot(), job_queue=queue),
+            admin_user_id=999,
+            garmin_calories=store,
+            garmin_refresh_time=refresh_time,
+        )
+    )
+
+    assert refreshes == [True]
+    assert queue.calls == [
+        (
+            main_module.refresh_garmin_calories,
+            {
+                "time": refresh_time,
+                "data": store,
+                "name": "garmin-calorie-refresh",
+            },
+        )
+    ]

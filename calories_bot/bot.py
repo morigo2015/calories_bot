@@ -111,6 +111,14 @@ BLOCKED_TEXT = "Доступ до бота вимкнено."
 ACCESS_ERROR_TEXT = "Не вдалося перевірити доступ. Спробуй ще раз."
 ACTIVATION_ERROR_TEXT = "Не вдалося активувати доступ. Спробуй ще раз."
 ADMIN_ERROR_TEXT = "Не вдалося виконати команду. Спробуй ще раз."
+GARMIN_READ_ERROR_TEXT = (
+    "Не вдалося прочитати локальні дані Garmin. "
+    "Перевір журнал оновлення або спробуй після наступного оновлення доби."
+)
+
+
+class GarminCalories(Protocol):
+    def format_weekly_report(self) -> str: ...
 
 
 class NotFoodError(ValueError):
@@ -1105,11 +1113,13 @@ class TelegramHandlers:
         manager: UserManager,
         meal_weight_presets: tuple[int, ...] = (50, 100, 150, 200),
         statistics: BotStatistics | None = None,
+        garmin_calories: GarminCalories | None = None,
     ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
         self._meal_weight_presets = meal_weight_presets
         self._statistics = statistics
+        self._garmin_calories = garmin_calories
 
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1343,6 +1353,22 @@ class TelegramHandlers:
             info = f"Версія: {__version__}\nСтатистика тимчасово недоступна."
         for chunk in _split_telegram_text(info):
             await message.reply_text(chunk, do_quote=False)
+
+    async def burned(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if not self._is_admin(update) or message is None:
+            await self._reject_admin_command(update)
+            return
+        if self._garmin_calories is None:
+            await message.reply_text(GARMIN_READ_ERROR_TEXT, do_quote=False)
+            return
+        try:
+            report = await asyncio.to_thread(self._garmin_calories.format_weekly_report)
+        except Exception:
+            LOGGER.exception("Could not read cached Garmin calorie data")
+            report = GARMIN_READ_ERROR_TEXT
+        await message.reply_text(report, do_quote=False)
 
     async def day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)

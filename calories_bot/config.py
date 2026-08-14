@@ -38,6 +38,8 @@ class Settings:
     meal_sheet_name: str
     photo_storage_dir: Path
     statistics_db_path: Path
+    garmin_tokenstore: Path
+    garmin_calorie_cache_path: Path
     timezone: ZoneInfo
     default_day_start: time
     meal_weight_presets: tuple[int, ...]
@@ -164,6 +166,17 @@ class Settings:
             .resolve(),
             statistics_db_path=Path(
                 os.getenv("STATISTICS_DB_PATH", "./data/statistics.sqlite3")
+            )
+            .expanduser()
+            .resolve(),
+            garmin_tokenstore=Path(os.getenv("GARMIN_TOKENSTORE", "~/.garminconnect"))
+            .expanduser()
+            .resolve(),
+            garmin_calorie_cache_path=Path(
+                os.getenv(
+                    "GARMIN_CALORIE_CACHE_PATH",
+                    "./data/garmin_calories.json",
+                )
             )
             .expanduser()
             .resolve(),
