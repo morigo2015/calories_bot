@@ -128,6 +128,4 @@ class OpenAIMealGrouper:
         if set(by_id) != expected_ids:
             raise MealGroupingError("OpenAI meal source IDs do not match the request")
         group_names = tuple(by_id[source_id] for source_id in range(len(meal_names)))
-        if len({name.casefold() for name in group_names}) > MAX_WEEKLY_MEAL_GROUPS:
-            raise MealGroupingError("OpenAI returned too many meal groups")
         return MealGroupingResult(group_names, metadata)

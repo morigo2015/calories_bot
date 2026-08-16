@@ -115,12 +115,13 @@ def test_empty_grouping_does_not_call_openai() -> None:
     assert seen.kwargs is None
 
 
-def test_grouping_rejects_more_than_twenty_distinct_groups() -> None:
+def test_grouping_accepts_more_than_twenty_valid_groups() -> None:
     assignments = [
         MealGroupAssignment(source_id=index, group_name=f"Група {index}")
         for index in range(21)
     ]
     grouper, _ = _grouper(MealGrouping(assignments=assignments))
 
-    with pytest.raises(MealGroupingError, match="too many"):
-        grouper.group(tuple(f"Страва {index}" for index in range(21)))
+    result = grouper.group(tuple(f"Страва {index}" for index in range(21)))
+
+    assert result.group_names == tuple(f"Група {index}" for index in range(21))
