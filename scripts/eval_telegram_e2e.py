@@ -425,7 +425,8 @@ async def run_journey(
                 ("/start", "Напиши"),
                 ("/help", "/day"),
                 ("/tips", "Скорочений запис"),
-                ("/week", "За тиждень"),
+                ("/weekly_calories", "Калорії за тиждень"),
+                ("/weekly_meals", "Страви за тиждень"),
             ):
                 _, response = await driver.send_text(command)
                 _require(
@@ -433,7 +434,7 @@ async def run_journey(
                     f"{command}: unexpected response",
                 )
 
-        await _run_step(results, "start/help/tips/week", static_commands)
+        await _run_step(results, "start/help/tips/weekly reports", static_commands)
 
         test_goal = 1600 if original_goal != 1600 else 1700
 

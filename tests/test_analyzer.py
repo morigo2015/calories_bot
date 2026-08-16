@@ -10,6 +10,8 @@ from calories_bot.analyzer import (
     ModelPricing,
     NormalizedInput,
     OpenAIAnalyzer,
+    OpenAITranscriber,
+    TranscriptionError,
     apply_household_portions,
     calculate_llm_cost,
     enforce_explicit_values,
@@ -118,6 +120,35 @@ def test_spoken_calorie_and_weight_values_keep_explicit_sources() -> None:
         ("weight", 120),
         ("kcal", 300),
     ]
+
+
+def test_openai_transcriber_sends_telegram_voice_to_recommended_model() -> None:
+    calls = []
+
+    class Transcriptions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(text="  сливи 200 грамів  ")
+
+    transcriber = OpenAITranscriber("key", 30)
+    transcriber._client = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=Transcriptions())
+    )
+
+    assert transcriber.transcribe(b"ogg-audio") == "сливи 200 грамів"
+    assert calls == [
+        {
+            "model": "gpt-transcribe",
+            "file": ("voice.ogg", b"ogg-audio", "audio/ogg"),
+        }
+    ]
+
+
+def test_openai_transcriber_rejects_empty_audio() -> None:
+    transcriber = OpenAITranscriber("key", 30)
+
+    with pytest.raises(TranscriptionError):
+        transcriber.transcribe(b"")
 
 
 def test_household_egg_portion_is_preserved_and_uses_reference_weight() -> None:

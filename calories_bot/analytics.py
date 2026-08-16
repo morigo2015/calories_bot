@@ -461,12 +461,8 @@ def _format_message_period(title: str, summary: MessageSummary) -> list[str]:
         lines.append("• користувачі: немає запитів")
         return lines
     for user in summary.users:
-        label = user.display_name or f"ID {user.telegram_user_id}"
-        username = f" (@{user.username})" if user.username else ""
-        lines.append(
-            f"• {label}{username} · ID {user.telegram_user_id}: "
-            f"{_format_integer(user.count)}"
-        )
+        label = user.display_name or "Без імені"
+        lines.append(f"• {label}: {_format_integer(user.count)}")
     return lines
 
 

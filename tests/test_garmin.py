@@ -66,6 +66,9 @@ def test_refreshes_seven_completed_days_once_and_formats_cache(monkeypatch, tmp_
     assert "Разом: 14 028 ккал" in report
     assert "У середньому: 2 004 ккал/день" in report
     assert "Оновлено: 14.08.2026 01:00" in report
+    daily = store.get_daily_calories()
+    assert daily[datetime(2026, 8, 7).date()] == 2001
+    assert daily[datetime(2026, 8, 13).date()] == 2007
     assert (tmp_path / "garmin-calories.json").stat().st_mode & 0o777 == 0o600
 
 

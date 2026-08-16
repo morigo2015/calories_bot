@@ -16,6 +16,7 @@ from calories_bot.bot import (
     NOT_FOOD_TEXT,
     READ_ERROR_TEXT,
     UNCERTAIN_WRITE_TEXT,
+    VOICE_ERROR_TEXT,
     WRITE_ERROR_TEXT,
     CaloriesService,
     MealReply,
@@ -26,7 +27,8 @@ from calories_bot.bot import (
     format_day_reply,
     format_reply,
     format_users_reply,
-    format_week_reply,
+    format_weekly_calories_reply,
+    format_weekly_meals_reply,
     load_help_text,
     load_start_text,
 )
@@ -43,6 +45,7 @@ from calories_bot.models import (
 from calories_bot.sheets import (
     DayMeal,
     MealDeletion,
+    PeriodMeal,
     SheetsReadError,
     SheetState,
     SheetsWriteError,
@@ -121,6 +124,10 @@ class FakeStore:
     def get_daily_totals(self, start_day, end_day):
         self.range = (start_day, end_day)
         return getattr(self, "daily_totals", {})
+
+    def get_period_meals(self, start_day, end_day):
+        self.range = (start_day, end_day)
+        return getattr(self, "period_meals", [])
 
     def delete_meal(self, telegram_message_id, fallback_day):
         self.deleted = (telegram_message_id, fallback_day)
@@ -664,8 +671,9 @@ def test_daily_goal_does_not_show_negative_remainder() -> None:
     assert "залишилось" not in reply
 
 
-def test_week_reply_includes_all_days_and_excludes_empty_days_from_stats() -> None:
-    reply = format_week_reply(
+def test_weekly_calories_includes_seven_days_admin_balance_and_averages() -> None:
+    burned = {date(2026, 8, day): 2000 for day in range(2, 9)}
+    reply = format_weekly_calories_reply(
         date(2026, 8, 8),
         {
             date(2026, 8, 2): 1640.4,
@@ -674,40 +682,47 @@ def test_week_reply_includes_all_days_and_excludes_empty_days_from_stats() -> No
             date(2026, 8, 6): 1730,
             date(2026, 8, 8): 2310,
         },
-        2000,
+        burned,
     )
 
     assert reply == (
-        "За тиждень\n\n"
-        "• 02.08: 1640 кк\n"
-        "• 03.08: 1800 кк\n"
-        "• 04.08: немає записів\n"
-        "• 05.08: 1870 кк\n"
-        "• 06.08: 1730 кк\n"
-        "• 07.08: немає записів\n"
-        "• 08.08: 2310 кк\n\n"
-        "Заповнено: 5 із 7 днів\n"
-        "У середньому за заповнений день: 1870 кк\n"
-        "Денна ціль: 2000 кк\n"
-        "У межах цілі: 4 із 5 заповнених днів\n"
-        "Найменше: 1640 кк\n"
-        "Найбільше: 2310 кк"
+        "Калорії за тиждень\n\n"
+        "• нд 02.08: +1640 -2000 =-360\n"
+        "• пн 03.08: +1800 -2000 =-200\n"
+        "• вт 04.08: +0 -2000 =-2000\n"
+        "• ср 05.08: +1870 -2000 =-130\n"
+        "• чт 06.08: +1730 -2000 =-270\n"
+        "• пт 07.08: +0 -2000 =-2000\n"
+        "• сб 08.08: +2310 -2000 =+310\n\n"
+        "Середнє: +1336 -2000 =-664"
     )
 
 
-def test_week_reply_handles_no_records() -> None:
-    assert format_week_reply(date(2026, 8, 8), {}) == "За тиждень записів немає."
+def test_weekly_calories_for_regular_user_shows_only_consumed() -> None:
+    reply = format_weekly_calories_reply(date(2026, 8, 8), {date(2026, 8, 8): 700})
+
+    assert "• сб 08.08: +700" in reply
+    assert "Середнє: +100" in reply
+    assert " -" not in reply
+    assert "=" not in reply
 
 
-def test_week_goal_uses_the_same_rounded_total_that_is_displayed() -> None:
-    reply = format_week_reply(
-        date(2026, 8, 8),
-        {date(2026, 8, 8): 2000.4},
-        2000,
+def test_weekly_meals_aggregates_names_weights_and_sorts_by_calories() -> None:
+    reply = format_weekly_meals_reply(
+        [
+            PeriodMeal("вино сухе", 200, 120),
+            PeriodMeal("  Вино   сухе ", 150, 80),
+            PeriodMeal("сир", 100, 360),
+        ]
     )
 
-    assert "• 08.08: 2000 кк" in reply
-    assert "У межах цілі: 1 із 1 заповнених днів" in reply
+    assert reply == (
+        "Страви за тиждень\n\n• Сир 100 г — 360 кк\n• Вино сухе 350 г — 200 кк"
+    )
+
+
+def test_weekly_meals_handles_no_records() -> None:
+    assert format_weekly_meals_reply([]) == "Страви за тиждень\n\nЗаписів немає."
 
 
 def test_user_list_contains_status_ids_and_pending_invites() -> None:
@@ -955,6 +970,7 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
         text = "сир 50"
         caption = None
         photo = []
+        voice = None
         media_group_id = None
         message_id = 1
         date = datetime(2026, 8, 2, 9, tzinfo=UTC)
@@ -1034,6 +1050,65 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
     assert message.reply_kwargs[0]["do_quote"] is False
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert "reply_markup" not in message.reply_kwargs[1]
+
+
+def test_voice_is_transcribed_and_processed_as_food_text() -> None:
+    class VoiceFile:
+        async def download_as_bytearray(self):
+            return bytearray(b"ogg-audio")
+
+    class Voice:
+        async def get_file(self):
+            return VoiceFile()
+
+    class Transcriber:
+        def __init__(self):
+            self.audio = None
+
+        def transcribe(self, audio):
+            self.audio = audio
+            return "Сливи двісті грамів калорійність сорок калорій на сто грамів"
+
+    class Service:
+        def __init__(self):
+            self.args = None
+
+        def get_existing_reply(self, *args):
+            return None
+
+        def process_message(self, *args):
+            self.args = args
+            return MealReply("Сливи", 1, date(2026, 8, 2))
+
+    transcriber = Transcriber()
+    service = Service()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        transcriber=transcriber,
+    )
+    update, message = make_update()
+    message.voice = Voice()
+
+    asyncio.run(handlers.voice(update, SimpleNamespace(user_data={})))
+
+    assert transcriber.audio == b"ogg-audio"
+    assert service.args[0] == (
+        "Сливи двісті грамів калорійність сорок калорій на сто грамів"
+    )
+    assert message.replies == ["Сливи"]
+
+
+def test_voice_without_transcriber_returns_clear_error() -> None:
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: SimpleNamespace()})
+    )
+    update, message = make_update()
+    message.voice = SimpleNamespace()
+
+    asyncio.run(handlers.voice(update, SimpleNamespace(user_data={})))
+
+    assert message.replies == [VOICE_ERROR_TEXT]
 
 
 def test_duplicate_photo_is_checked_before_download() -> None:
@@ -1129,7 +1204,7 @@ def test_day_handler_maps_read_error_to_user_message() -> None:
     assert message.replies == [READ_ERROR_TEXT]
 
 
-def test_week_handler_uses_shifted_accounting_day(tmp_path) -> None:
+def test_weekly_calories_excludes_current_accounting_day_for_user(tmp_path) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     store.daily_totals = {date(2026, 8, 1): 500}
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
@@ -1137,10 +1212,41 @@ def test_week_handler_uses_shifted_accounting_day(tmp_path) -> None:
     update, message = make_update()
     message.date = datetime(2026, 8, 2, 0, 30, tzinfo=TZ)
 
-    asyncio.run(handlers.week(update, SimpleNamespace(user_data={})))
+    asyncio.run(handlers.weekly_calories(update, SimpleNamespace(user_data={})))
+
+    assert store.range == (date(2026, 7, 25), date(2026, 7, 31))
+    assert message.replies[0].startswith("Калорії за тиждень")
+
+
+def test_admin_weekly_calories_includes_garmin_balance(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.daily_totals = {date(2026, 8, 1): 2300}
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+    burned = {date(2026, 7, 26) + timedelta(days=offset): 2500 for offset in range(7)}
+    garmin = SimpleNamespace(get_daily_calories=lambda: burned)
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({999: user_record(999)}, {999: service}),
+        garmin_calories=garmin,
+    )
+    update, message = make_update(user_id=999)
+
+    asyncio.run(handlers.weekly_calories(update, SimpleNamespace(user_data={})))
+
+    assert "• сб 01.08: +2300 -2500 =-200" in message.replies[0]
+
+
+def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.period_meals = [PeriodMeal("сир", 100, 360)]
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+
+    asyncio.run(handlers.weekly_meals(update, SimpleNamespace(user_data={})))
 
     assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
-    assert message.replies[0].startswith("За тиждень")
+    assert message.replies == ["Страви за тиждень\n\n• Сир 100 г — 360 кк"]
 
 
 def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
@@ -2014,7 +2120,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.1.0"]
+    assert admin_message.replies == ["Версія: 1.2.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2043,7 +2149,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.1.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.2.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

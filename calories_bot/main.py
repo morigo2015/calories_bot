@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 
 from .analytics import AnalyticsStore, BotStatistics, OpenAICostClient
-from .analyzer import OpenAIAnalyzer
+from .analyzer import OpenAIAnalyzer, OpenAITranscriber
 from .bot import TelegramHandlers, UserManager
 from .config import Settings
 from .garmin import GarminCalorieStore
@@ -37,7 +37,8 @@ async def configure_bot_commands(
         BotCommand("meals", "⭐ збережені страви"),
         BotCommand("recent", "🕘 нещодавні страви"),
         BotCommand("day", "📅 Сьогодні"),
-        BotCommand("week", "📊 За тиждень"),
+        BotCommand("weekly_calories", "📊 Калорії за тиждень"),
+        BotCommand("weekly_meals", "🍽 Страви за тиждень"),
         BotCommand("goal", "🎯 встановити денну ціль"),
         BotCommand("help", "❓ як користуватися ботом"),
         BotCommand("tips", "💡 додаткові можливості"),
@@ -123,6 +124,10 @@ def main() -> None:
         settings.openai_pricing,
         statistics,
     )
+    transcriber = OpenAITranscriber(
+        settings.openai_api_key,
+        settings.openai_timeout_seconds,
+    )
     google_client = gspread.service_account(
         filename=str(settings.google_service_account_file)
     )
@@ -159,6 +164,7 @@ def main() -> None:
         settings.meal_weight_presets,
         statistics,
         garmin_calories,
+        transcriber,
     )
 
     application = (
@@ -190,7 +196,12 @@ def main() -> None:
     )
     application.add_handler(CommandHandler("day", handlers.day, filters=message_update))
     application.add_handler(
-        CommandHandler("week", handlers.week, filters=message_update)
+        CommandHandler(
+            "weekly_calories", handlers.weekly_calories, filters=message_update
+        )
+    )
+    application.add_handler(
+        CommandHandler("weekly_meals", handlers.weekly_meals, filters=message_update)
     )
     application.add_handler(
         CommandHandler("goal", handlers.goal, filters=message_update)
@@ -274,6 +285,9 @@ def main() -> None:
     )
     application.add_handler(
         MessageHandler(filters.UpdateType.MESSAGE & filters.PHOTO, handlers.photo)
+    )
+    application.add_handler(
+        MessageHandler(filters.UpdateType.MESSAGE & filters.VOICE, handlers.voice)
     )
     application.add_handler(
         MessageHandler(

@@ -53,6 +53,11 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         lambda *args: created.setdefault("analyzer", SimpleNamespace()),
     )
     monkeypatch.setattr(
+        main_module,
+        "OpenAITranscriber",
+        lambda *args: created.setdefault("transcriber", SimpleNamespace()),
+    )
+    monkeypatch.setattr(
         main_module.gspread,
         "service_account",
         lambda **kwargs: created.setdefault("google_client", SimpleNamespace()),
@@ -84,7 +89,8 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         help=lambda: None,
         tips=lambda: None,
         day=lambda: None,
-        week=lambda: None,
+        weekly_calories=lambda: None,
+        weekly_meals=lambda: None,
         goal=lambda: None,
         meals=lambda: None,
         recent=lambda: None,
@@ -106,6 +112,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         goal_disable_callback=lambda: None,
         text=lambda: None,
         photo=lambda: None,
+        voice=lambda: None,
         track_interaction=lambda: None,
     )
     monkeypatch.setattr(
@@ -150,7 +157,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 27
+    assert len(app.handlers) == 29
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
@@ -206,7 +213,8 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("meals", "⭐ збережені страви"),
         ("recent", "🕘 нещодавні страви"),
         ("day", "📅 Сьогодні"),
-        ("week", "📊 За тиждень"),
+        ("weekly_calories", "📊 Калорії за тиждень"),
+        ("weekly_meals", "🍽 Страви за тиждень"),
         ("goal", "🎯 встановити денну ціль"),
         ("help", "❓ як користуватися ботом"),
         ("tips", "💡 додаткові можливості"),
@@ -215,7 +223,8 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "meals",
         "recent",
         "day",
-        "week",
+        "weekly_calories",
+        "weekly_meals",
         "goal",
         "help",
         "tips",

@@ -108,6 +108,14 @@ class GarminCalorieStore:
         )
         return "\n".join(lines)
 
+    def get_daily_calories(self) -> dict[date, int]:
+        snapshot = self._read_snapshot()
+        if snapshot is None:
+            raise GarminCacheError("Garmin calorie cache has not been created yet")
+        return {
+            date.fromisoformat(entry.day): entry.total_kcal for entry in snapshot.days
+        }
+
     def _fetch_snapshot(
         self, refresh_day: date, refreshed_at: datetime
     ) -> GarminCalorieSnapshot:

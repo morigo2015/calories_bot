@@ -16,6 +16,7 @@ from calories_bot.sheets import (
     LEGACY_HEADERS,
     DayMeal,
     GoogleSheetsStore,
+    PeriodMeal,
     SheetSchemaError,
     SheetsReadError,
     SheetsWriteError,
@@ -267,6 +268,27 @@ def test_daily_totals_read_once_and_keep_exact_values() -> None:
 
     assert set(totals) == {datetime(2026, 8, 2).date()}
     assert totals[datetime(2026, 8, 2).date()] == pytest.approx(300.8)
+    assert store._worksheet.read_count == 1
+
+
+def test_period_meals_read_once_and_include_weight_and_calories() -> None:
+    first = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 1, 100)
+    first[2] = "вино сухе"
+    first[3] = 200
+    second = stored_row(datetime(2026, 8, 3, 12, tzinfo=TZ), 2, 360)
+    second[2] = "сир"
+    second[3] = 100
+    outside = stored_row(datetime(2026, 8, 9, 12, tzinfo=TZ), 3, 999)
+    store = build_store([HEADERS, first, second, outside])
+
+    meals = store.get_period_meals(
+        datetime(2026, 8, 2).date(), datetime(2026, 8, 8).date()
+    )
+
+    assert meals == [
+        PeriodMeal("вино сухе", 200, 100),
+        PeriodMeal("сир", 100, 360),
+    ]
     assert store._worksheet.read_count == 1
 
 

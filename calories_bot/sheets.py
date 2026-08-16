@@ -100,6 +100,13 @@ class DayMeal:
 
 
 @dataclass(frozen=True)
+class PeriodMeal:
+    meal_name: str
+    total_weight_g: float
+    meal_kcal: float
+
+
+@dataclass(frozen=True)
 class MealDeletion:
     accounting_day: date
     day_total: int
@@ -121,6 +128,8 @@ class MealStore(Protocol):
     def get_day_meals(self, day: date) -> list[DayMeal]: ...
 
     def get_daily_totals(self, start_day: date, end_day: date) -> dict[date, float]: ...
+
+    def get_period_meals(self, start_day: date, end_day: date) -> list[PeriodMeal]: ...
 
     def get_meal(self, day: date, telegram_message_id: int) -> StoredMeal | None: ...
 
@@ -620,6 +629,35 @@ class GoogleSheetsStore:
                 except (TypeError, ValueError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
             return totals
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_period_meals(self, start_day: date, end_day: date) -> list[PeriodMeal]:
+        if end_day < start_day:
+            raise ValueError("end_day cannot be before start_day")
+        try:
+            meals: list[PeriodMeal] = []
+            # One worksheet read per report; aggregation happens in the service.
+            for row in self._data_rows():
+                if len(row) <= MEAL_KCAL_COLUMN:
+                    continue
+                try:
+                    row_day = self._row_day(row)
+                    if not start_day <= row_day <= end_day:
+                        continue
+                    meal_name = str(row[MEAL_NAME_COLUMN]).strip()
+                    if not meal_name:
+                        raise ValueError("Meal name is empty")
+                    meals.append(
+                        PeriodMeal(
+                            meal_name=meal_name,
+                            total_weight_g=float(str(row[TOTAL_WEIGHT_COLUMN])),
+                            meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+            return meals
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
 

@@ -25,6 +25,8 @@ from .analyzer import (
     Analyzer,
     InputFormatError,
     NormalizedInput,
+    Transcriber,
+    TranscriptionError,
     normalize_input,
 )
 from .models import (
@@ -52,6 +54,7 @@ from .sheets import (
     DayMeal,
     MealDeletion,
     MealStore,
+    PeriodMeal,
     SheetsReadError,
     SheetsWriteError,
     SheetsWriteUncertainError,
@@ -97,6 +100,7 @@ UNCERTAIN_WRITE_TEXT = (
 ANALYSIS_ERROR_TEXT = "Не вдалося порахувати калорії. Спробуй ще раз."
 GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Спробуй ще раз."
 WEEK_ERROR_TEXT = "Не вдалося сформувати підсумок за 7 днів. Спробуй ще раз."
+VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
@@ -115,10 +119,14 @@ GARMIN_READ_ERROR_TEXT = (
     "Не вдалося прочитати локальні дані Garmin. "
     "Перевір журнал оновлення або спробуй після наступного оновлення доби."
 )
+WEEK_DAYS = 7
+UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
 
 class GarminCalories(Protocol):
     def format_weekly_report(self) -> str: ...
+
+    def get_daily_calories(self) -> dict[date, int]: ...
 
 
 class NotFoodError(ValueError):
@@ -296,45 +304,69 @@ def format_reply(meal: MealResult) -> str:
     return "\n".join(body)
 
 
-def format_week_reply(
+def format_weekly_calories_reply(
     end_day: date,
     totals: dict[date, float],
-    daily_kcal_goal: int | None = None,
+    burned_totals: dict[date, int] | None = None,
 ) -> str:
-    start_day = end_day - timedelta(days=6)
-    days = [start_day + timedelta(days=offset) for offset in range(7)]
-    present = {day: totals[day] for day in days if day in totals}
-    if not present:
-        return "За тиждень записів немає."
+    start_day = end_day - timedelta(days=WEEK_DAYS - 1)
+    days = [start_day + timedelta(days=offset) for offset in range(WEEK_DAYS)]
+    consumed = {day: round_whole(totals.get(day, 0)) for day in days}
+    if burned_totals is not None:
+        missing = [day for day in days if day not in burned_totals]
+        if missing:
+            raise ValueError("Burned-calorie data does not cover the completed week")
 
-    rounded = {day: round_whole(total) for day, total in present.items()}
-    lines = ["За тиждень", ""]
+    lines = ["Калорії за тиждень", ""]
     for day in days:
-        value = f"{rounded[day]} кк" if day in rounded else "немає записів"
-        lines.append(f"• {day.strftime('%d.%m')}: {value}")
-    rounded_values = list(rounded.values())
-    average = round_whole(sum(present.values()) / len(present))
-    lines.extend(
-        [
-            "",
-            f"Заповнено: {len(present)} із 7 днів",
-            f"У середньому за заповнений день: {average} кк",
-        ]
-    )
-    if daily_kcal_goal is not None:
-        within_goal = sum(value <= daily_kcal_goal for value in rounded_values)
-        lines.extend(
-            [
-                f"Денна ціль: {daily_kcal_goal} кк",
-                f"У межах цілі: {within_goal} із {len(present)} заповнених днів",
-            ]
+        prefix = f"• {UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}: "
+        consumed_text = f"{consumed[day]:+d}"
+        if burned_totals is None:
+            lines.append(prefix + consumed_text)
+            continue
+        burned = burned_totals[day]
+        balance = consumed[day] - burned
+        lines.append(prefix + f"{consumed_text} {-burned:+d} ={balance:+d}")
+
+    average_consumed = round_whole(sum(consumed.values()) / WEEK_DAYS)
+    average = f"Середнє: {average_consumed:+d}"
+    if burned_totals is not None:
+        average_burned = round_whole(
+            sum(burned_totals[day] for day in days) / WEEK_DAYS
         )
-    lines.extend(
-        [
-            f"Найменше: {min(rounded_values)} кк",
-            f"Найбільше: {max(rounded_values)} кк",
-        ]
+        average += f" {-average_burned:+d} ={average_consumed - average_burned:+d}"
+    lines.extend(("", average))
+    return "\n".join(lines)
+
+
+def format_weekly_meals_reply(meals: list[PeriodMeal]) -> str:
+    if not meals:
+        return "Страви за тиждень\n\nЗаписів немає."
+
+    grouped: dict[str, tuple[str, float, float]] = {}
+    for meal in meals:
+        display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
+        key = display_name.casefold()
+        if key in grouped:
+            original_name, weight, calories = grouped[key]
+            grouped[key] = (
+                original_name,
+                weight + meal.total_weight_g,
+                calories + meal.meal_kcal,
+            )
+        else:
+            grouped[key] = (display_name, meal.total_weight_g, meal.meal_kcal)
+
+    aggregated = sorted(
+        grouped.values(), key=lambda item: (-item[2], item[0].casefold())
     )
+    lines = ["Страви за тиждень", ""]
+    for meal_name, total_weight_g, meal_kcal in aggregated:
+        display_name = meal_name[:1].upper() + meal_name[1:]
+        lines.append(
+            f"• {display_name} {round_whole(total_weight_g)} г — "
+            f"{round_whole(meal_kcal)} кк"
+        )
     return "\n".join(lines)
 
 
@@ -435,11 +467,22 @@ class CaloriesService:
             self._daily_kcal_goal,
         )
 
-    def get_week_summary(self, timestamp: datetime) -> str:
-        end_day = self._accounting_day(timestamp)
-        start_day = end_day - timedelta(days=6)
+    def get_weekly_calories(
+        self,
+        timestamp: datetime,
+        burned_totals: dict[date, int] | None = None,
+    ) -> str:
+        end_day = self._accounting_day(timestamp) - timedelta(days=1)
+        start_day = end_day - timedelta(days=WEEK_DAYS - 1)
         totals = self._store.get_daily_totals(start_day, end_day)
-        return format_week_reply(end_day, totals, self._daily_kcal_goal)
+        return format_weekly_calories_reply(end_day, totals, burned_totals)
+
+    def get_weekly_meals(self, timestamp: datetime) -> str:
+        end_day = self._accounting_day(timestamp) - timedelta(days=1)
+        start_day = end_day - timedelta(days=WEEK_DAYS - 1)
+        return format_weekly_meals_reply(
+            self._store.get_period_meals(start_day, end_day)
+        )
 
     @staticmethod
     def _component_message_id(source_message_id: int, component_index: int) -> int:
@@ -1114,12 +1157,14 @@ class TelegramHandlers:
         meal_weight_presets: tuple[int, ...] = (50, 100, 150, 200),
         statistics: BotStatistics | None = None,
         garmin_calories: GarminCalories | None = None,
+        transcriber: Transcriber | None = None,
     ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
         self._meal_weight_presets = meal_weight_presets
         self._statistics = statistics
         self._garmin_calories = garmin_calories
+        self._transcriber = transcriber
 
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1392,7 +1437,9 @@ class TelegramHandlers:
         if reply.startswith("Сьогодні:"):
             await self._remember_daily_total_message(sent)
 
-    async def week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def weekly_calories(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
@@ -1401,11 +1448,40 @@ class TelegramHandlers:
         if service is None:
             return
         try:
-            reply = await asyncio.to_thread(service.get_week_summary, message.date)
+            burned_totals = None
+            if self._is_admin(update):
+                if self._garmin_calories is None:
+                    raise RuntimeError("Garmin calorie store is unavailable")
+                burned_totals = await asyncio.to_thread(
+                    self._garmin_calories.get_daily_calories
+                )
+            reply = await asyncio.to_thread(
+                service.get_weekly_calories,
+                message.date,
+                burned_totals,
+            )
         except Exception:
-            LOGGER.exception("Could not read the calorie log for /week")
+            LOGGER.exception("Could not build /weekly_calories")
             reply = WEEK_ERROR_TEXT
         await message.reply_text(reply, do_quote=False)
+
+    async def weekly_meals(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if message is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        try:
+            reply = await asyncio.to_thread(service.get_weekly_meals, message.date)
+        except Exception:
+            LOGGER.exception("Could not build /weekly_meals")
+            reply = WEEK_ERROR_TEXT
+        for chunk in _split_telegram_text(reply):
+            await message.reply_text(chunk, do_quote=False)
 
     @staticmethod
     def _short_button_name(name: str, limit: int = 34) -> str:
@@ -2173,6 +2249,44 @@ class TelegramHandlers:
             await message.reply_text(ANALYSIS_ERROR_TEXT, do_quote=False)
             return
         await self._process(service, message, message.caption or "", image_bytes)
+
+    async def voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if message is None or message.voice is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        if self._transcriber is None:
+            await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
+            return
+        try:
+            existing = await asyncio.to_thread(
+                service.get_existing_reply, message.message_id, message.date
+            )
+        except SheetsReadError:
+            LOGGER.exception("Could not check whether the voice message was stored")
+            await message.reply_text(READ_ERROR_TEXT, do_quote=False)
+            return
+        if existing is not None:
+            await self._send_meal_replies(message, existing)
+            return
+        try:
+            telegram_file = await message.voice.get_file()
+            audio_bytes = bytes(await telegram_file.download_as_bytearray())
+            transcript = await asyncio.to_thread(
+                self._transcriber.transcribe, audio_bytes
+            )
+        except TranscriptionError:
+            LOGGER.exception("Could not transcribe a Telegram voice message")
+            await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
+            return
+        except Exception:
+            LOGGER.exception("Could not download or transcribe a voice message")
+            await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
+            return
+        await self._process(service, message, transcript)
 
     @staticmethod
     def _meal_reply_markup(result: MealReply) -> InlineKeyboardMarkup:

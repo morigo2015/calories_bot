@@ -68,6 +68,7 @@ given meal. Return the emoji and a confidence from 0 to 1 that an ordinary user
 would immediately associate it with the meal. Use a food emoji, not a decorative
 symbol. If no specific emoji fits, choose the closest food emoji and give low
 confidence."""
+TRANSCRIPTION_MODEL = "gpt-transcribe"
 
 
 class AnalysisError(RuntimeError):
@@ -76,6 +77,10 @@ class AnalysisError(RuntimeError):
 
 class InputFormatError(ValueError):
     """Raised when deterministic input normalization rejects a message."""
+
+
+class TranscriptionError(RuntimeError):
+    """Raised when a voice message cannot be transcribed into usable text."""
 
 
 class UsageRecorder(Protocol):
@@ -142,6 +147,30 @@ class Analyzer(Protocol):
     ) -> AnalysisResult: ...
 
     def suggest_meal_icon(self, meal: MealResult) -> MealIconSuggestion: ...
+
+
+class Transcriber(Protocol):
+    def transcribe(self, audio_bytes: bytes) -> str: ...
+
+
+class OpenAITranscriber:
+    def __init__(self, api_key: str, timeout_seconds: float) -> None:
+        self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
+
+    def transcribe(self, audio_bytes: bytes) -> str:
+        if not audio_bytes:
+            raise TranscriptionError("Voice message is empty")
+        try:
+            transcription = self._client.audio.transcriptions.create(
+                model=TRANSCRIPTION_MODEL,
+                file=("voice.ogg", audio_bytes, "audio/ogg"),
+            )
+        except Exception as exc:
+            raise TranscriptionError("OpenAI could not transcribe voice") from exc
+        text = str(getattr(transcription, "text", "")).strip()
+        if not text:
+            raise TranscriptionError("OpenAI returned an empty transcript")
+        return text
 
 
 _DECIMAL = re.compile(r"\d+[.,]\d+")
