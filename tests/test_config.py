@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from calories_bot.analyzer import ModelPricing
 from calories_bot.config import ConfigError, Settings
 
 REQUIRED_NAMES = [
@@ -37,6 +38,11 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         "OPENAI_INPUT_COST_PER_1M",
         "OPENAI_CACHED_INPUT_COST_PER_1M",
         "OPENAI_OUTPUT_COST_PER_1M",
+        "WEEKLY_MEALS_LLM_MODEL",
+        "WEEKLY_MEALS_LLM_REASONING_EFFORT",
+        "WEEKLY_MEALS_LLM_INPUT_COST_PER_1M",
+        "WEEKLY_MEALS_LLM_CACHED_INPUT_COST_PER_1M",
+        "WEEKLY_MEALS_LLM_OUTPUT_COST_PER_1M",
         "OPENAI_ADMIN_API_KEY",
         "OPENAI_PROJECT_ID",
         "APP_TIMEZONE",
@@ -57,6 +63,9 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
     assert settings.openai_reasoning_effort == "low"
     assert settings.openai_timeout_seconds == 90
     assert settings.openai_pricing.complete is False
+    assert settings.weekly_meals_llm_model == settings.openai_model
+    assert settings.weekly_meals_llm_reasoning_effort == "low"
+    assert settings.weekly_meals_llm_pricing.complete is False
     assert settings.openai_admin_api_key == ""
     assert settings.openai_project_id == ""
     assert settings.timezone.key == "Europe/Kyiv"
@@ -106,6 +115,47 @@ def test_complete_pricing_is_parsed_as_decimal(monkeypatch, tmp_path) -> None:
     settings = Settings.from_env()
     assert settings.openai_pricing.complete is True
     assert settings.openai_pricing.input_per_1m == Decimal("2.5")
+    assert settings.weekly_meals_llm_pricing == ModelPricing(
+        Decimal("2.5"), None, Decimal("10")
+    )
+
+
+def test_weekly_meal_grouping_has_independent_model_effort_and_pricing(
+    monkeypatch, tmp_path
+) -> None:
+    set_valid_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_MODEL", "analysis-model")
+    monkeypatch.setenv("OPENAI_REASONING_EFFORT", "low")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_MODEL", "group-model")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_INPUT_COST_PER_1M", "1.25")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_CACHED_INPUT_COST_PER_1M", "0")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_OUTPUT_COST_PER_1M", "8")
+
+    settings = Settings.from_env()
+
+    assert settings.openai_model == "analysis-model"
+    assert settings.openai_reasoning_effort == "low"
+    assert settings.weekly_meals_llm_model == "group-model"
+    assert settings.weekly_meals_llm_reasoning_effort == "high"
+    assert settings.weekly_meals_llm_pricing == ModelPricing(
+        Decimal("1.25"), Decimal("0"), Decimal("8")
+    )
+
+
+def test_weekly_meal_pricing_is_complete_without_cached_rate(
+    monkeypatch, tmp_path
+) -> None:
+    set_valid_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_INPUT_COST_PER_1M", "0.20")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_OUTPUT_COST_PER_1M", "1.20")
+
+    settings = Settings.from_env()
+
+    assert settings.weekly_meals_llm_pricing == ModelPricing(
+        Decimal("0.20"), None, Decimal("1.20")
+    )
+    assert settings.weekly_meals_llm_pricing.complete is True
 
 
 def test_missing_required_value_is_reported(monkeypatch, tmp_path) -> None:
@@ -120,6 +170,11 @@ def test_missing_required_value_is_reported(monkeypatch, tmp_path) -> None:
     [
         ("ADMIN_TELEGRAM_USER_ID", "user", "ADMIN_TELEGRAM_USER_ID"),
         ("OPENAI_REASONING_EFFORT", "extreme", "OPENAI_REASONING_EFFORT"),
+        (
+            "WEEKLY_MEALS_LLM_REASONING_EFFORT",
+            "extreme",
+            "WEEKLY_MEALS_LLM_REASONING_EFFORT",
+        ),
         ("OPENAI_TIMEOUT_SECONDS", "never", "OPENAI_TIMEOUT_SECONDS"),
         ("OPENAI_TIMEOUT_SECONDS", "0", "OPENAI_TIMEOUT_SECONDS"),
         ("OPENAI_TIMEOUT_SECONDS", "601", "OPENAI_TIMEOUT_SECONDS"),

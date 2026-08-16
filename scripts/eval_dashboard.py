@@ -347,6 +347,19 @@ def _render_checks(checks: object) -> str:
 def _render_actual(actual: object) -> str:
     if not isinstance(actual, dict):
         return "<p class='muted'>Actual analysis was not recorded.</p>"
+    assignments = actual.get("assignments")
+    if isinstance(assignments, list):
+        rows = "".join(
+            "<tr>"
+            f"<td>{_escape(item.get('source_id'))}</td>"
+            f"<td>{_escape(item.get('group_name', ''))}</td></tr>"
+            for item in assignments
+            if isinstance(item, dict)
+        )
+        return (
+            "<table><thead><tr><th>Source ID</th><th>Group</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
     items = actual.get("items", [])
     rows: list[str] = []
     if isinstance(items, list):
@@ -383,10 +396,14 @@ def _render_result(result: dict[str, Any], case: dict[str, Any] | None) -> str:
     passed = result.get("passed") is True
     case_id = str(result.get("case_id", "Unknown"))
     repeat_index = result.get("repeat_index", 0)
-    text = case.get("text", "") if case else ""
+    text: object = case.get("text", case.get("names", "")) if case else ""
     expected = case.get("expected") if case else None
     normalized = result.get("normalized_input")
-    normalized_text = normalized.get("text") if isinstance(normalized, dict) else None
+    normalized_text = (
+        normalized.get("text", normalized.get("names"))
+        if isinstance(normalized, dict)
+        else None
+    )
     image = ""
     if case and case.get("image"):
         image_query = urlencode({"path": str(case["image"])})
@@ -416,7 +433,7 @@ def _render_result(result: dict[str, Any], case: dict[str, Any] | None) -> str:
         f"<h4>Original input</h4><pre>{_escape(text) if case else 'Not recorded'}</pre>{image}"
         f"<h4>Normalized text</h4><pre>{_escape(normalized_text) if normalized_text is not None else 'Not recorded'}</pre>"
         f"<details><summary>Expected snapshot</summary><pre>{_json(expected) if expected is not None else 'Not recorded'}</pre></details>"
-        f"<h4>Actual FoodAnalysis</h4>{_render_actual(result.get('actual'))}"
+        f"<h4>Actual structured output</h4>{_render_actual(result.get('actual'))}"
         f"<h4>Checks</h4>{_render_checks(result.get('checks'))}</article>"
     )
 

@@ -54,6 +54,68 @@ def validate_case(case: object) -> dict[str, Any]:
     expected = case.get("expected")
     if not isinstance(expected, dict):
         raise DatasetValidationError(f"case {case_id}: expected must be an object")
+    if "names" in case:
+        names = case["names"]
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(isinstance(name, str) and name.strip() for name in names)
+        ):
+            raise DatasetValidationError(
+                f"case {case_id}: names must be a non-empty list of strings"
+            )
+        expectations = expected.get("group_expectations", [])
+        if not isinstance(expectations, list):
+            raise DatasetValidationError(
+                f"case {case_id}: expected.group_expectations must be a list"
+            )
+        for group in expectations:
+            if not isinstance(group, dict):
+                raise DatasetValidationError(
+                    f"case {case_id}: every group expectation must be an object"
+                )
+            members = group.get("members")
+            if (
+                not isinstance(members, list)
+                or not members
+                or not all(
+                    isinstance(index, int)
+                    and not isinstance(index, bool)
+                    and 0 <= index < len(names)
+                    for index in members
+                )
+            ):
+                raise DatasetValidationError(
+                    f"case {case_id}: group members must be valid source indexes"
+                )
+            terms = group.get("label_terms", [])
+            if not isinstance(terms, list) or not all(
+                isinstance(term, str) and term for term in terms
+            ):
+                raise DatasetValidationError(
+                    f"case {case_id}: label_terms must be strings"
+                )
+        differences = expected.get("different_groups", [])
+        if not isinstance(differences, list) or not all(
+            isinstance(pair, list)
+            and len(pair) == 2
+            and all(
+                isinstance(index, int)
+                and not isinstance(index, bool)
+                and 0 <= index < len(names)
+                for index in pair
+            )
+            for pair in differences
+        ):
+            raise DatasetValidationError(
+                f"case {case_id}: different_groups must contain valid index pairs"
+            )
+        maximum = expected.get("max_group_count", 20)
+        if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+            raise DatasetValidationError(
+                f"case {case_id}: max_group_count must be a positive integer"
+            )
+        return case
     if not isinstance(expected.get("is_food"), bool):
         raise DatasetValidationError(
             f"case {case_id}: expected.is_food must be a boolean"

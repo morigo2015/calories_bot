@@ -418,6 +418,18 @@ def test_llm_cost_is_blank_for_incomplete_pricing() -> None:
     assert calculate_llm_cost(1000, 0, 200, pricing) is None
 
 
+def test_llm_cost_does_not_require_cached_price_without_cached_tokens() -> None:
+    pricing = ModelPricing(Decimal("2"), None, Decimal("8"))
+
+    assert calculate_llm_cost(1000, 0, 200, pricing) == Decimal("0.0036")
+
+
+def test_llm_cost_uses_input_price_for_cached_tokens_without_cached_rate() -> None:
+    pricing = ModelPricing(Decimal("2"), None, Decimal("8"))
+
+    assert calculate_llm_cost(1000, 400, 200, pricing) == Decimal("0.0036")
+
+
 def test_llm_cost_rejects_impossible_usage() -> None:
     pricing = ModelPricing(Decimal("2"), Decimal("0.5"), Decimal("8"))
     with pytest.raises(AnalysisError):

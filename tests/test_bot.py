@@ -32,6 +32,7 @@ from calories_bot.bot import (
     load_help_text,
     load_start_text,
 )
+from calories_bot.meal_grouping import MealGroupingError, MealGroupingResult
 from calories_bot.models import (
     FoodAnalysis,
     FoodItem,
@@ -723,6 +724,59 @@ def test_weekly_meals_aggregates_names_weights_and_sorts_by_calories() -> None:
 
 def test_weekly_meals_handles_no_records() -> None:
     assert format_weekly_meals_reply([]) == "Страви за тиждень\n\nЗаписів немає."
+
+
+def test_weekly_meals_never_exceeds_twenty_rows() -> None:
+    meals = [PeriodMeal(f"Страва {index}", 100, 1_000 - index) for index in range(25)]
+
+    reply = format_weekly_meals_reply(meals)
+
+    rows = [line for line in reply.splitlines() if line.startswith("• ")]
+    assert len(rows) == 20
+    assert rows[-1].startswith("• Інше (6 категорій)")
+
+
+def test_weekly_meals_semantically_groups_names_and_sums_locally(tmp_path) -> None:
+    class Grouper:
+        names = None
+
+        def group(self, names):
+            self.names = names
+            return MealGroupingResult(("Вино", "Вино", "Кава", "Кава"), METADATA)
+
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.period_meals = [
+        PeriodMeal("Сухе вино", 200, 160),
+        PeriodMeal("Sauvignon Blanc", 100, 80),
+        PeriodMeal("Кава", 300, 4),
+        PeriodMeal("Кава чорна", 200, 2),
+    ]
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+    grouper = Grouper()
+
+    reply = service.get_weekly_meals(datetime(2026, 8, 2, tzinfo=UTC), grouper)
+
+    assert set(grouper.names) == {
+        "Сухе вино",
+        "Sauvignon Blanc",
+        "Кава",
+        "Кава чорна",
+    }
+    assert reply == ("Страви за тиждень\n\n• Вино 300 г — 240 кк\n• Кава 500 г — 6 кк")
+
+
+def test_weekly_meals_falls_back_when_llm_grouping_fails(tmp_path) -> None:
+    class Grouper:
+        def group(self, names):
+            raise MealGroupingError("controlled")
+
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.period_meals = [PeriodMeal("Сухе вино", 200, 160)]
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    reply = service.get_weekly_meals(datetime(2026, 8, 2, tzinfo=UTC), Grouper())
+
+    assert reply.endswith("• Сухе вино 200 г — 160 кк")
 
 
 def test_user_list_contains_status_ids_and_pending_invites() -> None:

@@ -128,11 +128,8 @@ class ModelPricing:
 
     @property
     def complete(self) -> bool:
-        return (
-            self.input_per_1m is not None
-            and self.cached_input_per_1m is not None
-            and self.output_per_1m is not None
-        )
+        """Whether ordinary input and output token prices are configured."""
+        return self.input_per_1m is not None and self.output_per_1m is not None
 
 
 @dataclass(frozen=True)
@@ -546,13 +543,56 @@ def calculate_llm_cost(
         raise AnalysisError("Cached input token count exceeds total input tokens")
     uncached_input = input_tokens - cached_input_tokens
     assert pricing.input_per_1m is not None
-    assert pricing.cached_input_per_1m is not None
     assert pricing.output_per_1m is not None
+    cached_input_price = pricing.cached_input_per_1m or pricing.input_per_1m
     return (
         Decimal(uncached_input) * pricing.input_per_1m
-        + Decimal(cached_input_tokens) * pricing.cached_input_per_1m
+        + Decimal(cached_input_tokens) * cached_input_price
         + Decimal(output_tokens) * pricing.output_per_1m
     ) / Decimal(1_000_000)
+
+
+def metadata_from_usage(
+    usage: Any | None,
+    model: str,
+    effort: str,
+    pricing: ModelPricing,
+    usage_recorder: UsageRecorder | None = None,
+) -> LLMMetadata:
+    """Convert OpenAI usage and persist it in the common bot statistics."""
+    if usage is None:
+        LOGGER.warning("OpenAI returned no token usage")
+        return LLMMetadata(model=model, effort=effort)
+    input_tokens = int(usage.input_tokens)
+    output_tokens = int(usage.output_tokens)
+    details = getattr(usage, "input_tokens_details", None)
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
+    estimated_cost = calculate_llm_cost(
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        pricing,
+    )
+    if usage_recorder is not None:
+        try:
+            usage_recorder.record_llm_usage(
+                datetime.now(UTC),
+                model,
+                input_tokens,
+                cached_tokens,
+                output_tokens,
+                estimated_cost,
+            )
+        except Exception:
+            LOGGER.exception("Could not persist OpenAI token usage")
+    return LLMMetadata(
+        model=model,
+        effort=effort,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+        llm_cost_usd=estimated_cost,
+    )
 
 
 class OpenAIAnalyzer:
@@ -572,39 +612,12 @@ class OpenAIAnalyzer:
         self._usage_recorder = usage_recorder
 
     def _metadata_from_usage(self, usage: Any | None) -> LLMMetadata:
-        if usage is None:
-            LOGGER.warning("OpenAI returned no token usage")
-            return LLMMetadata(model=self._model, effort=self._effort)
-        input_tokens = int(usage.input_tokens)
-        output_tokens = int(usage.output_tokens)
-        details = getattr(usage, "input_tokens_details", None)
-        cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
-        estimated_cost = calculate_llm_cost(
-            input_tokens,
-            cached_tokens,
-            output_tokens,
+        return metadata_from_usage(
+            usage,
+            self._model,
+            self._effort,
             self._pricing,
-        )
-        recorder = getattr(self, "_usage_recorder", None)
-        if recorder is not None:
-            try:
-                recorder.record_llm_usage(
-                    datetime.now(UTC),
-                    self._model,
-                    input_tokens,
-                    cached_tokens,
-                    output_tokens,
-                    estimated_cost,
-                )
-            except Exception:
-                LOGGER.exception("Could not persist OpenAI token usage")
-        return LLMMetadata(
-            model=self._model,
-            effort=self._effort,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=cached_tokens,
-            llm_cost_usd=estimated_cost,
+            getattr(self, "_usage_recorder", None),
         )
 
     def analyze(

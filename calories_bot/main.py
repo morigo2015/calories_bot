@@ -23,6 +23,7 @@ from .analyzer import OpenAIAnalyzer, OpenAITranscriber
 from .bot import TelegramHandlers, UserManager
 from .config import Settings
 from .garmin import GarminCalorieStore
+from .meal_grouping import OpenAIMealGrouper
 from .users import GoogleUserRegistry
 from .workspace import GoogleWorkspace
 
@@ -105,7 +106,13 @@ def main() -> None:
     settings = Settings.from_env()
     if not settings.openai_pricing.complete:
         logging.getLogger(__name__).warning(
-            "OpenAI token pricing is incomplete; llm_cost_usd will be blank"
+            "OpenAI input/output token pricing is incomplete; "
+            "llm_cost_usd will be blank"
+        )
+    if not settings.weekly_meals_llm_pricing.complete:
+        logging.getLogger(__name__).warning(
+            "Weekly-meal LLM input/output token pricing is incomplete; "
+            "its llm_cost_usd will be blank"
         )
     statistics = BotStatistics(
         AnalyticsStore(settings.statistics_db_path),
@@ -127,6 +134,14 @@ def main() -> None:
     transcriber = OpenAITranscriber(
         settings.openai_api_key,
         settings.openai_timeout_seconds,
+    )
+    meal_grouper = OpenAIMealGrouper(
+        settings.openai_api_key,
+        settings.weekly_meals_llm_model,
+        settings.weekly_meals_llm_reasoning_effort,
+        settings.openai_timeout_seconds,
+        settings.weekly_meals_llm_pricing,
+        statistics,
     )
     google_client = gspread.service_account(
         filename=str(settings.google_service_account_file)
@@ -165,6 +180,7 @@ def main() -> None:
         statistics,
         garmin_calories,
         transcriber,
+        meal_grouper,
     )
 
     application = (

@@ -24,6 +24,11 @@ from calories_bot.analyzer import (
     OpenAIAnalyzer,
     normalize_input,
 )
+from calories_bot.meal_grouping import (
+    MEAL_GROUPING_SYSTEM_PROMPT,
+    MealGroupingError,
+    OpenAIMealGrouper,
+)
 from calories_bot.models import FoodAnalysis, LLMMetadata, calculate_meal
 from scripts.eval_storage import (
     DatasetValidationError,
@@ -34,6 +39,7 @@ from scripts.eval_storage import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "evals" / "cases.jsonl"
+DEFAULT_GROUPING_CASES = ROOT / "evals" / "weekly_meal_grouping.jsonl"
 DEFAULT_REPORTS = ROOT / "eval-results" / "runs"
 ALLOWED_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
@@ -80,6 +86,24 @@ def pricing_from_env() -> ModelPricing:
         input_per_1m=_optional_decimal("OPENAI_INPUT_COST_PER_1M"),
         cached_input_per_1m=_optional_decimal("OPENAI_CACHED_INPUT_COST_PER_1M"),
         output_per_1m=_optional_decimal("OPENAI_OUTPUT_COST_PER_1M"),
+    )
+
+
+def grouping_pricing_from_env() -> ModelPricing:
+    primary = pricing_from_env()
+
+    def value(name: str, fallback: Decimal | None) -> Decimal | None:
+        return _optional_decimal(name) if os.getenv(name, "").strip() else fallback
+
+    return ModelPricing(
+        input_per_1m=value("WEEKLY_MEALS_LLM_INPUT_COST_PER_1M", primary.input_per_1m),
+        cached_input_per_1m=value(
+            "WEEKLY_MEALS_LLM_CACHED_INPUT_COST_PER_1M",
+            None,
+        ),
+        output_per_1m=value(
+            "WEEKLY_MEALS_LLM_OUTPUT_COST_PER_1M", primary.output_per_1m
+        ),
     )
 
 
@@ -371,6 +395,51 @@ def grade_analysis(
     return checks
 
 
+def grade_grouping(
+    group_names: tuple[str, ...], expected: dict[str, Any]
+) -> list[CheckResult]:
+    checks: list[CheckResult] = []
+    folded = tuple(name.casefold() for name in group_names)
+    for index, group in enumerate(expected.get("group_expectations", []), start=1):
+        members = list(group["members"])
+        member_names = [folded[source_id] for source_id in members]
+        _check(
+            checks,
+            f"group_{index}_members",
+            len(set(member_names)) == 1,
+            member_names,
+            "same group",
+        )
+        label_terms = [str(term).casefold() for term in group.get("label_terms", [])]
+        if label_terms:
+            label = member_names[0]
+            _check(
+                checks,
+                f"group_{index}_label",
+                any(term in label for term in label_terms),
+                label,
+                label_terms,
+            )
+    for index, pair in enumerate(expected.get("different_groups", []), start=1):
+        left, right = pair
+        _check(
+            checks,
+            f"different_{index}",
+            folded[left] != folded[right],
+            (folded[left], folded[right]),
+            "different groups",
+        )
+    maximum = int(expected.get("max_group_count", 20))
+    _check(
+        checks,
+        "max_group_count",
+        len(set(folded)) <= maximum,
+        len(set(folded)),
+        maximum,
+    )
+    return checks
+
+
 def check_explicit_sources(analysis: FoodAnalysis, text: str) -> list[CheckResult]:
     normalized = normalize_input(text)
     checks: list[CheckResult] = []
@@ -475,6 +544,55 @@ def run_case(
         )
 
 
+def run_grouping_case(
+    grouper: OpenAIMealGrouper,
+    case: dict[str, Any],
+    repeat_index: int = 0,
+) -> CaseResult:
+    case_id = str(case["id"])
+    names = tuple(str(name) for name in case["names"])
+    started = time.perf_counter()
+    try:
+        result = grouper.group(names)
+        checks = grade_grouping(result.group_names, case["expected"])
+        input_tokens, output_tokens, cost = _metadata_values(result.metadata)
+        passed = all(check.passed for check in checks)
+        return CaseResult(
+            case_id=case_id,
+            repeat_index=repeat_index,
+            passed=passed,
+            hard_failure=False,
+            latency_seconds=time.perf_counter() - started,
+            checks=checks,
+            normalized_input={"names": list(names)},
+            actual={
+                "assignments": [
+                    {"source_id": index, "group_name": name}
+                    for index, name in enumerate(result.group_names)
+                ]
+            },
+            error=None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+        )
+    except MealGroupingError as exc:
+        return CaseResult(
+            case_id=case_id,
+            repeat_index=repeat_index,
+            passed=False,
+            hard_failure=True,
+            latency_seconds=time.perf_counter() - started,
+            checks=[],
+            normalized_input={"names": list(names)},
+            actual=None,
+            error={"type": type(exc).__name__, "message": str(exc)},
+            input_tokens=None,
+            output_tokens=None,
+            cost_usd=None,
+        )
+
+
 def parse_config(raw: str) -> tuple[str, str]:
     if ":" not in raw:
         raise argparse.ArgumentTypeError("use MODEL:EFFORT")
@@ -500,7 +618,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the stable, paid LLM eval suite for calories-bot"
     )
-    parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
+    parser.add_argument(
+        "--task",
+        choices=("analysis", "weekly-meals"),
+        default="analysis",
+        help="LLM task to evaluate",
+    )
+    parser.add_argument("--cases", type=Path)
     parser.add_argument("--case", action="append", default=[], dest="case_ids")
     parser.add_argument(
         "--config",
@@ -529,14 +653,20 @@ def main() -> int:
         raise SystemExit("--name must not be empty")
 
     load_dotenv(os.getenv("CALORIES_BOT_ENV_FILE") or None)
-    cases_path = args.cases.resolve()
+    default_cases = DEFAULT_CASES if args.task == "analysis" else DEFAULT_GROUPING_CASES
+    cases_path = (args.cases or default_cases).resolve()
     cases = load_cases(cases_path, set(args.case_ids))
-    configs = args.config or [
-        (
-            os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
-            os.getenv("OPENAI_REASONING_EFFORT", "none"),
+    if args.task == "weekly-meals":
+        default_model = os.getenv("WEEKLY_MEALS_LLM_MODEL", "").strip() or os.getenv(
+            "OPENAI_MODEL", "gpt-5.6-luna"
         )
-    ]
+        default_effort = os.getenv(
+            "WEEKLY_MEALS_LLM_REASONING_EFFORT", ""
+        ).strip() or os.getenv("OPENAI_REASONING_EFFORT", "none")
+    else:
+        default_model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+        default_effort = os.getenv("OPENAI_REASONING_EFFORT", "none")
+    configs = args.config or [(default_model, default_effort)]
     requests = len(cases) * len(configs) * args.repeat
     print(
         f"Plan: {len(cases)} cases × {len(configs)} configs × "
@@ -556,8 +686,12 @@ def main() -> int:
     except OSError as exc:
         raise SystemExit(f"Cannot read eval dataset: {cases_path}") from exc
     dataset_snapshot = build_dataset_snapshot(cases, cases_path)
-    configured_model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-    configured_pricing = pricing_from_env()
+    configured_model = default_model
+    configured_pricing = (
+        grouping_pricing_from_env()
+        if args.task == "weekly-meals"
+        else pricing_from_env()
+    )
     timeout_seconds = timeout_from_env()
     unknown_pricing = ModelPricing(None, None, None)
     report_configurations: list[dict[str, Any]] = []
@@ -566,11 +700,22 @@ def main() -> int:
     for model, effort in configs:
         print(f"\n{model}:{effort}")
         pricing = configured_pricing if model == configured_model else unknown_pricing
-        analyzer = OpenAIAnalyzer(api_key, model, effort, timeout_seconds, pricing)
+        runner: OpenAIAnalyzer | OpenAIMealGrouper
+        if args.task == "weekly-meals":
+            runner = OpenAIMealGrouper(api_key, model, effort, timeout_seconds, pricing)
+        else:
+            runner = OpenAIAnalyzer(api_key, model, effort, timeout_seconds, pricing)
         results: list[CaseResult] = []
         for repeat_index in range(args.repeat):
             for case in cases:
-                result = run_case(analyzer, case, cases_path, repeat_index=repeat_index)
+                if args.task == "weekly-meals":
+                    assert isinstance(runner, OpenAIMealGrouper)
+                    result = run_grouping_case(runner, case, repeat_index=repeat_index)
+                else:
+                    assert isinstance(runner, OpenAIAnalyzer)
+                    result = run_case(
+                        runner, case, cases_path, repeat_index=repeat_index
+                    )
                 results.append(result)
                 _print_case(result)
 
@@ -611,12 +756,19 @@ def main() -> int:
 
     report = {
         "schema_version": 2,
+        "task": args.task,
         "run_id": run_id,
         "name": run_name,
         "started_at": started_at,
         "finished_at": _iso_utc(_utc_now()),
         "git": _git_metadata(),
-        "prompt_sha256": _sha256(SYSTEM_PROMPT.encode("utf-8")),
+        "prompt_sha256": _sha256(
+            (
+                MEAL_GROUPING_SYSTEM_PROMPT
+                if args.task == "weekly-meals"
+                else SYSTEM_PROMPT
+            ).encode("utf-8")
+        ),
         "dataset_sha256": _sha256(dataset_bytes),
         "cases_path": _project_path(cases_path),
         "minimum_pass_rate": args.min_pass_rate,

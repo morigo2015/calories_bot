@@ -42,6 +42,14 @@ bash scripts/run_tests.sh --llm --confirm \
 Персональні фото користувачів сюди не додаються. Успішний запуск — не менше 90%
 пройдених кейсів і жодної помилки API, structured output або source ID.
 
+Окремий набір `evals/weekly_meal_grouping.jsonl` перевіряє групування для
+`/weekly_meals`: варіанти брендів, кольорів і форм слова, складені назви,
+небезпечні «хибні друзі» на кшталт `кава`/`кавовий торт`, а також довгий
+реалістичний список із лімітом у 20 категорій. Модель повертає типізовану
+відповідність `source_id → group_name` через
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
+а grader перевіряє потрібні об’єднання, розділення, назви категорій і ліміт.
+
 ## Вибір model / effort
 
 Спочатку запускається чинна конфігурація. Якщо є невдалі кейси, порівнюються
@@ -69,6 +77,23 @@ python -m scripts.eval_llm --confirm --repeat 3 \
 відповідає рекомендаціям OpenAI: task-specific кейси, автоматичний запуск,
 чіткі критерії та постійне поповнення регресійного набору
 ([Evaluation best practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices)).
+
+Для незалежного вибору конфігурації групування використовується task
+`weekly-meals`:
+
+```bash
+python -m scripts.eval_llm --task weekly-meals --confirm \
+  --config gpt-5.6-luna:none \
+  --config gpt-5.6-luna:low \
+  --config gpt-5.6-terra:none \
+  --name "Порівняння weekly meals"
+```
+
+Без `--config` runner бере `WEEKLY_MEALS_LLM_MODEL` та
+`WEEKLY_MEALS_LLM_REASONING_EFFORT`, а за їх відсутності — звичайні
+`OPENAI_MODEL` та `OPENAI_REASONING_EFFORT`. Для стабільності дві найкращі
+конфігурації слід прогнати з `--repeat 3`. Це окремі платні запити; звичайний
+`bash scripts/run_tests.sh` їх не виконує.
 
 ## Локальний dashboard
 

@@ -31,6 +31,9 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         openai_reasoning_effort="none",
         openai_timeout_seconds=90,
         openai_pricing=ModelPricing(None, None, None),
+        weekly_meals_llm_model="group-model",
+        weekly_meals_llm_reasoning_effort="medium",
+        weekly_meals_llm_pricing=ModelPricing(None, None, None),
         google_service_account_file="credentials.json",
         users_spreadsheet_id="users-sheet",
         users_sheet_name="users",
@@ -56,6 +59,13 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         main_module,
         "OpenAITranscriber",
         lambda *args: created.setdefault("transcriber", SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "OpenAIMealGrouper",
+        lambda *args: created.setdefault(
+            "meal_grouper", SimpleNamespace(init_args=args)
+        ),
     )
     monkeypatch.setattr(
         main_module.gspread,
@@ -162,6 +172,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
     assert created["post_init"].keywords["garmin_calories"] is created["garmin"]
+    assert created["meal_grouper"].init_args[1:3] == ("group-model", "medium")
     assert created["post_init"].keywords["garmin_refresh_time"] == time(
         1, tzinfo=ZoneInfo("Europe/Kyiv")
     )

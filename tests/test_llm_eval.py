@@ -9,12 +9,14 @@ from pathlib import Path
 import pytest
 
 from calories_bot.analyzer import AnalysisError, AnalysisResult
+from calories_bot.meal_grouping import MealGroupingResult
 from calories_bot.models import FoodAnalysis, FoodItem, LLMMetadata
 from scripts import eval_llm
 from scripts.eval_llm import (
     build_dataset_snapshot,
     create_run_identity,
     grade_analysis,
+    grade_grouping,
     load_cases,
     parse_config,
     serialize_analysis,
@@ -65,6 +67,20 @@ def test_grade_analysis_reports_failed_invariant() -> None:
     )
 
     assert any(check.name == "required_term" and not check.passed for check in checks)
+
+
+def test_grade_grouping_checks_merges_labels_distinctions_and_limit() -> None:
+    checks = grade_grouping(
+        ("Вино", "Вино", "Кава", "Кавовий десерт"),
+        {
+            "group_expectations": [{"members": [0, 1], "label_terms": ["вино"]}],
+            "different_groups": [[2, 3]],
+            "max_group_count": 4,
+        },
+    )
+
+    assert checks
+    assert all(check.passed for check in checks)
 
 
 def test_grade_analysis_checks_named_composite_components_and_total_weight() -> None:
@@ -230,6 +246,21 @@ class _CapturingAnalyzer(_PassingAnalyzer):
         type(self).init_args = args
 
 
+class _PassingGrouper:
+    init_args: tuple[object, ...] = ()
+
+    def __init__(self, *args: object) -> None:
+        type(self).init_args = args
+
+    def group(self, names: tuple[str, ...]) -> MealGroupingResult:
+        return MealGroupingResult(
+            tuple("Вино" if "вино" in name.casefold() else "Кава" for name in names),
+            LLMMetadata(
+                model="group-model", effort="medium", input_tokens=3, output_tokens=2
+            ),
+        )
+
+
 def _run_main(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -329,3 +360,49 @@ def test_unconfirmed_eval_does_not_write_history(
 
     assert eval_llm.main() == 2
     assert not reports.exists()
+
+
+def test_weekly_meal_eval_uses_separate_dataset_config_and_report_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cases_path = tmp_path / "weekly.jsonl"
+    cases_path.write_text(
+        '{"id":"drinks","names":["Сухе вино","Червоне вино","Кава"],'
+        '"expected":{"group_expectations":[{"members":[0,1],'
+        '"label_terms":["вино"]}],"different_groups":[[0,2]],'
+        '"max_group_count":2}}\n',
+        encoding="utf-8",
+    )
+    reports = tmp_path / "runs"
+    monkeypatch.setattr(eval_llm, "DEFAULT_REPORTS", reports)
+    monkeypatch.setattr(eval_llm, "OpenAIMealGrouper", _PassingGrouper)
+    monkeypatch.setattr(eval_llm, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_MODEL", "group-model")
+    monkeypatch.setenv("WEEKLY_MEALS_LLM_REASONING_EFFORT", "medium")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_llm",
+            "--task",
+            "weekly-meals",
+            "--cases",
+            str(cases_path),
+            "--confirm",
+        ],
+    )
+
+    assert eval_llm.main() == 0
+
+    report = json.loads(next(reports.glob("*.json")).read_text(encoding="utf-8"))
+    assert report["task"] == "weekly-meals"
+    assert report["configurations"][0]["model"] == "group-model"
+    assert report["configurations"][0]["effort"] == "medium"
+    assert report["configurations"][0]["results"][0]["actual"] == {
+        "assignments": [
+            {"source_id": 0, "group_name": "Вино"},
+            {"source_id": 1, "group_name": "Вино"},
+            {"source_id": 2, "group_name": "Кава"},
+        ]
+    }

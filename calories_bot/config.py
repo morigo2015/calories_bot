@@ -31,6 +31,9 @@ class Settings:
     openai_reasoning_effort: str
     openai_timeout_seconds: float
     openai_pricing: ModelPricing
+    weekly_meals_llm_model: str
+    weekly_meals_llm_reasoning_effort: str
+    weekly_meals_llm_pricing: ModelPricing
     google_service_account_file: Path
     users_spreadsheet_id: str
     users_sheet_name: str
@@ -68,13 +71,17 @@ class Settings:
         except ValueError as exc:
             raise ConfigError("ADMIN_TELEGRAM_USER_ID must be an integer") from exc
 
-        effort = os.getenv("OPENAI_REASONING_EFFORT", "low") or "low"
         allowed_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-        if effort not in allowed_efforts:
-            raise ConfigError(
-                "OPENAI_REASONING_EFFORT must be one of: "
-                + ", ".join(sorted(allowed_efforts))
-            )
+
+        def reasoning_effort(name: str, default: str) -> str:
+            value = os.getenv(name, default) or default
+            if value not in allowed_efforts:
+                raise ConfigError(
+                    f"{name} must be one of: " + ", ".join(sorted(allowed_efforts))
+                )
+            return value
+
+        effort = reasoning_effort("OPENAI_REASONING_EFFORT", "low")
 
         timeout_raw = os.getenv("OPENAI_TIMEOUT_SECONDS", "90") or "90"
         try:
@@ -102,6 +109,31 @@ class Settings:
             input_per_1m=optional_price("OPENAI_INPUT_COST_PER_1M"),
             cached_input_per_1m=optional_price("OPENAI_CACHED_INPUT_COST_PER_1M"),
             output_per_1m=optional_price("OPENAI_OUTPUT_COST_PER_1M"),
+        )
+
+        def grouping_price(name: str, fallback: Decimal | None) -> Decimal | None:
+            if os.getenv(name, "").strip():
+                return optional_price(name)
+            return fallback
+
+        weekly_pricing = ModelPricing(
+            input_per_1m=grouping_price(
+                "WEEKLY_MEALS_LLM_INPUT_COST_PER_1M", pricing.input_per_1m
+            ),
+            cached_input_per_1m=grouping_price(
+                "WEEKLY_MEALS_LLM_CACHED_INPUT_COST_PER_1M",
+                None,
+            ),
+            output_per_1m=grouping_price(
+                "WEEKLY_MEALS_LLM_OUTPUT_COST_PER_1M", pricing.output_per_1m
+            ),
+        )
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+        weekly_meals_model = (
+            os.getenv("WEEKLY_MEALS_LLM_MODEL", "").strip() or openai_model
+        )
+        weekly_meals_effort = reasoning_effort(
+            "WEEKLY_MEALS_LLM_REASONING_EFFORT", effort
         )
 
         timezone_name = os.getenv("APP_TIMEZONE", "Europe/Kyiv")
@@ -152,10 +184,13 @@ class Settings:
             openai_api_key=required["OPENAI_API_KEY"] or "",
             openai_admin_api_key=os.getenv("OPENAI_ADMIN_API_KEY", "").strip(),
             openai_project_id=os.getenv("OPENAI_PROJECT_ID", "").strip(),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
+            openai_model=openai_model,
             openai_reasoning_effort=effort,
             openai_timeout_seconds=openai_timeout_seconds,
             openai_pricing=pricing,
+            weekly_meals_llm_model=weekly_meals_model,
+            weekly_meals_llm_reasoning_effort=weekly_meals_effort,
+            weekly_meals_llm_pricing=weekly_pricing,
             google_service_account_file=credentials_path,
             users_spreadsheet_id=required["USERS_SPREADSHEET_ID"] or "",
             users_sheet_name=os.getenv("USERS_SHEET_NAME", "users"),

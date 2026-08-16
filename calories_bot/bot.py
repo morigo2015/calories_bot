@@ -29,6 +29,7 @@ from .analyzer import (
     TranscriptionError,
     normalize_input,
 )
+from .meal_grouping import MAX_WEEKLY_MEAL_GROUPS, MealGrouper, MealGroupingError
 from .models import (
     MAX_SAVED_MEAL_NAME_LENGTH,
     MAX_WEIGHT_G,
@@ -339,13 +340,21 @@ def format_weekly_calories_reply(
     return "\n".join(lines)
 
 
-def format_weekly_meals_reply(meals: list[PeriodMeal]) -> str:
+def _aggregate_weekly_meals(
+    meals: list[PeriodMeal],
+    group_names: tuple[str, ...] | None = None,
+    *,
+    collapse_tail: bool = True,
+) -> list[tuple[str, float, float]]:
+    if group_names is not None and len(group_names) != len(meals):
+        raise ValueError("Meal group count does not match meal count")
     if not meals:
-        return "Страви за тиждень\n\nЗаписів немає."
+        return []
 
     grouped: dict[str, tuple[str, float, float]] = {}
-    for meal in meals:
-        display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
+    for index, meal in enumerate(meals):
+        source_name = group_names[index] if group_names is not None else meal.meal_name
+        display_name = re.sub(r"\s+", " ", source_name).strip()
         key = display_name.casefold()
         if key in grouped:
             original_name, weight, calories = grouped[key]
@@ -360,6 +369,27 @@ def format_weekly_meals_reply(meals: list[PeriodMeal]) -> str:
     aggregated = sorted(
         grouped.values(), key=lambda item: (-item[2], item[0].casefold())
     )
+    if collapse_tail and len(aggregated) > MAX_WEEKLY_MEAL_GROUPS:
+        head = aggregated[: MAX_WEEKLY_MEAL_GROUPS - 1]
+        tail = aggregated[MAX_WEEKLY_MEAL_GROUPS - 1 :]
+        head.append(
+            (
+                f"Інше ({len(tail)} категорій)",
+                sum(item[1] for item in tail),
+                sum(item[2] for item in tail),
+            )
+        )
+        aggregated = head
+    return aggregated
+
+
+def format_weekly_meals_reply(
+    meals: list[PeriodMeal], group_names: tuple[str, ...] | None = None
+) -> str:
+    if not meals:
+        return "Страви за тиждень\n\nЗаписів немає."
+
+    aggregated = _aggregate_weekly_meals(meals, group_names)
     lines = ["Страви за тиждень", ""]
     for meal_name, total_weight_g, meal_kcal in aggregated:
         display_name = meal_name[:1].upper() + meal_name[1:]
@@ -477,12 +507,23 @@ class CaloriesService:
         totals = self._store.get_daily_totals(start_day, end_day)
         return format_weekly_calories_reply(end_day, totals, burned_totals)
 
-    def get_weekly_meals(self, timestamp: datetime) -> str:
+    def get_weekly_meals(
+        self, timestamp: datetime, meal_grouper: MealGrouper | None = None
+    ) -> str:
         end_day = self._accounting_day(timestamp) - timedelta(days=1)
         start_day = end_day - timedelta(days=WEEK_DAYS - 1)
-        return format_weekly_meals_reply(
-            self._store.get_period_meals(start_day, end_day)
-        )
+        meals = self._store.get_period_meals(start_day, end_day)
+        if not meals or meal_grouper is None:
+            return format_weekly_meals_reply(meals)
+
+        exact = _aggregate_weekly_meals(meals, collapse_tail=False)
+        exact_meals = [PeriodMeal(name, weight, kcal) for name, weight, kcal in exact]
+        try:
+            grouping = meal_grouper.group(tuple(meal.meal_name for meal in exact_meals))
+            return format_weekly_meals_reply(exact_meals, grouping.group_names)
+        except MealGroupingError:
+            LOGGER.exception("Could not semantically group weekly meals")
+            return format_weekly_meals_reply(exact_meals)
 
     @staticmethod
     def _component_message_id(source_message_id: int, component_index: int) -> int:
@@ -1158,6 +1199,7 @@ class TelegramHandlers:
         statistics: BotStatistics | None = None,
         garmin_calories: GarminCalories | None = None,
         transcriber: Transcriber | None = None,
+        meal_grouper: MealGrouper | None = None,
     ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
@@ -1165,6 +1207,7 @@ class TelegramHandlers:
         self._statistics = statistics
         self._garmin_calories = garmin_calories
         self._transcriber = transcriber
+        self._meal_grouper = meal_grouper
 
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1476,7 +1519,9 @@ class TelegramHandlers:
         if service is None:
             return
         try:
-            reply = await asyncio.to_thread(service.get_weekly_meals, message.date)
+            reply = await asyncio.to_thread(
+                service.get_weekly_meals, message.date, self._meal_grouper
+            )
         except Exception:
             LOGGER.exception("Could not build /weekly_meals")
             reply = WEEK_ERROR_TEXT

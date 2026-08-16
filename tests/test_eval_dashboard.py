@@ -207,6 +207,26 @@ def test_add_case_appends(tmp_path: Path) -> None:
     )
 
 
+def test_grouping_dataset_case_is_validated(tmp_path: Path) -> None:
+    path = tmp_path / "grouping.jsonl"
+    path.write_text(
+        '{"id":"wine","names":["Сухе вино","Червоне вино"],'
+        '"expected":{"group_expectations":[{"members":[0,1],'
+        '"label_terms":["вино"]}],"max_group_count":1}}\n',
+        encoding="utf-8",
+    )
+
+    case, _ = prepare_dataset_case(
+        path,
+        "wine",
+        '{"id":"wine","names":["Вино","Wine"],'
+        '"expected":{"group_expectations":[{"members":[0,1],'
+        '"label_terms":["вино","wine"]}],"max_group_count":1}}',
+    )
+
+    assert case["names"] == ["Вино", "Wine"]
+
+
 def test_image_paths_are_restricted_to_images_directory(tmp_path: Path) -> None:
     evals = tmp_path / "evals"
     (evals / "images").mkdir(parents=True)
