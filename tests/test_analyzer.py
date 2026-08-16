@@ -212,7 +212,6 @@ def test_mixed_script_calorie_units(unit: str) -> None:
         "сир 50.5",
         "сир 50,5",
         "сир 0",
-        "сир 50 гр 0#",
         "",
     ],
 )
@@ -255,6 +254,110 @@ def test_explicit_sources_override_model_values_and_flags() -> None:
     assert enforced.items[1].kcal_estimated is False
     assert enforced.items[1].kcal_origin == "user_text"
     assert enforced.items[1].weight_estimated is True
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "сир 150 г К250 Б20 Ж10 В0",
+        "сир 150 г к:250 б_20 ж-10 B 0",
+        "сир 150 г k250 Б:20 Ж_10 в-0",
+    ],
+)
+def test_compact_kbjv_values_are_normalized_as_per_100g(source: str) -> None:
+    normalized = normalize_input(source)
+
+    assert normalized.text == (
+        "сир 150 гр 250 ккал/100г 20 г білків/100г 10 г жирів/100г 0 г вуглеводів/100г"
+    )
+    assert [
+        (value.kind, value.value, value.basis) for value in normalized.explicit_values
+    ] == [
+        ("weight", 150, None),
+        ("kcal", 250, "per_100g"),
+        ("protein", 20, "per_100g"),
+        ("fat", 10, "per_100g"),
+        ("carbs", 0, "per_100g"),
+    ]
+
+
+def test_natural_macros_support_per_100g_and_portion_basis() -> None:
+    per_100g = normalize_input("на 100 гр білки 20 г жири 10 г вуглеводи 0")
+    portion = normalize_input("у порції 250 г білки 20 г жири 10 г вуглеводи 0")
+
+    assert [value.basis for value in per_100g.explicit_values] == [
+        "per_100g",
+        "per_100g",
+        "per_100g",
+    ]
+    assert [value.basis for value in portion.explicit_values] == [
+        None,
+        "portion",
+        "portion",
+        "portion",
+    ]
+
+
+def test_explicit_kbjv_values_override_model_and_calculate_portion() -> None:
+    normalized = normalize_input("сир 150 г К250 Б20 Ж10 В0")
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="сир",
+        items=[
+            FoodItem(
+                name="сир",
+                weight_g=1,
+                weight_estimated=True,
+                kcal_per_100g=1,
+                kcal_estimated=True,
+                protein_per_100g=1,
+                fat_per_100g=1,
+                carbs_per_100g=1,
+                weight_source_id="W1",
+                kcal_source_id="K1",
+                protein_source_id="P1",
+                fat_source_id="F1",
+                carbs_source_id="C1",
+            )
+        ],
+    )
+
+    meal = calculate_meal(enforce_explicit_values(analysis, normalized.explicit_values))
+
+    assert meal.meal_kcal == 375
+    assert meal.protein_g == 30
+    assert meal.fat_g == 15
+    assert meal.carbs_g == 0
+
+
+def test_natural_portion_calories_are_converted_to_per_100g() -> None:
+    normalized = normalize_input("у порції 250 г 500 ккал")
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="продукт",
+        items=[
+            FoodItem(
+                name="продукт",
+                weight_g=1,
+                weight_estimated=True,
+                kcal_per_100g=1,
+                kcal_estimated=True,
+                weight_source_id="W1",
+                kcal_source_id="K1",
+            )
+        ],
+    )
+
+    meal = calculate_meal(enforce_explicit_values(analysis, normalized.explicit_values))
+
+    assert meal.meal_kcal == 500
+    assert meal.kcal_per_100g == 200
+    assert meal.items[0].kcal_source_basis == "portion"
+
+
+def test_zero_calories_remain_valid_for_compatibility_markers() -> None:
+    assert normalize_input("вода 250 г К0").explicit_values[-1].value == 0
+    assert normalize_input("вода 250 г 0#").explicit_values[-1].value == 0
 
 
 @pytest.mark.parametrize(

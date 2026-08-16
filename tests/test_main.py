@@ -224,7 +224,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("meals", "⭐ збережені страви"),
         ("recent", "🕘 нещодавні страви"),
         ("day", "📅 Сьогодні"),
-        ("weekly_calories", "📊 Калорії за тиждень"),
+        ("weekly_calories", "📊 КБЖВ за тиждень"),
         ("weekly_meals", "🍽 Страви за тиждень"),
         ("goal", "🎯 встановити денну ціль"),
         ("help", "❓ як користуватися ботом"),

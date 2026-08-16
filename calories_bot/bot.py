@@ -8,7 +8,7 @@ import re
 import secrets
 import shutil
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -39,11 +39,15 @@ from .models import (
     LLMMetadata,
     MealIconSuggestion,
     MealResult,
+    NutritionSummary,
     RecentMeal,
     SavedMeal,
     StoredMeal,
     calculate_meal,
     format_simple_meal_request,
+    item_calorie_total_estimated,
+    item_nutrient_total_estimated,
+    nutrition_summary,
     parse_simple_meal_request,
     round_whole,
     scale_meal,
@@ -59,6 +63,7 @@ from .sheets import (
     MealStore,
     PeriodMeal,
     SheetsReadError,
+    SheetState,
     SheetsWriteError,
     SheetsWriteUncertainError,
     accounting_date,
@@ -80,7 +85,7 @@ HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
 START_TEXT_FILE = Path(__file__).with_name("start.txt")
 TIPS_TEXT_FILE = Path(__file__).with_name("tips.txt")
 ADMIN_HELP_TEXT_FILE = Path(__file__).with_name("admin_help.txt")
-START_FALLBACK_TEXT = "Напиши, що ти з’їв, або надішли фото страви."
+START_FALLBACK_TEXT = "Напиши, що ти з’їв, — я порахую калорії та БЖВ."
 HELP_FALLBACK_TEXT = "Напиши, що ти з’їв, або надішли фото. Команда: /day"
 TIPS_FALLBACK_TEXT = "Використовуй цілі числа; до фото можна додати вагу."
 ADMIN_HELP_FALLBACK_TEXT = "Команди адміністратора тимчасово недоступні в довідці."
@@ -100,12 +105,12 @@ WRITE_ERROR_TEXT = (
 UNCERTAIN_WRITE_TEXT = (
     "Не вдалося підтвердити запис. Перевір /day перед повторним надсиланням."
 )
-ANALYSIS_ERROR_TEXT = "Не вдалося порахувати калорії. Спробуй ще раз."
+ANALYSIS_ERROR_TEXT = "Не вдалося порахувати КБЖВ. Спробуй ще раз."
 GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Спробуй ще раз."
 WEEK_ERROR_TEXT = "Не вдалося сформувати підсумок за 7 днів. Спробуй ще раз."
 VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
-LONG_OPERATION_TEXT = "Хвилинку, думаю"
-LLM_OPERATION_TEXT = "Хвилинку, раджусь з ChatGPT"
+LONG_OPERATION_TEXT = "⏳ Хвилинку, думаю. . ."
+LLM_OPERATION_TEXT = "⏳ Хвилинку, раджусь з AI. . ."
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
@@ -125,6 +130,7 @@ GARMIN_READ_ERROR_TEXT = (
     "Перевір журнал оновлення або спробуй після наступного оновлення доби."
 )
 WEEK_DAYS = 7
+SUMMARY_EXPLANATION = "КБЖВ — у підсумку, біля страв — лише калорії."
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
 
@@ -213,6 +219,50 @@ def _highlight_calories(value: str) -> str:
     return f"<b><u>{value}</u></b>"
 
 
+def _format_nutrition_value(value: float | None, estimated: bool = False) -> str:
+    if value is None:
+        return "—"
+    prefix = "≈" if estimated else ""
+    return f"{prefix}{round_whole(value)}"
+
+
+def _format_nutrition(summary: NutritionSummary) -> str:
+    return (
+        f"К:{_format_nutrition_value(summary.kcal, summary.kcal_estimated)} "
+        f"Б:{_format_nutrition_value(summary.protein_g, summary.protein_estimated)} "
+        f"Ж:{_format_nutrition_value(summary.fat_g, summary.fat_estimated)} "
+        f"В:{_format_nutrition_value(summary.carbs_g, summary.carbs_estimated)}"
+    )
+
+
+def _summary_for_item(item: CalculatedFoodItem) -> NutritionSummary:
+    return NutritionSummary(
+        kcal=item.calories,
+        protein_g=item.protein_g,
+        fat_g=item.fat_g,
+        carbs_g=item.carbs_g,
+        kcal_estimated=item_calorie_total_estimated(item),
+        protein_estimated=item_nutrient_total_estimated(item, "protein"),
+        fat_estimated=item_nutrient_total_estimated(item, "fat"),
+        carbs_estimated=item_nutrient_total_estimated(item, "carbs"),
+    )
+
+
+def _per_100g_summary(item: CalculatedFoodItem) -> NutritionSummary:
+    return NutritionSummary(
+        kcal=item.kcal_per_100g,
+        protein_g=item.protein_per_100g,
+        fat_g=item.fat_per_100g,
+        carbs_g=item.carbs_per_100g,
+        kcal_estimated=item.kcal_estimated,
+        protein_estimated=(
+            item.protein_per_100g is not None and item.protein_estimated
+        ),
+        fat_estimated=item.fat_per_100g is not None and item.fat_estimated,
+        carbs_estimated=item.carbs_per_100g is not None and item.carbs_estimated,
+    )
+
+
 def _portion_includes_weight(portion: str, weight_g: float) -> bool:
     weights = re.finditer(
         r"(?<!\d)(?P<value>\d+(?:[.,]\d+)?)\s*"
@@ -229,76 +279,70 @@ def _portion_includes_weight(portion: str, weight_g: float) -> bool:
 def _format_item_calculation(
     item: CalculatedFoodItem, *, highlight_total: bool = True
 ) -> str:
-    weight_g = item.weight_g
-    kcal_per_100g = item.kcal_per_100g
-    calories = item.calories
-    weight_estimated = item.weight_origin != "user_text"
-    kcal_estimated = item.kcal_origin != "user_text"
-    result_estimated = weight_estimated or kcal_estimated
-    weight_prefix = "≈" if weight_estimated else ""
-    kcal_prefix = "≈" if kcal_estimated else ""
-    result_prefix = "≈" if result_estimated else ""
     display_name = item.name[:1].upper() + item.name[1:]
-    name = html.escape(display_name)
-    calorie_total = f"{result_prefix}{round_whole(calories)} кк"
-    if highlight_total:
-        calorie_total = _highlight_calories(calorie_total)
+    weight_prefix = "≈" if item.weight_origin != "user_text" else ""
+    heading = html.escape(display_name)
     if item.portion_display:
-        portion = html.escape(item.portion_display)
-        count_match = re.fullmatch(r"(?P<count>\d+)\s*шт\.?", item.portion_display)
-        if count_match:
-            count = int(count_match.group("count"))
-            if count > 0:
-                unit_weight = weight_g / count
-                return (
-                    f"{name} {calorie_total}\n"
-                    f"{portion} × {weight_prefix}{round_whole(unit_weight)} г/шт. × "
-                    f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
-                )
-        if _portion_includes_weight(item.portion_display, weight_g):
-            return (
-                f"{name} {calorie_total}\n"
-                f"{portion} × "
-                f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
-            )
-        return (
-            f"{name} {calorie_total}\n"
-            f"{portion} · {weight_prefix}{round_whole(weight_g)} г × "
-            f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
-        )
+        heading += f" {html.escape(item.portion_display)}"
+    if not item.portion_display or not _portion_includes_weight(
+        item.portion_display, item.weight_g
+    ):
+        separator = " · " if item.portion_display else " "
+        heading += f"{separator}{weight_prefix}{round_whole(item.weight_g)} г"
+    total = _format_nutrition(_summary_for_item(item))
+    if highlight_total:
+        total = _highlight_calories(total)
     return (
-        f"{name} {calorie_total}\n"
-        f"{weight_prefix}{round_whole(weight_g)} г × "
-        f"{kcal_prefix}{round_whole(kcal_per_100g)} кк/100 г"
+        f"<b>{heading}</b>\n"
+        f"{total}\n"
+        f"На 100 г: {_format_nutrition(_per_100g_summary(item))}"
     )
 
 
-def _format_daily_progress(today_total: float, daily_kcal_goal: int | None) -> str:
-    rounded_total = round_whole(today_total)
+def _as_summary(value: float | NutritionSummary) -> NutritionSummary:
+    if isinstance(value, NutritionSummary):
+        return value
+    return NutritionSummary.unknown_macros(float(value))
+
+
+def _state_nutrition(state: SheetState) -> NutritionSummary:
+    nutrition = state.today_nutrition
+    if isinstance(nutrition, NutritionSummary):
+        return nutrition
+    total = float(state.today_total)
+    return NutritionSummary() if total == 0 else NutritionSummary.unknown_macros(total)
+
+
+def _format_goal(today_kcal: float, daily_kcal_goal: int | None) -> str | None:
     if daily_kcal_goal is None:
-        return _highlight_calories(f"{rounded_total} кк")
-    line = f"{_highlight_calories(str(rounded_total))} із {daily_kcal_goal} кк"
+        return None
+    rounded_total = round_whole(today_kcal)
     if rounded_total <= daily_kcal_goal:
-        line += f" · залишилось {daily_kcal_goal - rounded_total} кк"
-    else:
-        line += f" · перевищено на {rounded_total - daily_kcal_goal} кк"
-    return line
+        remaining = daily_kcal_goal - rounded_total
+        return f"Ціль: {daily_kcal_goal} кк · залишилось {remaining} кк"
+    overage = rounded_total - daily_kcal_goal
+    return f"Ціль: {daily_kcal_goal} кк · перевищено на {overage} кк"
 
 
-def format_daily_total(today_total: float, daily_kcal_goal: int | None) -> str:
-    return f"За день: {_format_daily_progress(today_total, daily_kcal_goal)}"
+def format_daily_total(
+    today_total: float | NutritionSummary, daily_kcal_goal: int | None
+) -> str:
+    summary = _as_summary(today_total)
+    lines = [f"За день: {_highlight_calories(_format_nutrition(summary))}"]
+    if goal := _format_goal(summary.kcal, daily_kcal_goal):
+        lines.append(goal)
+    return "\n".join(lines)
 
 
 def format_reply(meal: MealResult) -> str:
     if len(meal.items) > 1:
-        prefix = "≈" if meal.estimated else ""
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
         calculations = [
             _format_item_calculation(item, highlight_total=False) for item in meal.items
         ]
         body = [
-            f"{meal_name} "
-            f"{_highlight_calories(f'{prefix}{round_whole(meal.meal_kcal)} кк')}",
+            f"<b>{meal_name} {round_whole(meal.total_weight_g)} г</b>",
+            _highlight_calories(_format_nutrition(nutrition_summary(meal))),
             *(
                 f"• {calculation.replace(chr(10), chr(10) + '  ')}"
                 for calculation in calculations
@@ -311,37 +355,64 @@ def format_reply(meal: MealResult) -> str:
 
 def format_weekly_calories_reply(
     end_day: date,
-    totals: dict[date, float],
+    totals: Mapping[date, float | NutritionSummary],
     burned_totals: dict[date, int] | None = None,
 ) -> str:
     start_day = end_day - timedelta(days=WEEK_DAYS - 1)
     days = [start_day + timedelta(days=offset) for offset in range(WEEK_DAYS)]
-    consumed = {day: round_whole(totals.get(day, 0)) for day in days}
+    consumed = {
+        day: (_as_summary(totals[day]) if day in totals else NutritionSummary())
+        for day in days
+    }
     if burned_totals is not None:
         missing = [day for day in days if day not in burned_totals]
         if missing:
             raise ValueError("Burned-calorie data does not cover the completed week")
 
-    legend = "Позначення: + спожито · − витрачено · = баланс"
-    lines = ["Калорії за тиждень", legend, ""]
+    legend = "+спожито   −витрачено   =баланс"
+    lines = [
+        "КБЖВ за тиждень",
+        legend,
+        "КБЖВ — у підсумку, за днями — лише калорії.",
+        "",
+    ]
     for day in days:
         prefix = f"• {UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}: "
-        consumed_text = f"{consumed[day]:+d}"
+        consumed_kcal = round_whole(consumed[day].kcal)
+        consumed_text = f"К:{consumed_kcal:+d}"
         if burned_totals is None:
             lines.append(prefix + consumed_text)
             continue
         burned = burned_totals[day]
-        balance = consumed[day] - burned
+        balance = consumed_kcal - burned
         lines.append(prefix + f"{consumed_text} {-burned:+d} ={balance:+d}")
 
-    average_consumed = round_whole(sum(consumed.values()) / WEEK_DAYS)
-    average = f"Середнє: {average_consumed:+d}"
+    total = NutritionSummary()
+    for day in days:
+        total += consumed[day]
+
+    def average_value(value: float | None) -> float | None:
+        return None if value is None else value / WEEK_DAYS
+
+    average_summary = NutritionSummary(
+        kcal=total.kcal / WEEK_DAYS,
+        protein_g=average_value(total.protein_g),
+        fat_g=average_value(total.fat_g),
+        carbs_g=average_value(total.carbs_g),
+        kcal_estimated=total.kcal_estimated,
+        protein_estimated=total.protein_estimated,
+        fat_estimated=total.fat_estimated,
+        carbs_estimated=total.carbs_estimated,
+    )
+    average_consumed = round_whole(average_summary.kcal)
+    average = f"Середнє за день: {_format_nutrition(average_summary)}"
     if burned_totals is not None:
         average_burned = round_whole(
             sum(burned_totals[day] for day in days) / WEEK_DAYS
         )
-        average += f" {-average_burned:+d} ={average_consumed - average_burned:+d}"
-    lines.extend(("", average))
+        average_balance = average_consumed - average_burned
+        average += f" · витрачено {-average_burned:+d} · баланс ={average_balance:+d}"
+    lines.extend(("", f"Разом: {_format_nutrition(total)}", average))
     return "\n".join(lines)
 
 
@@ -350,29 +421,32 @@ def _aggregate_weekly_meals(
     group_names: tuple[str, ...] | None = None,
     *,
     collapse_tail: bool = True,
-) -> list[tuple[str, float, float]]:
+) -> list[tuple[str, float, NutritionSummary]]:
     if group_names is not None and len(group_names) != len(meals):
         raise ValueError("Meal group count does not match meal count")
     if not meals:
         return []
 
-    grouped: dict[str, tuple[str, float, float]] = {}
+    grouped: dict[str, tuple[str, float, NutritionSummary]] = {}
     for index, meal in enumerate(meals):
         source_name = group_names[index] if group_names is not None else meal.meal_name
         display_name = re.sub(r"\s+", " ", source_name).strip()
         key = display_name.casefold()
+        meal_nutrition = meal.nutrition or NutritionSummary.unknown_macros(
+            meal.meal_kcal
+        )
         if key in grouped:
-            original_name, weight, calories = grouped[key]
+            original_name, weight, nutrients = grouped[key]
             grouped[key] = (
                 original_name,
                 weight + meal.total_weight_g,
-                calories + meal.meal_kcal,
+                nutrients + meal_nutrition,
             )
         else:
-            grouped[key] = (display_name, meal.total_weight_g, meal.meal_kcal)
+            grouped[key] = (display_name, meal.total_weight_g, meal_nutrition)
 
     aggregated = sorted(
-        grouped.values(), key=lambda item: (-item[2], item[0].casefold())
+        grouped.values(), key=lambda item: (-item[2].kcal, item[0].casefold())
     )
     if collapse_tail and len(aggregated) > MAX_WEEKLY_MEAL_GROUPS:
         head = aggregated[: MAX_WEEKLY_MEAL_GROUPS - 1]
@@ -381,7 +455,7 @@ def _aggregate_weekly_meals(
             (
                 f"Інше ({len(tail)} категорій)",
                 sum(item[1] for item in tail),
-                sum(item[2] for item in tail),
+                sum((item[2] for item in tail), NutritionSummary()),
             )
         )
         aggregated = head
@@ -391,21 +465,37 @@ def _aggregate_weekly_meals(
 def format_weekly_meals_reply(
     meals: list[PeriodMeal], group_names: tuple[str, ...] | None = None
 ) -> str:
-    total_kcal = sum(meal.meal_kcal for meal in meals)
+    total = sum(
+        (
+            meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
+            for meal in meals
+        ),
+        NutritionSummary(),
+    )
+    average = NutritionSummary(
+        kcal=total.kcal / WEEK_DAYS,
+        protein_g=None if total.protein_g is None else total.protein_g / WEEK_DAYS,
+        fat_g=None if total.fat_g is None else total.fat_g / WEEK_DAYS,
+        carbs_g=None if total.carbs_g is None else total.carbs_g / WEEK_DAYS,
+        kcal_estimated=total.kcal_estimated,
+        protein_estimated=total.protein_estimated,
+        fat_estimated=total.fat_estimated,
+        carbs_estimated=total.carbs_estimated,
+    )
     summary = (
-        f"Всього: {round_whole(total_kcal)} кк\n"
-        f"Середнє за день: {round_whole(total_kcal / WEEK_DAYS)} кк"
+        f"Всього: {_format_nutrition(total)}\n"
+        f"Середнє за день: {_format_nutrition(average)}"
     )
     if not meals:
         return f"Страви за тиждень\n\nЗаписів немає.\n\n{summary}"
 
     aggregated = _aggregate_weekly_meals(meals, group_names)
-    lines = ["Страви за тиждень", ""]
-    for meal_name, total_weight_g, meal_kcal in aggregated:
+    lines = ["Страви за тиждень", SUMMARY_EXPLANATION, ""]
+    for meal_name, total_weight_g, nutrients in aggregated:
         display_name = meal_name[:1].upper() + meal_name[1:]
         lines.append(
-            f"• {display_name} {round_whole(total_weight_g)} г — "
-            f"{round_whole(meal_kcal)} кк"
+            f"• <b>{html.escape(display_name)}</b> {round_whole(total_weight_g)} г — "
+            f"К:{_format_nutrition_value(nutrients.kcal, nutrients.kcal_estimated)}"
         )
     lines.extend(("", summary))
     return "\n".join(lines)
@@ -435,27 +525,36 @@ def format_users_reply(users: list[UserRecord]) -> str:
 
 
 def format_day_reply(meals: list[DayMeal], daily_kcal_goal: int | None = None) -> str:
+    total = sum(
+        (
+            meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
+            for meal in meals
+        ),
+        NutritionSummary(),
+    )
+    heading = f"Сьогодні: {_highlight_calories(_format_nutrition(total))}"
+    if goal := _format_goal(total.kcal, daily_kcal_goal):
+        heading += f"\n{goal}"
     if not meals:
-        return (
-            f"Сьогодні: {_format_daily_progress(0, daily_kcal_goal)}\nЗаписів ще немає."
-        )
+        return f"{heading}\nЗаписів ще немає."
 
-    grouped: dict[str, tuple[str, float, int]] = {}
+    grouped: dict[str, tuple[str, NutritionSummary, int]] = {}
     for meal in meals:
         display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
         key = display_name.casefold()
+        nutrients = meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
         if key in grouped:
-            original_name, calories, count = grouped[key]
-            grouped[key] = (original_name, calories + meal.meal_kcal, count + 1)
+            original_name, current, count = grouped[key]
+            grouped[key] = (original_name, current + nutrients, count + 1)
         else:
-            grouped[key] = (display_name, meal.meal_kcal, 1)
+            grouped[key] = (display_name, nutrients, 1)
 
-    total = sum(meal.meal_kcal for meal in meals)
-    lines = [f"Сьогодні: {_format_daily_progress(total, daily_kcal_goal)}"]
-    for meal_name, meal_kcal, count in grouped.values():
+    lines = [heading, SUMMARY_EXPLANATION]
+    for meal_name, nutrients, count in grouped.values():
         count_suffix = f" ×{count}" if count > 1 else ""
         lines.append(
-            f"• {html.escape(meal_name)}{count_suffix} — {round_whole(meal_kcal)} кк"
+            f"• <b>{html.escape(meal_name)}</b>{count_suffix} — "
+            f"К:{_format_nutrition_value(nutrients.kcal, nutrients.kcal_estimated)}"
         )
     return "\n".join(lines)
 
@@ -528,7 +627,10 @@ class CaloriesService:
             return format_weekly_meals_reply(meals)
 
         exact = _aggregate_weekly_meals(meals, collapse_tail=False)
-        exact_meals = [PeriodMeal(name, weight, kcal) for name, weight, kcal in exact]
+        exact_meals = [
+            PeriodMeal(name, weight, nutrients.kcal, nutrients)
+            for name, weight, nutrients in exact
+        ]
         try:
             grouping = meal_grouper.group(tuple(meal.meal_name for meal in exact_meals))
             return format_weekly_meals_reply(exact_meals, grouping.group_names)
@@ -555,7 +657,19 @@ class CaloriesService:
                 total_weight_g=item.weight_g,
                 kcal_per_100g=item.kcal_per_100g,
                 meal_kcal=item.calories,
-                estimated=item.weight_estimated or item.kcal_estimated,
+                protein_per_100g=item.protein_per_100g,
+                fat_per_100g=item.fat_per_100g,
+                carbs_per_100g=item.carbs_per_100g,
+                protein_g=item.protein_g,
+                fat_g=item.fat_g,
+                carbs_g=item.carbs_g,
+                estimated=(
+                    item.weight_estimated
+                    or item.kcal_estimated
+                    or item.protein_estimated
+                    or item.fat_estimated
+                    or item.carbs_estimated
+                ),
             )
             for item in meal.items
         ]
@@ -568,7 +682,7 @@ class CaloriesService:
         self,
         source_message_id: int,
         day: date,
-        today_total: float,
+        today_nutrition: NutritionSummary,
         first: StoredMeal,
     ) -> MealReply | list[MealReply] | None:
         marker = parse_simple_meal_request(first.normalized_request)
@@ -582,7 +696,9 @@ class CaloriesService:
                 telegram_message_id=source_message_id,
                 accounting_day=day,
                 can_change_weight=len(first.meal.items) == 1,
-                daily_total_text=format_daily_total(today_total, self._daily_kcal_goal),
+                daily_total_text=format_daily_total(
+                    today_nutrition, self._daily_kcal_goal
+                ),
             )
         components = self._store.get_component_meals(day, source_message_id)
         if len(components) != marker.component_count:
@@ -595,7 +711,7 @@ class CaloriesService:
                     telegram_message_id=message_id,
                     accounting_day=day,
                     daily_total_text=(
-                        format_daily_total(today_total, self._daily_kcal_goal)
+                        format_daily_total(today_nutrition, self._daily_kcal_goal)
                         if index == len(components) - 1
                         else None
                     ),
@@ -614,7 +730,7 @@ class CaloriesService:
         return self._existing_component_replies(
             telegram_message_id,
             day,
-            state.today_total,
+            _state_nutrition(state),
             state.existing,
         )
 
@@ -633,7 +749,7 @@ class CaloriesService:
                 existing_reply = self._existing_component_replies(
                     telegram_message_id,
                     day,
-                    state.today_total,
+                    _state_nutrition(state),
                     state.existing,
                 )
                 if existing_reply is not None:
@@ -659,7 +775,7 @@ class CaloriesService:
                 existing_reply = self._existing_component_replies(
                     telegram_message_id,
                     day,
-                    state.today_total,
+                    _state_nutrition(state),
                     state.existing,
                 )
                 if existing_reply is not None:
@@ -685,7 +801,7 @@ class CaloriesService:
                             stored,
                         )
             stored_components: list[tuple[int, StoredMeal]] = []
-            today_total = state.today_total
+            today_nutrition = _state_nutrition(state)
             try:
                 for index, meal in enumerate(meals):
                     existing = existing_components.get(index)
@@ -718,7 +834,7 @@ class CaloriesService:
                         ),
                     )
                     stored_components.append((component_message_id, stored))
-                    today_total += stored.meal.meal_kcal
+                    today_nutrition += nutrition_summary(stored.meal)
             except SheetsWriteUncertainError:
                 raise
             except SheetsWriteError as exc:
@@ -737,7 +853,7 @@ class CaloriesService:
                         telegram_message_id=component_message_id,
                         accounting_day=day,
                         daily_total_text=(
-                            format_daily_total(today_total, self._daily_kcal_goal)
+                            format_daily_total(today_nutrition, self._daily_kcal_goal)
                             if index == len(stored_components) - 1
                             else None
                         ),
@@ -897,10 +1013,10 @@ class CaloriesService:
                     meal,
                     LLMMetadata(model=metadata_model, effort="none"),
                 )
-                total = state.today_total + stored.meal.meal_kcal
+                total = _state_nutrition(state) + nutrition_summary(stored.meal)
             else:
                 stored = state.existing
-                total = state.today_total
+                total = _state_nutrition(state)
         return MealReply(
             text=format_reply(stored.meal),
             telegram_message_id=event_id,
@@ -992,7 +1108,9 @@ class CaloriesService:
             can_save=can_save,
             can_change_weight=True,
             daily_total_text=format_daily_total(
-                updated.day_total, self._daily_kcal_goal
+                updated.day_nutrition
+                or NutritionSummary.unknown_macros(updated.day_total),
+                self._daily_kcal_goal,
             ),
         )
 
@@ -1026,9 +1144,12 @@ class CaloriesService:
         return f"Видалено {html.escape(display_name)}"
 
     def format_deletion_daily_total(self, deletion: MealDeletion) -> str:
+        nutrition = deletion.day_nutrition or NutritionSummary.unknown_macros(
+            deletion.day_total
+        )
         return (
             "Оновлено після видалення\n"
-            f"{format_daily_total(deletion.day_total, self._daily_kcal_goal)}"
+            f"{format_daily_total(nutrition, self._daily_kcal_goal)}"
         )
 
     def _delete_photo(self, photo_path: str) -> None:
@@ -1578,7 +1699,9 @@ class TelegramHandlers:
                 LOGGER.exception("Could not build /weekly_meals")
                 reply = WEEK_ERROR_TEXT
             for chunk in _split_telegram_text(reply):
-                await message.reply_text(chunk, do_quote=False)
+                await message.reply_text(
+                    chunk, parse_mode=ParseMode.HTML, do_quote=False
+                )
 
     @staticmethod
     def _short_button_name(name: str, limit: int = 34) -> str:

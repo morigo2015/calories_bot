@@ -18,8 +18,10 @@ from .models import (
     CalculatedFoodItem,
     LLMMetadata,
     MealResult,
+    NutritionSummary,
     RecentMeal,
     StoredMeal,
+    nutrition_summary,
     parse_simple_meal_request,
     round_whole,
 )
@@ -91,12 +93,14 @@ class SheetsWriteUncertainError(SheetsWriteError):
 class SheetState:
     today_total: float
     existing: StoredMeal | None
+    today_nutrition: NutritionSummary | None = None
 
 
 @dataclass(frozen=True)
 class DayMeal:
     meal_name: str
     meal_kcal: float
+    nutrition: NutritionSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,7 @@ class PeriodMeal:
     meal_name: str
     total_weight_g: float
     meal_kcal: float
+    nutrition: NutritionSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,7 @@ class MealDeletion:
     photo_path: str | None
     deleted: bool
     meal_name: str | None = None
+    day_nutrition: NutritionSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,7 @@ class MealUpdate:
     accounting_day: date
     day_total: float
     meal: StoredMeal
+    day_nutrition: NutritionSummary | None = None
 
 
 class MealStore(Protocol):
@@ -127,7 +134,9 @@ class MealStore(Protocol):
 
     def get_day_meals(self, day: date) -> list[DayMeal]: ...
 
-    def get_daily_totals(self, start_day: date, end_day: date) -> dict[date, float]: ...
+    def get_daily_totals(
+        self, start_day: date, end_day: date
+    ) -> dict[date, NutritionSummary]: ...
 
     def get_period_meals(self, start_day: date, end_day: date) -> list[PeriodMeal]: ...
 
@@ -212,12 +221,33 @@ def _meal_from_row(row: list[object]) -> StoredMeal:
     padded = row + [""] * (len(HEADERS) - len(row))
     items_data = json.loads(str(padded[ITEMS_JSON_COLUMN]))
     items = [CalculatedFoodItem.model_validate(item) for item in items_data]
+
+    def total_for(nutrient: str) -> float | None:
+        values = [getattr(item, f"{nutrient}_g") for item in items]
+        return (
+            None
+            if any(value is None for value in values)
+            else sum(value for value in values if value is not None)
+        )
+
+    protein_g = total_for("protein")
+    fat_g = total_for("fat")
+    carbs_g = total_for("carbs")
+    total_weight_g = float(str(padded[TOTAL_WEIGHT_COLUMN]))
     meal = MealResult(
         meal_name=str(padded[MEAL_NAME_COLUMN]),
         items=items,
-        total_weight_g=float(str(padded[TOTAL_WEIGHT_COLUMN])),
+        total_weight_g=total_weight_g,
         kcal_per_100g=float(str(padded[KCAL_PER_100G_COLUMN])),
         meal_kcal=float(str(padded[MEAL_KCAL_COLUMN])),
+        protein_per_100g=(
+            None if protein_g is None else protein_g / total_weight_g * 100
+        ),
+        fat_per_100g=None if fat_g is None else fat_g / total_weight_g * 100,
+        carbs_per_100g=(None if carbs_g is None else carbs_g / total_weight_g * 100),
+        protein_g=protein_g,
+        fat_g=fat_g,
+        carbs_g=carbs_g,
         estimated=_parse_bool(padded[ESTIMATED_COLUMN]),
     )
     metadata = LLMMetadata(
@@ -403,6 +433,17 @@ class GoogleSheetsStore:
                 LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
         return total
 
+    def _day_nutrition(self, rows: list[list[object]], day: date) -> NutritionSummary:
+        total = NutritionSummary()
+        for row in rows:
+            try:
+                if self._row_day(row) != day:
+                    continue
+                total += nutrition_summary(_meal_from_row(row).meal)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+        return total
+
     def _find_by_message_id(
         self,
         rows: list[list[object]],
@@ -423,7 +464,11 @@ class GoogleSheetsStore:
         try:
             rows = self._data_rows()
             existing = self._find_by_message_id(rows, telegram_message_id, day)
-            return SheetState(today_total=self._day_total(rows, day), existing=existing)
+            return SheetState(
+                today_total=self._day_total(rows, day),
+                existing=existing,
+                today_nutrition=self._day_nutrition(rows, day),
+            )
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
 
@@ -585,6 +630,7 @@ class GoogleSheetsStore:
             accounting_day=accounting_day,
             day_total=self._day_total(rows, accounting_day),
             meal=verified,
+            day_nutrition=self._day_nutrition(rows, accounting_day),
         )
 
     def get_day_meals(self, day: date) -> list[DayMeal]:
@@ -603,19 +649,22 @@ class GoogleSheetsStore:
                         DayMeal(
                             meal_name=meal_name,
                             meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
+                            nutrition=nutrition_summary(_meal_from_row(row).meal),
                         )
                     )
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, json.JSONDecodeError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
             return meals
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
 
-    def get_daily_totals(self, start_day: date, end_day: date) -> dict[date, float]:
+    def get_daily_totals(
+        self, start_day: date, end_day: date
+    ) -> dict[date, NutritionSummary]:
         if end_day < start_day:
             raise ValueError("end_day cannot be before start_day")
         try:
-            totals: dict[date, float] = {}
+            totals: dict[date, NutritionSummary] = {}
             # One worksheet read per report; grouping happens entirely in memory.
             for row in self._data_rows():
                 if len(row) <= MEAL_KCAL_COLUMN:
@@ -623,10 +672,11 @@ class GoogleSheetsStore:
                 try:
                     row_day = self._row_day(row)
                     if start_day <= row_day <= end_day:
-                        totals[row_day] = totals.get(row_day, 0.0) + float(
-                            str(row[MEAL_KCAL_COLUMN])
-                        )
-                except (TypeError, ValueError):
+                        meal = _meal_from_row(row).meal
+                        totals[row_day] = totals.get(
+                            row_day, NutritionSummary()
+                        ) + nutrition_summary(meal)
+                except (TypeError, ValueError, json.JSONDecodeError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
             return totals
         except Exception as exc:
@@ -653,9 +703,10 @@ class GoogleSheetsStore:
                             meal_name=meal_name,
                             total_weight_g=float(str(row[TOTAL_WEIGHT_COLUMN])),
                             meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
+                            nutrition=nutrition_summary(_meal_from_row(row).meal),
                         )
                     )
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, json.JSONDecodeError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
             return meals
         except Exception as exc:
@@ -679,6 +730,7 @@ class GoogleSheetsStore:
                 day_total=round_whole(self._day_total(rows, fallback_day)),
                 photo_path=None,
                 deleted=False,
+                day_nutrition=self._day_nutrition(rows, fallback_day),
             )
 
         target = rows[target_index]
@@ -734,6 +786,7 @@ class GoogleSheetsStore:
             photo_path=photo_path,
             deleted=True,
             meal_name=meal_name or None,
+            day_nutrition=self._day_nutrition(rows, day),
         )
 
     def append_meal(

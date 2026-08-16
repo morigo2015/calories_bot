@@ -8,15 +8,15 @@ from calories_bot.models import (
     FoodAnalysis,
     FoodItem,
     LLMMetadata,
+    NutritionSummary,
     calculate_meal,
     format_simple_meal_request,
+    scale_meal,
 )
 from calories_bot.sheets import (
     HEADERS,
     LEGACY_HEADERS,
-    DayMeal,
     GoogleSheetsStore,
-    PeriodMeal,
     SheetSchemaError,
     SheetsReadError,
     SheetsWriteError,
@@ -50,6 +50,12 @@ def make_meal():
                     weight_estimated=False,
                     kcal_per_100g=120,
                     kcal_estimated=False,
+                    protein_per_100g=20,
+                    fat_per_100g=10,
+                    carbs_per_100g=0,
+                    protein_estimated=False,
+                    fat_estimated=False,
+                    carbs_estimated=False,
                 )
             ],
         )
@@ -248,10 +254,14 @@ def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
 
     meals = build_store(rows).get_day_meals(datetime(2026, 8, 2).date())
 
-    assert meals == [
-        DayMeal(meal_name="вівсянка з бананом", meal_kcal=320),
-        DayMeal(meal_name="курка з рисом", meal_kcal=460),
+    assert [(meal.meal_name, meal.meal_kcal) for meal in meals] == [
+        ("вівсянка з бананом", 320),
+        ("курка з рисом", 460),
     ]
+    assert all(
+        meal.nutrition == NutritionSummary.unknown_macros(meal.meal_kcal)
+        for meal in meals
+    )
 
 
 def test_daily_totals_read_once_and_keep_exact_values() -> None:
@@ -267,7 +277,9 @@ def test_daily_totals_read_once_and_keep_exact_values() -> None:
     )
 
     assert set(totals) == {datetime(2026, 8, 2).date()}
-    assert totals[datetime(2026, 8, 2).date()] == pytest.approx(300.8)
+    total = totals[datetime(2026, 8, 2).date()]
+    assert total.kcal == pytest.approx(300.8)
+    assert total.protein_g is None
     assert store._worksheet.read_count == 1
 
 
@@ -285,10 +297,10 @@ def test_period_meals_read_once_and_include_weight_and_calories() -> None:
         datetime(2026, 8, 2).date(), datetime(2026, 8, 8).date()
     )
 
-    assert meals == [
-        PeriodMeal("вино сухе", 200, 100),
-        PeriodMeal("сир", 100, 360),
-    ]
+    assert [
+        (meal.meal_name, meal.total_weight_g, meal.meal_kcal) for meal in meals
+    ] == [("вино сухе", 200, 100), ("сир", 100, 360)]
+    assert all(meal.nutrition and meal.nutrition.protein_g is None for meal in meals)
     assert store._worksheet.read_count == 1
 
 
@@ -448,17 +460,7 @@ def test_append_allows_blank_photo_usage_and_cost() -> None:
 def test_update_meal_replaces_nutrition_and_recalculates_day_total() -> None:
     timestamp = datetime(2026, 8, 2, 12, tzinfo=TZ)
     store = build_store([HEADERS, stored_row(timestamp, 42, 60)])
-    updated = make_meal().model_copy(
-        update={
-            "total_weight_g": 100,
-            "meal_kcal": 120,
-            "items": [
-                make_meal()
-                .items[0]
-                .model_copy(update={"weight_g": 100, "calories": 120})
-            ],
-        }
-    )
+    updated = scale_meal(make_meal(), 100)
 
     result = store.update_meal(datetime(2026, 8, 2).date(), 42, updated)
 
@@ -466,6 +468,9 @@ def test_update_meal_replaces_nutrition_and_recalculates_day_total() -> None:
     assert result.day_total == 120
     assert result.meal.meal.total_weight_g == 100
     assert result.meal.meal.items[0].weight_g == 100
+    assert result.meal.meal.protein_g == 20
+    assert result.meal.meal.fat_g == 10
+    assert result.meal.meal.carbs_g == 0
     assert store._worksheet.rows[1][7] == "сир 50 гр 120 ккал/100г"
 
 

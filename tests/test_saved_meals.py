@@ -510,7 +510,7 @@ def test_change_weight_updates_existing_single_item_and_total(tmp_path) -> None:
     assert len(meals.rows) == 1
     assert meals.rows[0][2].meal.total_weight_g == 100
     assert meals.rows[0][2].meal.meal_kcal == 120
-    assert result.daily_total_text == "За день: <b><u>120 кк</u></b>"
+    assert result.daily_total_text == "За день: <b><u>К:120 Б:— Ж:— В:—</u></b>"
 
 
 def test_change_weight_rejects_unchanged_weight_without_updating_store(

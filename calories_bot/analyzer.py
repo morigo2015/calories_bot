@@ -27,6 +27,9 @@ Rules:
   meal_name="", items=[].
 - If the message describes consumed food, set is_food=true, provide a concise
   non-empty meal_name, and provide at least one item.
+- A message containing only authoritative nutrition sources is valid food:
+  use the Ukrainian name "Продукт" and a 100 g portion when no name or weight
+  is supplied.
 - Keep food items in the same order as they appear in the message.
 - Explicit source IDs are authoritative. Assign each ID to the nearest food
   item and to the matching field.
@@ -37,9 +40,17 @@ Rules:
   weight_estimated=true, weight_origin=model_estimate and weight_source_id=null.
 - If kcal per 100 g is absent, estimate it and set kcal_estimated=true and
   kcal_origin=model_estimate and kcal_source_id=null.
+- Always provide protein, fat, and carbohydrate grams per 100 g when food is
+  present. Estimate every missing nutrient separately. Set its estimated flag,
+  origin, and source ID by the same rules as kcal.
+- Compact К/Б/Ж/В source values and natural values "на 100 г" are per 100 g.
+  Values explicitly described as being for a portion or package apply to that
+  consumed portion; the application converts them to per-100-g density.
 - For supplied values, set the matching estimated flag to false and return
   its source ID. The application will set the origin to user_text.
-- Values read or estimated from a photo use origin=image and are approximate.
+- On a nutrition-label photo, try to read kcal, protein, fat, and carbohydrates,
+  preferring the per-100-g column. Values read or estimated from a photo use
+  origin=image and are approximate.
 - For a natural portion such as "2 яйця", "1 тарілка", "жменя" or "половина",
   return a concise Ukrainian portion_display such as "2 шт." or "1 тарілка".
 - Split composite meals into useful ingredients when the user names multiple
@@ -59,7 +70,8 @@ Examples:
 - "тарілка борщу" -> one item with portion_display="1 тарілка".
 - A meal photo with caption "250 г" -> use the caption weight and recognize food.
 - A meal photo without caption -> recognize and estimate the portion.
-- A label photo -> read the product name and kcal/100g; estimate portion if absent.
+- A label photo -> read the product name and all available nutrition values;
+  estimate missing nutrition and portion if absent.
 - "як справи?" -> is_food=false.
 """
 
@@ -98,10 +110,11 @@ class UsageRecorder(Protocol):
 @dataclass(frozen=True)
 class ExplicitValue:
     source_id: str
-    kind: Literal["weight", "kcal"]
+    kind: Literal["weight", "kcal", "protein", "fat", "carbs"]
     value: int
     start: int
     end: int
+    basis: Literal["per_100g", "portion"] | None = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +185,10 @@ class OpenAITranscriber:
 
 _DECIMAL = re.compile(r"\d+[.,]\d+")
 _HASH_MARKER = re.compile(r"(?<![\w#])(?:#(?P<prefix>\d+)|(?P<suffix>\d+)#)(?![\w#])")
+_COMPACT_NUTRIENT = re.compile(
+    r"(?<!\w)(?P<marker>[кkбжвb])(?P<separator>[:_ -]?)(?P<value>\d+)(?!\w)",
+    re.IGNORECASE,
+)
 _KCAL_UNIT = (
     r"(?:[кk][кk]|[кk][кk][аa]л|kcal|"
     r"кілокалорій|кілокалорії|кілокалорія|"
@@ -190,6 +207,53 @@ _TEXT_KCAL = re.compile(
     re.IGNORECASE,
 )
 _CANONICAL_KCAL = re.compile(r"(?<!\w)(?P<value>\d+) ккал/100г(?!\w)")
+_CANONICAL_PORTION_KCAL = re.compile(r"(?<!\w)(?P<value>\d+) ккал/порцію(?!\w)")
+_PLAIN_KCAL = re.compile(
+    rf"(?<!\w)(?P<value>\d+)\s*{_KCAL_UNIT}(?!\w)"
+    rf"(?!\s*(?:/|на|за)\s*(?:100|сто))",
+    re.IGNORECASE,
+)
+_MACRO_LABELS = {
+    "protein": "білків",
+    "fat": "жирів",
+    "carbs": "вуглеводів",
+}
+_CANONICAL_MACROS = {
+    kind: re.compile(rf"(?<!\w)(?P<value>\d+) г {label}/(?P<basis>100г|порцію)(?!\w)")
+    for kind, label in _MACRO_LABELS.items()
+}
+_NATURAL_MACROS = {
+    "protein": re.compile(
+        rf"(?<!\w)(?:білк\w*|белк\w*|protein)\s*[:=_-]?\s*"
+        rf"(?P<value>\d+)(?:\s*{_WEIGHT_UNIT})?",
+        re.IGNORECASE,
+    ),
+    "fat": re.compile(
+        rf"(?<!\w)(?:жир\w*|fat)\s*[:=_-]?\s*"
+        rf"(?P<value>\d+)(?:\s*{_WEIGHT_UNIT})?",
+        re.IGNORECASE,
+    ),
+    "carbs": re.compile(
+        rf"(?<!\w)(?:вуглевод\w*|углевод\w*|carb\w*)\s*[:=_-]?\s*"
+        rf"(?P<value>\d+)(?:\s*{_WEIGHT_UNIT})?",
+        re.IGNORECASE,
+    ),
+}
+_PER_100_PREFIX = re.compile(
+    rf"(?<!\w)(?:на|за)\s*(?:100|сто)\s*{_WEIGHT_UNIT}(?!\w)",
+    re.IGNORECASE,
+)
+_PORTION_CONTEXT = re.compile(
+    r"(?:у|в|на)\s+(?:цій\s+|одній\s+)?(?:порці\w*|упаковц\w*)",
+    re.IGNORECASE,
+)
+
+
+def _nearby_basis_context(text: str, start: int) -> str:
+    before = text[:start]
+    return re.split(r"[,;\n]", before)[-1]
+
+
 _EXPLICIT_WEIGHT = re.compile(
     rf"(?<!\w)(?P<value>\d+)\s*{_WEIGHT_UNIT}(?!\w)", re.IGNORECASE
 )
@@ -324,9 +388,16 @@ def _replace_spoken_number(match: re.Match[str]) -> str:
     return str(total + current)
 
 
-def _positive_integer(value: str, label: str) -> int:
+def _nonnegative_integer(value: str, label: str) -> int:
     parsed = int(value)
-    if parsed <= 0:
+    if parsed < 0:
+        raise InputFormatError(f"{label} must be a non-negative integer")
+    return parsed
+
+
+def _positive_integer(value: str, label: str) -> int:
+    parsed = _nonnegative_integer(value, label)
+    if parsed == 0:
         raise InputFormatError(f"{label} must be a positive integer")
     return parsed
 
@@ -354,7 +425,7 @@ def normalize_input(text: str) -> NormalizedInput:
         raise InputFormatError("Decimal values are not supported; use whole numbers")
 
     def replace_hash(match: re.Match[str]) -> str:
-        value = _positive_integer(
+        value = _nonnegative_integer(
             match.group("prefix") or match.group("suffix"), "Calories"
         )
         return f"{value} ккал/100г"
@@ -365,19 +436,72 @@ def normalize_input(text: str) -> NormalizedInput:
             "Use # directly before or after calories, for example #120"
         )
 
+    compact_labels = {
+        "к": ("kcal", "ккал"),
+        "k": ("kcal", "ккал"),
+        "б": ("protein", "г білків"),
+        "ж": ("fat", "г жирів"),
+        "в": ("carbs", "г вуглеводів"),
+        "b": ("carbs", "г вуглеводів"),
+    }
+
+    def replace_compact(match: re.Match[str]) -> str:
+        marker = match.group("marker").casefold()
+        _kind, label = compact_labels[marker]
+        value = _nonnegative_integer(match.group("value"), label)
+        return f"{value} {label}/100г"
+
+    normalized = _COMPACT_NUTRIENT.sub(replace_compact, normalized)
+
     def replace_text_kcal(match: re.Match[str]) -> str:
-        value = _positive_integer(match.group("value"), "Calories")
+        value = _nonnegative_integer(match.group("value"), "Calories")
         return f"{value} ккал/100г"
 
     normalized = _TEXT_KCAL.sub(replace_text_kcal, normalized)
 
-    calorie_expressions: list[str] = []
+    def replace_portion_kcal(match: re.Match[str]) -> str:
+        context = _nearby_basis_context(normalized, match.start())
+        if not _PORTION_CONTEXT.search(context):
+            return match.group(0)
+        value = _nonnegative_integer(match.group("value"), "Calories")
+        return f"{value} ккал/порцію"
+
+    normalized = _PLAIN_KCAL.sub(replace_portion_kcal, normalized)
+
+    per_100_markers: list[str] = []
+
+    def protect_per_100(match: re.Match[str]) -> str:
+        per_100_markers.append("на 100 г")
+        return _placeholder(10_000 + len(per_100_markers) - 1)
+
+    normalized = _PER_100_PREFIX.sub(protect_per_100, normalized)
+
+    for kind, pattern in _NATURAL_MACROS.items():
+        label = _MACRO_LABELS[kind]
+
+        def replace_natural_macro(
+            match: re.Match[str],
+            *,
+            nutrient_label: str = label,
+            source_text: str = normalized,
+        ) -> str:
+            value = _nonnegative_integer(match.group("value"), nutrient_label)
+            context = _nearby_basis_context(source_text, match.start())
+            basis = "порцію" if _PORTION_CONTEXT.search(context) else "100г"
+            return f"{value} г {nutrient_label}/{basis}"
+
+        normalized = pattern.sub(replace_natural_macro, normalized)
+
+    nutrition_expressions: list[str] = []
 
     def protect_calories(match: re.Match[str]) -> str:
-        calorie_expressions.append(match.group(0))
-        return _placeholder(len(calorie_expressions) - 1)
+        nutrition_expressions.append(match.group(0))
+        return _placeholder(len(nutrition_expressions) - 1)
 
     normalized = _CANONICAL_KCAL.sub(protect_calories, normalized)
+    normalized = _CANONICAL_PORTION_KCAL.sub(protect_calories, normalized)
+    for pattern in _CANONICAL_MACROS.values():
+        normalized = pattern.sub(protect_calories, normalized)
 
     def replace_weight(match: re.Match[str]) -> str:
         value = _positive_integer(match.group("value"), "Weight")
@@ -386,29 +510,52 @@ def normalize_input(text: str) -> NormalizedInput:
     normalized = _EXPLICIT_WEIGHT.sub(replace_weight, normalized)
     normalized = _BARE_AT_BOUNDARY.sub(replace_weight, normalized)
 
-    for index, expression in enumerate(calorie_expressions):
+    for index, expression in enumerate(nutrition_expressions):
         normalized = normalized.replace(_placeholder(index), expression)
+    for index, expression in enumerate(per_100_markers):
+        normalized = normalized.replace(_placeholder(10_000 + index), expression)
 
     normalized = re.sub(r"[ \t]+", " ", normalized).strip()
 
     explicit: list[ExplicitValue] = []
-    weight_index = 0
-    kcal_index = 0
-    matches: list[tuple[int, int, Literal["weight", "kcal"], int]] = []
+    source_indexes = {kind: 0 for kind in ("weight", "kcal", "protein", "fat", "carbs")}
+    matches: list[
+        tuple[
+            int,
+            int,
+            Literal["weight", "kcal", "protein", "fat", "carbs"],
+            int,
+            Literal["per_100g", "portion"] | None,
+        ]
+    ] = []
     for match in _CANONICAL_WEIGHT.finditer(normalized):
         matches.append(
-            (match.start(), match.end(), "weight", int(match.group("value")))
+            (match.start(), match.end(), "weight", int(match.group("value")), None)
         )
     for match in _CANONICAL_KCAL.finditer(normalized):
-        matches.append((match.start(), match.end(), "kcal", int(match.group("value"))))
+        matches.append(
+            (match.start(), match.end(), "kcal", int(match.group("value")), "per_100g")
+        )
+    for match in _CANONICAL_PORTION_KCAL.finditer(normalized):
+        matches.append(
+            (match.start(), match.end(), "kcal", int(match.group("value")), "portion")
+        )
+    for kind, pattern in _CANONICAL_MACROS.items():
+        for match in pattern.finditer(normalized):
+            matches.append(
+                (
+                    match.start(),
+                    match.end(),
+                    cast(Literal["protein", "fat", "carbs"], kind),
+                    int(match.group("value")),
+                    "per_100g" if match.group("basis") == "100г" else "portion",
+                )
+            )
 
-    for start, end, kind, value in sorted(matches):
-        if kind == "weight":
-            weight_index += 1
-            source_id = f"W{weight_index}"
-        else:
-            kcal_index += 1
-            source_id = f"K{kcal_index}"
+    prefixes = {"weight": "W", "kcal": "K", "protein": "P", "fat": "F", "carbs": "C"}
+    for start, end, kind, value, basis in sorted(matches):
+        source_indexes[kind] += 1
+        source_id = f"{prefixes[kind]}{source_indexes[kind]}"
         explicit.append(
             ExplicitValue(
                 source_id=source_id,
@@ -416,6 +563,7 @@ def normalize_input(text: str) -> NormalizedInput:
                 value=value,
                 start=start,
                 end=end,
+                basis=basis,
             )
         )
     portions = tuple(
@@ -455,6 +603,9 @@ def enforce_explicit_values(
         assignments = (
             ("weight", item.weight_source_id),
             ("kcal", item.kcal_source_id),
+            ("protein", item.protein_source_id),
+            ("fat", item.fat_source_id),
+            ("carbs", item.carbs_source_id),
         )
         for kind, source_id in assignments:
             if source_id is None:
@@ -465,12 +616,22 @@ def enforce_explicit_values(
                         if image_present and item.weight_origin == "image"
                         else "model_estimate"
                     )
-                else:
+                elif kind == "kcal":
                     item.kcal_estimated = True
                     item.kcal_origin = (
                         "image"
                         if image_present and item.kcal_origin == "image"
                         else "model_estimate"
+                    )
+                else:
+                    setattr(item, f"{kind}_estimated", True)
+                    current_origin = getattr(item, f"{kind}_origin")
+                    setattr(
+                        item,
+                        f"{kind}_origin",
+                        "image"
+                        if image_present and current_origin == "image"
+                        else "model_estimate",
                     )
                 continue
             source = sources.get(source_id)
@@ -485,10 +646,29 @@ def enforce_explicit_values(
                 item.weight_g = source.value
                 item.weight_estimated = False
                 item.weight_origin = "user_text"
-            else:
-                item.kcal_per_100g = source.value
-                item.kcal_estimated = False
+            elif kind == "kcal":
+                item.kcal_per_100g = (
+                    source.value / item.weight_g * 100
+                    if source.basis == "portion"
+                    else source.value
+                )
+                item.kcal_estimated = (
+                    source.basis == "portion" and item.weight_origin != "user_text"
+                )
                 item.kcal_origin = "user_text"
+                item.kcal_source_basis = source.basis or "per_100g"
+            else:
+                density = float(source.value)
+                if source.basis == "portion":
+                    density = source.value / item.weight_g * 100
+                setattr(item, f"{kind}_per_100g", density)
+                setattr(
+                    item,
+                    f"{kind}_estimated",
+                    source.basis == "portion" and item.weight_origin != "user_text",
+                )
+                setattr(item, f"{kind}_origin", "user_text")
+                setattr(item, f"{kind}_source_basis", source.basis or "per_100g")
 
     missing = set(sources) - used
     if missing:
@@ -630,6 +810,7 @@ class OpenAIAnalyzer:
                 "value": source.value,
                 "start": source.start,
                 "end": source.end,
+                "basis": source.basis,
                 "text": normalized.text[source.start : source.end],
             }
             for source in normalized.explicit_values
