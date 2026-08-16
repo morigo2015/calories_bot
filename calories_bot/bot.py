@@ -8,6 +8,8 @@ import re
 import secrets
 import shutil
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -102,6 +104,8 @@ ANALYSIS_ERROR_TEXT = "Не вдалося порахувати калорії. 
 GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Спробуй ще раз."
 WEEK_ERROR_TEXT = "Не вдалося сформувати підсумок за 7 днів. Спробуй ще раз."
 VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
+LONG_OPERATION_TEXT = "Хвилинку, думаю"
+LLM_OPERATION_TEXT = "Хвилинку, раджусь з ChatGPT"
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
@@ -318,7 +322,8 @@ def format_weekly_calories_reply(
         if missing:
             raise ValueError("Burned-calorie data does not cover the completed week")
 
-    lines = ["Калорії за тиждень", ""]
+    legend = "Позначення: + спожито · − витрачено · = баланс"
+    lines = ["Калорії за тиждень", legend, ""]
     for day in days:
         prefix = f"• {UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}: "
         consumed_text = f"{consumed[day]:+d}"
@@ -386,8 +391,13 @@ def _aggregate_weekly_meals(
 def format_weekly_meals_reply(
     meals: list[PeriodMeal], group_names: tuple[str, ...] | None = None
 ) -> str:
+    total_kcal = sum(meal.meal_kcal for meal in meals)
+    summary = (
+        f"Всього: {round_whole(total_kcal)} кк\n"
+        f"Середнє за день: {round_whole(total_kcal / WEEK_DAYS)} кк"
+    )
     if not meals:
-        return "Страви за тиждень\n\nЗаписів немає."
+        return f"Страви за тиждень\n\nЗаписів немає.\n\n{summary}"
 
     aggregated = _aggregate_weekly_meals(meals, group_names)
     lines = ["Страви за тиждень", ""]
@@ -397,6 +407,7 @@ def format_weekly_meals_reply(
             f"• {display_name} {round_whole(total_weight_g)} г — "
             f"{round_whole(meal_kcal)} кк"
         )
+    lines.extend(("", summary))
     return "\n".join(lines)
 
 
@@ -1209,6 +1220,38 @@ class TelegramHandlers:
         self._transcriber = transcriber
         self._meal_grouper = meal_grouper
 
+    @staticmethod
+    @asynccontextmanager
+    async def _temporary_status(
+        message: object | None, *, llm: bool = False
+    ) -> AsyncIterator[None]:
+        status: object | None = None
+        if message is not None:
+            try:
+                reply_text = getattr(message, "reply_text", None)
+                if callable(reply_text):
+                    status = await reply_text(
+                        LLM_OPERATION_TEXT if llm else LONG_OPERATION_TEXT,
+                        do_quote=False,
+                    )
+            except Exception:
+                LOGGER.warning(
+                    "Could not send a temporary operation status", exc_info=True
+                )
+        try:
+            yield
+        finally:
+            if status is not None:
+                try:
+                    delete = getattr(status, "delete", None)
+                    if callable(delete):
+                        await delete()
+                except Exception:
+                    LOGGER.warning(
+                        "Could not delete a temporary operation status",
+                        exc_info=True,
+                    )
+
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1434,13 +1477,16 @@ class TelegramHandlers:
         if self._statistics is None:
             await message.reply_text(f"Версія: {__version__}", do_quote=False)
             return
-        try:
-            info = await asyncio.to_thread(self._statistics.format_info, __version__)
-        except Exception:
-            LOGGER.exception("Could not build /info statistics")
-            info = f"Версія: {__version__}\nСтатистика тимчасово недоступна."
-        for chunk in _split_telegram_text(info):
-            await message.reply_text(chunk, do_quote=False)
+        async with self._temporary_status(message):
+            try:
+                info = await asyncio.to_thread(
+                    self._statistics.format_info, __version__
+                )
+            except Exception:
+                LOGGER.exception("Could not build /info statistics")
+                info = f"Версія: {__version__}\nСтатистика тимчасово недоступна."
+            for chunk in _split_telegram_text(info):
+                await message.reply_text(chunk, do_quote=False)
 
     async def burned(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -1451,12 +1497,15 @@ class TelegramHandlers:
         if self._garmin_calories is None:
             await message.reply_text(GARMIN_READ_ERROR_TEXT, do_quote=False)
             return
-        try:
-            report = await asyncio.to_thread(self._garmin_calories.format_weekly_report)
-        except Exception:
-            LOGGER.exception("Could not read cached Garmin calorie data")
-            report = GARMIN_READ_ERROR_TEXT
-        await message.reply_text(report, do_quote=False)
+        async with self._temporary_status(message):
+            try:
+                report = await asyncio.to_thread(
+                    self._garmin_calories.format_weekly_report
+                )
+            except Exception:
+                LOGGER.exception("Could not read cached Garmin calorie data")
+                report = GARMIN_READ_ERROR_TEXT
+            await message.reply_text(report, do_quote=False)
 
     async def day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -1466,19 +1515,20 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
-        try:
-            reply = await asyncio.to_thread(service.get_day_summary, message.date)
-        except SheetsReadError:
-            LOGGER.exception("Could not read the calorie log for /day")
-            reply = READ_ERROR_TEXT
-        except Exception:
-            LOGGER.exception("Unexpected error while handling /day")
-            reply = READ_ERROR_TEXT
-        sent = await message.reply_text(
-            reply, parse_mode=ParseMode.HTML, do_quote=False
-        )
-        if reply.startswith("Сьогодні:"):
-            await self._remember_daily_total_message(sent)
+        async with self._temporary_status(message):
+            try:
+                reply = await asyncio.to_thread(service.get_day_summary, message.date)
+            except SheetsReadError:
+                LOGGER.exception("Could not read the calorie log for /day")
+                reply = READ_ERROR_TEXT
+            except Exception:
+                LOGGER.exception("Unexpected error while handling /day")
+                reply = READ_ERROR_TEXT
+            sent = await message.reply_text(
+                reply, parse_mode=ParseMode.HTML, do_quote=False
+            )
+            if reply.startswith("Сьогодні:"):
+                await self._remember_daily_total_message(sent)
 
     async def weekly_calories(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1490,23 +1540,24 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
-        try:
-            burned_totals = None
-            if self._is_admin(update):
-                if self._garmin_calories is None:
-                    raise RuntimeError("Garmin calorie store is unavailable")
-                burned_totals = await asyncio.to_thread(
-                    self._garmin_calories.get_daily_calories
+        async with self._temporary_status(message):
+            try:
+                burned_totals = None
+                if self._is_admin(update):
+                    if self._garmin_calories is None:
+                        raise RuntimeError("Garmin calorie store is unavailable")
+                    burned_totals = await asyncio.to_thread(
+                        self._garmin_calories.get_daily_calories
+                    )
+                reply = await asyncio.to_thread(
+                    service.get_weekly_calories,
+                    message.date,
+                    burned_totals,
                 )
-            reply = await asyncio.to_thread(
-                service.get_weekly_calories,
-                message.date,
-                burned_totals,
-            )
-        except Exception:
-            LOGGER.exception("Could not build /weekly_calories")
-            reply = WEEK_ERROR_TEXT
-        await message.reply_text(reply, do_quote=False)
+            except Exception:
+                LOGGER.exception("Could not build /weekly_calories")
+                reply = WEEK_ERROR_TEXT
+            await message.reply_text(reply, do_quote=False)
 
     async def weekly_meals(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1518,15 +1569,16 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
-        try:
-            reply = await asyncio.to_thread(
-                service.get_weekly_meals, message.date, self._meal_grouper
-            )
-        except Exception:
-            LOGGER.exception("Could not build /weekly_meals")
-            reply = WEEK_ERROR_TEXT
-        for chunk in _split_telegram_text(reply):
-            await message.reply_text(chunk, do_quote=False)
+        async with self._temporary_status(message, llm=self._meal_grouper is not None):
+            try:
+                reply = await asyncio.to_thread(
+                    service.get_weekly_meals, message.date, self._meal_grouper
+                )
+            except Exception:
+                LOGGER.exception("Could not build /weekly_meals")
+                reply = WEEK_ERROR_TEXT
+            for chunk in _split_telegram_text(reply):
+                await message.reply_text(chunk, do_quote=False)
 
     @staticmethod
     def _short_button_name(name: str, limit: int = 34) -> str:
@@ -1583,28 +1635,29 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
-        try:
-            meals = await asyncio.to_thread(service.list_saved_meals)
-        except Exception:
-            LOGGER.exception("Could not list saved meals")
+        async with self._temporary_status(message):
+            try:
+                meals = await asyncio.to_thread(service.list_saved_meals)
+            except Exception:
+                LOGGER.exception("Could not list saved meals")
+                await message.reply_text(
+                    "Не вдалося прочитати збережені страви. Спробуй ще раз.",
+                    do_quote=False,
+                )
+                return
+            text = (
+                "Збережені страви — натисни, щоб додати:"
+                if meals
+                else (
+                    "Збережених страв ще немає.\n"
+                    "Після розрахунку натисни «⭐ Зберегти», і страва з’явиться тут."
+                )
+            )
             await message.reply_text(
-                "Не вдалося прочитати збережені страви. Спробуй ще раз.",
+                text,
+                reply_markup=self._saved_meals_keyboard(meals) if meals else None,
                 do_quote=False,
             )
-            return
-        text = (
-            "Збережені страви — натисни, щоб додати:"
-            if meals
-            else (
-                "Збережених страв ще немає.\n"
-                "Після розрахунку натисни «⭐ Зберегти», і страва з’явиться тут."
-            )
-        )
-        await message.reply_text(
-            text,
-            reply_markup=self._saved_meals_keyboard(meals) if meals else None,
-            do_quote=False,
-        )
 
     async def recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -1614,21 +1667,24 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
-        try:
-            recent = await asyncio.to_thread(service.list_recent_meals)
-        except Exception:
-            LOGGER.exception("Could not list recent meals")
+        async with self._temporary_status(message):
+            try:
+                recent = await asyncio.to_thread(service.list_recent_meals)
+            except Exception:
+                LOGGER.exception("Could not list recent meals")
+                await message.reply_text(
+                    "Не вдалося прочитати нещодавні страви. Спробуй ще раз.",
+                    do_quote=False,
+                )
+                return
+            text = (
+                "Повторити нещодавню страву:" if recent else "Нещодавніх страв немає."
+            )
             await message.reply_text(
-                "Не вдалося прочитати нещодавні страви. Спробуй ще раз.",
+                text,
+                reply_markup=self._recent_meals_keyboard(recent) if recent else None,
                 do_quote=False,
             )
-            return
-        text = "Повторити нещодавню страву:" if recent else "Нещодавніх страв немає."
-        await message.reply_text(
-            text,
-            reply_markup=self._recent_meals_keyboard(recent) if recent else None,
-            do_quote=False,
-        )
 
     async def save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -1639,24 +1695,25 @@ class TelegramHandlers:
         if service is None:
             return
         name = " ".join(context.args or []).strip() or None
-        try:
-            saved, created = await asyncio.to_thread(service.save_latest_meal, name)
-        except SavedMealNameError as exc:
-            await message.reply_text(str(exc), do_quote=False)
-            return
-        except Exception:
-            LOGGER.exception("Could not save the latest meal")
-            await message.reply_text(
-                "Не вдалося зберегти страву. Спробуй ще раз.", do_quote=False
-            )
-            return
-        if saved is None:
-            reply = "Немає запису, який можна зберегти."
-        elif created:
-            reply = f"Збережено: {saved.display_name} ✓"
-        else:
-            reply = f"Ця страва вже збережена: {saved.display_name}."
-        await message.reply_text(reply, do_quote=False)
+        async with self._temporary_status(message, llm=True):
+            try:
+                saved, created = await asyncio.to_thread(service.save_latest_meal, name)
+            except SavedMealNameError as exc:
+                await message.reply_text(str(exc), do_quote=False)
+                return
+            except Exception:
+                LOGGER.exception("Could not save the latest meal")
+                await message.reply_text(
+                    "Не вдалося зберегти страву. Спробуй ще раз.", do_quote=False
+                )
+                return
+            if saved is None:
+                reply = "Немає запису, який можна зберегти."
+            elif created:
+                reply = f"Збережено: {saved.display_name} ✓"
+            else:
+                reply = f"Ця страва вже збережена: {saved.display_name}."
+            await message.reply_text(reply, do_quote=False)
 
     async def goal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -1721,19 +1778,32 @@ class TelegramHandlers:
         except ValueError:
             await query.answer("Некоректна кнопка.", show_alert=True)
             return
-        try:
-            await asyncio.to_thread(self._manager.set_daily_kcal_goal, user.id, None)
-        except Exception:
-            LOGGER.exception("Could not disable daily goal")
-            await query.answer(GOAL_ERROR_TEXT, show_alert=True)
-            return
-        self._clear_pending_input(context)
-        await query.answer()
-        await query.edit_message_text("Денну ціль вимкнено ✓", reply_markup=None)
+        async with self._temporary_status(query.message):
+            try:
+                await asyncio.to_thread(
+                    self._manager.set_daily_kcal_goal, user.id, None
+                )
+            except Exception:
+                LOGGER.exception("Could not disable daily goal")
+                await query.answer(GOAL_ERROR_TEXT, show_alert=True)
+                return
+            self._clear_pending_input(context)
+            await query.answer()
+            await query.edit_message_text("Денну ціль вимкнено ✓", reply_markup=None)
 
-    async def delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def delete(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        show_status: bool = True,
+    ) -> None:
         query = update.callback_query
         if query is None:
+            return
+        if show_status:
+            async with self._temporary_status(query.message):
+                await self.delete(update, context, show_status=False)
             return
         service = await self._active_service(update, callback=True)
         if service is None:
@@ -1803,49 +1873,60 @@ class TelegramHandlers:
         service = await self._active_service(update, callback=True)
         if service is None:
             return
-        try:
-            message_id, day = self._parse_source_callback(
-                query.data, SAVE_CALLBACK_PREFIX
-            )
-            saved, created = await asyncio.to_thread(
-                service.save_source_meal, message_id, day
-            )
-        except SavedMealNameError as exc:
-            await query.answer(str(exc), show_alert=True)
-            return
-        except Exception:
-            LOGGER.exception("Could not save meal from callback")
+        async with self._temporary_status(query.message, llm=True):
+            try:
+                message_id, day = self._parse_source_callback(
+                    query.data, SAVE_CALLBACK_PREFIX
+                )
+                saved, created = await asyncio.to_thread(
+                    service.save_source_meal, message_id, day
+                )
+            except SavedMealNameError as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
+            except Exception:
+                LOGGER.exception("Could not save meal from callback")
+                await query.answer(
+                    "Не вдалося зберегти страву. Спробуй ще раз.",
+                    show_alert=True,
+                )
+                return
+            if saved is None:
+                await query.answer(
+                    "Цього запису вже немає. Онови список.", show_alert=True
+                )
+                return
             await query.answer(
-                "Не вдалося зберегти страву. Спробуй ще раз.",
-                show_alert=True,
+                f"{'Збережено' if created else 'Вже збережено'}: {saved.display_name}"
             )
-            return
-        if saved is None:
-            await query.answer("Цього запису вже немає. Онови список.", show_alert=True)
-            return
-        await query.answer(
-            f"{'Збережено' if created else 'Вже збережено'}: {saved.display_name}"
-        )
-        try:
-            await query.edit_message_reply_markup(
-                reply_markup=self._meal_reply_markup(
-                    MealReply(
-                        text="",
-                        telegram_message_id=message_id,
-                        accounting_day=day,
-                        can_save=False,
-                        can_change_weight=len(saved.base_meal.items) == 1,
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=self._meal_reply_markup(
+                        MealReply(
+                            text="",
+                            telegram_message_id=message_id,
+                            accounting_day=day,
+                            can_save=False,
+                            can_change_weight=len(saved.base_meal.items) == 1,
+                        )
                     )
                 )
-            )
-        except Exception:
-            LOGGER.warning("Could not hide saved-meal button", exc_info=True)
+            except Exception:
+                LOGGER.warning("Could not hide saved-meal button", exc_info=True)
 
     async def meal_weight_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        show_status: bool = True,
     ) -> None:
         query = update.callback_query
         if query is None:
+            return
+        if show_status:
+            async with self._temporary_status(query.message):
+                await self.meal_weight_callback(update, context, show_status=False)
             return
         service = await self._active_service(update, callback=True)
         if service is None:
@@ -2030,7 +2111,11 @@ class TelegramHandlers:
         return True
 
     async def library_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        show_status: bool = True,
     ) -> None:
         query = update.callback_query
         if query is None:
@@ -2040,6 +2125,10 @@ class TelegramHandlers:
             self._clear_pending_input(context)
             await query.answer()
             await query.edit_message_text("Скасовано.", reply_markup=None)
+            return
+        if show_status:
+            async with self._temporary_status(query.message):
+                await self.library_callback(update, context, show_status=False)
             return
         service = await self._active_service(update, callback=True)
         if service is None:
@@ -2174,7 +2263,20 @@ class TelegramHandlers:
         service: CaloriesService,
         state: dict[str, object],
         weight_g: int,
+        *,
+        show_status: bool = True,
     ) -> None:
+        if show_status:
+            async with self._temporary_status(message):
+                await self._apply_meal_weight(
+                    message,
+                    context,
+                    service,
+                    state,
+                    weight_g,
+                    show_status=False,
+                )
+            return
         try:
             result = await asyncio.to_thread(
                 service.change_meal_weight,
@@ -2258,14 +2360,19 @@ class TelegramHandlers:
         except ValueError:
             await message.reply_text(self._goal_validation_text(), do_quote=False)
             return False
-        try:
-            await asyncio.to_thread(self._manager.set_daily_kcal_goal, user.id, goal)
-        except Exception:
-            LOGGER.exception("Could not save daily goal")
-            await message.reply_text(GOAL_ERROR_TEXT, do_quote=False)
-            return False
-        await message.reply_text(f"Денну ціль встановлено: {goal} кк ✓", do_quote=False)
-        return True
+        async with self._temporary_status(message):
+            try:
+                await asyncio.to_thread(
+                    self._manager.set_daily_kcal_goal, user.id, goal
+                )
+            except Exception:
+                LOGGER.exception("Could not save daily goal")
+                await message.reply_text(GOAL_ERROR_TEXT, do_quote=False)
+                return False
+            await message.reply_text(
+                f"Денну ціль встановлено: {goal} кк ✓", do_quote=False
+            )
+            return True
 
     async def photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -2286,14 +2393,21 @@ class TelegramHandlers:
         if existing is not None:
             await self._send_meal_replies(message, existing)
             return
-        try:
-            telegram_file = await message.photo[-1].get_file()
-            image_bytes = bytes(await telegram_file.download_as_bytearray())
-        except Exception:
-            LOGGER.exception("Could not download the Telegram photo")
-            await message.reply_text(ANALYSIS_ERROR_TEXT, do_quote=False)
-            return
-        await self._process(service, message, message.caption or "", image_bytes)
+        async with self._temporary_status(message, llm=True):
+            try:
+                telegram_file = await message.photo[-1].get_file()
+                image_bytes = bytes(await telegram_file.download_as_bytearray())
+            except Exception:
+                LOGGER.exception("Could not download the Telegram photo")
+                await message.reply_text(ANALYSIS_ERROR_TEXT, do_quote=False)
+                return
+            await self._process(
+                service,
+                message,
+                message.caption or "",
+                image_bytes,
+                show_status=False,
+            )
 
     async def voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -2317,21 +2431,22 @@ class TelegramHandlers:
         if existing is not None:
             await self._send_meal_replies(message, existing)
             return
-        try:
-            telegram_file = await message.voice.get_file()
-            audio_bytes = bytes(await telegram_file.download_as_bytearray())
-            transcript = await asyncio.to_thread(
-                self._transcriber.transcribe, audio_bytes
-            )
-        except TranscriptionError:
-            LOGGER.exception("Could not transcribe a Telegram voice message")
-            await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
-            return
-        except Exception:
-            LOGGER.exception("Could not download or transcribe a voice message")
-            await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
-            return
-        await self._process(service, message, transcript)
+        async with self._temporary_status(message, llm=True):
+            try:
+                telegram_file = await message.voice.get_file()
+                audio_bytes = bytes(await telegram_file.download_as_bytearray())
+                transcript = await asyncio.to_thread(
+                    self._transcriber.transcribe, audio_bytes
+                )
+            except TranscriptionError:
+                LOGGER.exception("Could not transcribe a Telegram voice message")
+                await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
+                return
+            except Exception:
+                LOGGER.exception("Could not download or transcribe a voice message")
+                await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
+                return
+            await self._process(service, message, transcript, show_status=False)
 
     @staticmethod
     def _meal_reply_markup(result: MealReply) -> InlineKeyboardMarkup:
@@ -2471,7 +2586,19 @@ class TelegramHandlers:
         message: Message,
         text: str,
         image_bytes: bytes | None = None,
+        *,
+        show_status: bool = True,
     ) -> None:
+        if show_status:
+            async with self._temporary_status(message, llm=True):
+                await self._process(
+                    service,
+                    message,
+                    text,
+                    image_bytes,
+                    show_status=False,
+                )
+            return
         try:
             result = await asyncio.to_thread(
                 service.process_message,
@@ -2548,19 +2675,22 @@ class TelegramHandlers:
                 do_quote=False,
             )
             return
-        try:
-            token = await asyncio.to_thread(self._manager.create_invite, display_name)
-            bot_user = await context.bot.get_me()
-            if not bot_user.username:
-                raise RuntimeError("Bot has no username")
-        except Exception:
-            LOGGER.exception("Could not create invite")
-            await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
-            return
-        self._clear_pending_input(context)
-        await message.reply_text(
-            f"https://t.me/{bot_user.username}?start={token}", do_quote=False
-        )
+        async with self._temporary_status(message):
+            try:
+                token = await asyncio.to_thread(
+                    self._manager.create_invite, display_name
+                )
+                bot_user = await context.bot.get_me()
+                if not bot_user.username:
+                    raise RuntimeError("Bot has no username")
+            except Exception:
+                LOGGER.exception("Could not create invite")
+                await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
+                return
+            self._clear_pending_input(context)
+            await message.reply_text(
+                f"https://t.me/{bot_user.username}?start={token}", do_quote=False
+            )
 
     async def users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
@@ -2568,13 +2698,14 @@ class TelegramHandlers:
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
             return
-        try:
-            users = await asyncio.to_thread(self._manager.list_users)
-        except Exception:
-            LOGGER.exception("Could not list users")
-            await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
-            return
-        await message.reply_text(format_users_reply(users), do_quote=False)
+        async with self._temporary_status(message):
+            try:
+                users = await asyncio.to_thread(self._manager.list_users)
+            except Exception:
+                LOGGER.exception("Could not list users")
+                await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
+                return
+            await message.reply_text(format_users_reply(users), do_quote=False)
 
     async def block(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._set_status_command(update, context, "blocked")
@@ -2592,19 +2723,23 @@ class TelegramHandlers:
             return
         try:
             telegram_user_id = self._parse_admin_user_id(context.args)
-            await asyncio.to_thread(self._manager.set_status, telegram_user_id, status)
         except ValueError:
             command = "block" if status == "blocked" else "unblock"
             await message.reply_text(
                 f"Формат: /{command} <telegram_user_id>", do_quote=False
             )
             return
-        except Exception:
-            LOGGER.exception("Could not change user status")
-            await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
-            return
-        label = "Заблоковано" if status == "blocked" else "Розблоковано"
-        await message.reply_text(f"{label}: {telegram_user_id}", do_quote=False)
+        async with self._temporary_status(message):
+            try:
+                await asyncio.to_thread(
+                    self._manager.set_status, telegram_user_id, status
+                )
+            except Exception:
+                LOGGER.exception("Could not change user status")
+                await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
+                return
+            label = "Заблоковано" if status == "blocked" else "Розблоковано"
+            await message.reply_text(f"{label}: {telegram_user_id}", do_quote=False)
 
     async def delete_user_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2616,37 +2751,43 @@ class TelegramHandlers:
             return
         try:
             telegram_user_id = self._parse_admin_user_id(context.args)
-            user = await asyncio.to_thread(self._manager.get_user, telegram_user_id)
-            if user is None:
-                raise UserRegistryError("User not found")
         except ValueError:
             await message.reply_text(
                 "Формат: /delete <telegram_user_id>", do_quote=False
             )
             return
-        except Exception:
-            LOGGER.exception("Could not prepare user deletion")
-            await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
-            return
-        keyboard = InlineKeyboardMarkup(
-            [
+        async with self._temporary_status(message):
+            try:
+                user = await asyncio.to_thread(self._manager.get_user, telegram_user_id)
+                if user is None:
+                    raise UserRegistryError("User not found")
+            except Exception:
+                LOGGER.exception("Could not prepare user deletion")
+                await message.reply_text(ADMIN_ERROR_TEXT, do_quote=False)
+                return
+            keyboard = InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        "🗑 Підтвердити видалення",
-                        callback_data=f"{ADMIN_DELETE_CALLBACK_PREFIX}{telegram_user_id}",
-                    ),
-                    InlineKeyboardButton(
-                        "❌ Скасувати",
-                        callback_data=f"{ADMIN_CANCEL_CALLBACK_PREFIX}{telegram_user_id}",
-                    ),
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Підтвердити видалення",
+                            callback_data=(
+                                f"{ADMIN_DELETE_CALLBACK_PREFIX}{telegram_user_id}"
+                            ),
+                        ),
+                        InlineKeyboardButton(
+                            "❌ Скасувати",
+                            callback_data=(
+                                f"{ADMIN_CANCEL_CALLBACK_PREFIX}{telegram_user_id}"
+                            ),
+                        ),
+                    ]
                 ]
-            ]
-        )
-        await message.reply_text(
-            f"Повністю видалити користувача {telegram_user_id}?",
-            reply_markup=keyboard,
-            do_quote=False,
-        )
+            )
+            await message.reply_text(
+                f"Повністю видалити користувача {telegram_user_id}?",
+                reply_markup=keyboard,
+                do_quote=False,
+            )
 
     async def admin_delete_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2672,16 +2813,17 @@ class TelegramHandlers:
         except ValueError:
             await query.answer("Некоректна кнопка.", show_alert=True)
             return
-        try:
-            await asyncio.to_thread(self._manager.delete_user, telegram_user_id)
-        except Exception:
-            LOGGER.exception("Could not fully delete user")
-            await query.answer(ADMIN_ERROR_TEXT, show_alert=True)
-            return
-        await query.answer()
-        await query.edit_message_text(
-            f"Користувача {telegram_user_id} видалено.", reply_markup=None
-        )
+        async with self._temporary_status(query.message):
+            try:
+                await asyncio.to_thread(self._manager.delete_user, telegram_user_id)
+            except Exception:
+                LOGGER.exception("Could not fully delete user")
+                await query.answer(ADMIN_ERROR_TEXT, show_alert=True)
+                return
+            await query.answer()
+            await query.edit_message_text(
+                f"Користувача {telegram_user_id} видалено.", reply_markup=None
+            )
 
     async def _reject_admin_command(self, update: Update) -> None:
         if not self._is_private(update):

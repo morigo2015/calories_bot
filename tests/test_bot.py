@@ -13,6 +13,8 @@ from calories_bot.bot import (
     ANALYSIS_ERROR_TEXT,
     DELETE_ERROR_TEXT,
     FORMAT_ERROR_TEXT,
+    LLM_OPERATION_TEXT,
+    LONG_OPERATION_TEXT,
     NOT_FOOD_TEXT,
     READ_ERROR_TEXT,
     UNCERTAIN_WRITE_TEXT,
@@ -687,7 +689,8 @@ def test_weekly_calories_includes_seven_days_admin_balance_and_averages() -> Non
     )
 
     assert reply == (
-        "Калорії за тиждень\n\n"
+        "Калорії за тиждень\n"
+        "Позначення: + спожито · − витрачено · = баланс\n\n"
         "• нд 02.08: +1640 -2000 =-360\n"
         "• пн 03.08: +1800 -2000 =-200\n"
         "• вт 04.08: +0 -2000 =-2000\n"
@@ -702,10 +705,11 @@ def test_weekly_calories_includes_seven_days_admin_balance_and_averages() -> Non
 def test_weekly_calories_for_regular_user_shows_only_consumed() -> None:
     reply = format_weekly_calories_reply(date(2026, 8, 8), {date(2026, 8, 8): 700})
 
+    assert "Позначення: + спожито · − витрачено · = баланс" in reply
     assert "• сб 08.08: +700" in reply
     assert "Середнє: +100" in reply
-    assert " -" not in reply
-    assert "=" not in reply
+    day_lines = [line for line in reply.splitlines() if line.startswith("• ")]
+    assert all(" -" not in line and "=" not in line for line in day_lines)
 
 
 def test_weekly_meals_aggregates_names_weights_and_sorts_by_calories() -> None:
@@ -718,12 +722,18 @@ def test_weekly_meals_aggregates_names_weights_and_sorts_by_calories() -> None:
     )
 
     assert reply == (
-        "Страви за тиждень\n\n• Сир 100 г — 360 кк\n• Вино сухе 350 г — 200 кк"
+        "Страви за тиждень\n\n"
+        "• Сир 100 г — 360 кк\n"
+        "• Вино сухе 350 г — 200 кк\n\n"
+        "Всього: 560 кк\n"
+        "Середнє за день: 80 кк"
     )
 
 
 def test_weekly_meals_handles_no_records() -> None:
-    assert format_weekly_meals_reply([]) == "Страви за тиждень\n\nЗаписів немає."
+    assert format_weekly_meals_reply([]) == (
+        "Страви за тиждень\n\nЗаписів немає.\n\nВсього: 0 кк\nСереднє за день: 0 кк"
+    )
 
 
 def test_weekly_meals_never_exceeds_twenty_rows() -> None:
@@ -762,7 +772,13 @@ def test_weekly_meals_semantically_groups_names_and_sums_locally(tmp_path) -> No
         "Кава",
         "Кава чорна",
     }
-    assert reply == ("Страви за тиждень\n\n• Вино 300 г — 240 кк\n• Кава 500 г — 6 кк")
+    assert reply == (
+        "Страви за тиждень\n\n"
+        "• Вино 300 г — 240 кк\n"
+        "• Кава 500 г — 6 кк\n\n"
+        "Всього: 246 кк\n"
+        "Середнє за день: 35 кк"
+    )
 
 
 def test_weekly_meals_falls_back_when_llm_grouping_fails(tmp_path) -> None:
@@ -776,7 +792,8 @@ def test_weekly_meals_falls_back_when_llm_grouping_fails(tmp_path) -> None:
 
     reply = service.get_weekly_meals(datetime(2026, 8, 2, tzinfo=UTC), Grouper())
 
-    assert reply.endswith("• Сухе вино 200 г — 160 кк")
+    assert "• Сухе вино 200 г — 160 кк" in reply
+    assert reply.endswith("Всього: 160 кк\nСереднє за день: 23 кк")
 
 
 def test_user_list_contains_status_ids_and_pending_invites() -> None:
@@ -1020,6 +1037,20 @@ class FakeManager:
 
 
 def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
+    class FakeSentMessage:
+        def __init__(self, parent, text, message_id):
+            self._parent = parent
+            self.text = text
+            self.message_id = message_id
+            self.chat_id = user_id if chat_id is None else chat_id
+            self.date = datetime(2026, 8, 2, 9, tzinfo=UTC)
+
+        async def delete(self):
+            index = self._parent.replies.index(self.text)
+            self._parent.replies.pop(index)
+            self._parent.reply_kwargs.pop(index)
+            self._parent.deleted_replies.append(self.text)
+
     class FakeMessage:
         text = "сир 50"
         caption = None
@@ -1032,10 +1063,14 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
         def __init__(self):
             self.replies = []
             self.reply_kwargs = []
+            self.deleted_replies = []
 
         async def reply_text(self, text, **kwargs):
             self.replies.append(text)
             self.reply_kwargs.append(kwargs)
+            if text in {LONG_OPERATION_TEXT, LLM_OPERATION_TEXT}:
+                return FakeSentMessage(self, text, 100)
+            return None
 
     message = FakeMessage()
     return (
@@ -1104,6 +1139,7 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
     assert message.reply_kwargs[0]["do_quote"] is False
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert "reply_markup" not in message.reply_kwargs[1]
+    assert message.deleted_replies == [LLM_OPERATION_TEXT]
 
 
 def test_voice_is_transcribed_and_processed_as_food_text() -> None:
@@ -1151,6 +1187,23 @@ def test_voice_is_transcribed_and_processed_as_food_text() -> None:
         "Сливи двісті грамів калорійність сорок калорій на сто грамів"
     )
     assert message.replies == ["Сливи"]
+    assert message.deleted_replies == [LLM_OPERATION_TEXT]
+
+
+def test_temporary_status_is_deleted_when_operation_fails() -> None:
+    handlers = TelegramHandlers(999, FakeManager())
+    _, message = make_update()
+
+    async def fail_after_status():
+        with pytest.raises(RuntimeError, match="controlled"):
+            async with handlers._temporary_status(message, llm=True):
+                assert message.replies == [LLM_OPERATION_TEXT]
+                raise RuntimeError("controlled")
+
+    asyncio.run(fail_after_status())
+
+    assert message.replies == []
+    assert message.deleted_replies == [LLM_OPERATION_TEXT]
 
 
 def test_voice_without_transcriber_returns_clear_error() -> None:
@@ -1223,14 +1276,23 @@ def test_day_handler_passes_telegram_message_date() -> None:
     )
     update, message = make_update()
 
+    class SentMessage:
+        chat_id = 123
+        message_id = 600
+        date = datetime(2026, 8, 2, 9, tzinfo=UTC)
+
+        def __init__(self, text):
+            self.text = text
+
+        async def delete(self):
+            index = message.replies.index(self.text)
+            message.replies.pop(index)
+            message.reply_kwargs.pop(index)
+
     async def reply_text(text, **kwargs):
         message.replies.append(text)
         message.reply_kwargs.append(kwargs)
-        return SimpleNamespace(
-            chat_id=123,
-            message_id=600,
-            date=datetime(2026, 8, 2, 9, tzinfo=UTC),
-        )
+        return SentMessage(text)
 
     message.reply_text = reply_text
 
@@ -1270,6 +1332,7 @@ def test_weekly_calories_excludes_current_accounting_day_for_user(tmp_path) -> N
 
     assert store.range == (date(2026, 7, 25), date(2026, 7, 31))
     assert message.replies[0].startswith("Калорії за тиждень")
+    assert message.deleted_replies == [LONG_OPERATION_TEXT]
 
 
 def test_admin_weekly_calories_includes_garmin_balance(tmp_path) -> None:
@@ -1294,13 +1357,24 @@ def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     store.period_meals = [PeriodMeal("сир", 100, 360)]
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
-    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    grouper = SimpleNamespace(
+        group=lambda names: MealGroupingResult(tuple("Сир" for _ in names), METADATA)
+    )
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        meal_grouper=grouper,
+    )
     update, message = make_update()
 
     asyncio.run(handlers.weekly_meals(update, SimpleNamespace(user_data={})))
 
     assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
-    assert message.replies == ["Страви за тиждень\n\n• Сир 100 г — 360 кк"]
+    assert message.replies == [
+        "Страви за тиждень\n\n• Сир 100 г — 360 кк\n\n"
+        "Всього: 360 кк\nСереднє за день: 51 кк"
+    ]
+    assert message.deleted_replies == [LLM_OPERATION_TEXT]
 
 
 def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
