@@ -111,7 +111,7 @@ GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Сп�
 WEEK_ERROR_TEXT = "Не вдалося сформувати тижневий підсумок. Спробуй ще раз."
 VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
 LONG_OPERATION_TEXT = "⏳ Хвилинку, думаю. . ."
-LLM_OPERATION_TEXT = "⏳ Хвилинку, раджусь з AI. . ."
+LLM_OPERATION_TEXT = "⏳ Хвилинку, спілкуюсь з AI. . ."
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
@@ -132,6 +132,7 @@ GARMIN_READ_ERROR_TEXT = (
     "Перевір журнал оновлення або спробуй після наступного оновлення доби."
 )
 WEEK_DAYS = 7
+MACRO_TRACKING_START_DATE = date(2026, 8, 17)
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
 
@@ -323,9 +324,9 @@ def _format_item_calculation(item: CalculatedFoodItem, *, heading_level: int) ->
         heading += f"{separator}{weight_prefix}{round_whole(item.weight_g)} г"
     return (
         f"<h{heading_level}>{heading}</h{heading_level}>"
-        f"<p>{_format_icon_nutrition(_summary_for_item(item))}</p>"
+        f"<details><summary>{_format_icon_nutrition(_summary_for_item(item))}</summary>"
         f"<p><sub>На 100 г:</sub><br/>"
-        f"{_format_icon_nutrition(_per_100g_summary(item))}</p>"
+        f"{_format_icon_nutrition(_per_100g_summary(item))}</p></details>"
     )
 
 
@@ -335,12 +336,30 @@ def _as_summary(value: float | NutritionSummary) -> NutritionSummary:
     return NutritionSummary.unknown_macros(float(value))
 
 
-def _state_nutrition(state: SheetState) -> NutritionSummary:
+def _calories_only(summary: NutritionSummary) -> NutritionSummary:
+    return NutritionSummary(
+        kcal=summary.kcal,
+        kcal_estimated=summary.kcal_estimated,
+    )
+
+
+def _nutrition_for_day(summary: NutritionSummary, day: date) -> NutritionSummary:
+    if day < MACRO_TRACKING_START_DATE:
+        return NutritionSummary.unknown_macros(
+            summary.kcal, kcal_estimated=summary.kcal_estimated
+        )
+    return summary
+
+
+def _state_nutrition(state: SheetState, day: date) -> NutritionSummary:
     nutrition = state.today_nutrition
     if isinstance(nutrition, NutritionSummary):
-        return nutrition
+        return _nutrition_for_day(nutrition, day)
     total = float(state.today_total)
-    return NutritionSummary() if total == 0 else NutritionSummary.unknown_macros(total)
+    fallback = (
+        NutritionSummary() if total == 0 else NutritionSummary.unknown_macros(total)
+    )
+    return _nutrition_for_day(fallback, day)
 
 
 def _format_progress_value(
@@ -391,6 +410,16 @@ def format_daily_total(
     )
 
 
+def _format_today_total(
+    today_total: float | NutritionSummary,
+    daily_kcal_goal: int | None,
+    daily_protein_goal: int | None = None,
+) -> str:
+    return "Сьогодні:\n" + format_daily_total(
+        today_total, daily_kcal_goal, daily_protein_goal
+    )
+
+
 def format_reply(meal: MealResult) -> str:
     if len(meal.items) > 1:
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
@@ -414,7 +443,7 @@ def format_weekly_calories_reply(
     period_days: int = WEEK_DAYS,
 ) -> str:
     return (
-        f"<h3>Баланс калорій {_weekly_period_text(period_days)}</h3>"
+        f"<h3>Різниця калорій {_weekly_period_text(period_days)}</h3>"
         + _format_weekly_calories_body(
             end_day, totals, burned_totals, period_days=period_days
         )
@@ -455,14 +484,14 @@ def _format_weekly_calories_body(
     for day in days:
         consumed_kcal = round_whole(consumed[day].kcal)
         if burned_totals is None:
-            values = f"+ {consumed_kcal} ккал"
+            values = f"+ {consumed_kcal}"
         else:
             burned = burned_totals[day]
             balance = consumed_kcal - burned
             values = (
-                f"+ {consumed_kcal} ккал&nbsp;&nbsp;"
-                f"- {burned} ккал&nbsp;&nbsp;"
-                f"= <b><u>{balance:+d} ккал</u></b>"
+                f"+ {consumed_kcal}&nbsp;&nbsp;"
+                f"- {burned}&nbsp;&nbsp;"
+                f"= <b><u>{balance:+d}</u></b>"
             )
         day_rows.append(
             f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: {values}</li>"
@@ -482,21 +511,45 @@ def _format_weekly_calories_body(
         total_line = (
             f"Спожито: {total_consumed} ккал&nbsp;&nbsp;&nbsp;"
             f"Витрачено: {total_burned} ккал&nbsp;&nbsp;&nbsp;"
-            f"Баланс: <b><u>{total_balance:+d} ккал</u></b>"
+            f"Різниця: <b><u>{total_balance:+d} ккал</u></b>"
         )
         average_line = (
             f"Спожито: {average_consumed} ккал&nbsp;&nbsp;&nbsp;"
             f"Витрачено: {average_burned} ккал&nbsp;&nbsp;&nbsp;"
-            f"Баланс: <b><u>{average_balance:+d} ккал</u></b>"
+            f"Різниця: <b><u>{average_balance:+d} ккал</u></b>"
         )
+
+    day_legend = (
+        "+ спожито ккал"
+        if burned_totals is None
+        else "+ спожито ккал, - витрачено, = різниця"
+    )
 
     return (
         f"<p>{total_line}</p>"
         "<h4>В середньому за день:</h4>"
         f"<p>{average_line}</p>"
         "<details><summary>По дням</summary>"
-        f"<ul>{''.join(day_rows)}</ul></details>"
+        f"<p>{day_legend}</p><ul>{''.join(day_rows)}</ul></details>"
     )
+
+
+def _meal_report_nutrition(meal: PeriodMeal) -> NutritionSummary:
+    nutrition = meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
+    if (
+        meal.accounting_day is not None
+        and meal.accounting_day < MACRO_TRACKING_START_DATE
+    ):
+        return _calories_only(nutrition)
+    return nutrition
+
+
+def _macro_average_days(end_day: date, period_days: int) -> int:
+    start_day = end_day - timedelta(days=period_days - 1)
+    macro_start_day = max(start_day, MACRO_TRACKING_START_DATE)
+    if end_day < macro_start_day:
+        return 0
+    return (end_day - macro_start_day).days + 1
 
 
 def _aggregate_weekly_meals(
@@ -515,9 +568,7 @@ def _aggregate_weekly_meals(
         source_name = group_names[index] if group_names is not None else meal.meal_name
         display_name = re.sub(r"\s+", " ", source_name).strip()
         key = display_name.casefold()
-        meal_nutrition = meal.nutrition or NutritionSummary.unknown_macros(
-            meal.meal_kcal
-        )
+        meal_nutrition = _meal_report_nutrition(meal)
         if key in grouped:
             original_name, weight, nutrients = grouped[key]
             grouped[key] = (
@@ -551,6 +602,8 @@ def format_weekly_meals_reply(
     daily_kcal_goal: int | None = None,
     daily_protein_goal: int | None = None,
     period_days: int = WEEK_DAYS,
+    *,
+    end_day: date | None = None,
 ) -> str:
     return (
         f"<h3>КБЖВ {_weekly_period_text(period_days)}</h3>"
@@ -560,6 +613,7 @@ def format_weekly_meals_reply(
             daily_kcal_goal,
             daily_protein_goal,
             period_days=period_days,
+            end_day=end_day,
         )
     )
 
@@ -571,25 +625,39 @@ def _format_weekly_meals_body(
     daily_protein_goal: int | None = None,
     *,
     period_days: int = WEEK_DAYS,
+    end_day: date | None = None,
 ) -> str:
     _weekly_period_text(period_days)
+    if end_day is None:
+        dated_meals = [
+            meal.accounting_day for meal in meals if meal.accounting_day is not None
+        ]
+        end_day = (
+            max(dated_meals)
+            if dated_meals
+            else (MACRO_TRACKING_START_DATE + timedelta(days=period_days - 1))
+        )
+    macro_average_days = _macro_average_days(end_day, period_days)
     total = sum(
-        (
-            meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
-            for meal in meals
-        ),
+        (_meal_report_nutrition(meal) for meal in meals),
         NutritionSummary(),
     )
     average = NutritionSummary(
         kcal=round_whole(total.kcal / period_days),
         protein_g=(
             None
-            if total.protein_g is None
-            else round_whole(total.protein_g / period_days)
+            if macro_average_days == 0 or total.protein_g is None
+            else round_whole(total.protein_g / macro_average_days)
         ),
-        fat_g=(None if total.fat_g is None else round_whole(total.fat_g / period_days)),
+        fat_g=(
+            None
+            if macro_average_days == 0 or total.fat_g is None
+            else round_whole(total.fat_g / macro_average_days)
+        ),
         carbs_g=(
-            None if total.carbs_g is None else round_whole(total.carbs_g / period_days)
+            None
+            if macro_average_days == 0 or total.carbs_g is None
+            else round_whole(total.carbs_g / macro_average_days)
         ),
         kcal_estimated=total.kcal_estimated,
         protein_estimated=total.protein_estimated,
@@ -628,7 +696,7 @@ def format_weekly_reply(
     daily_protein_goal: int | None = None,
     period_days: int = WEEK_DAYS,
 ) -> str:
-    calories_heading = "Баланс калорій" if burned_totals is not None else "Калорії"
+    calories_heading = "Різниця калорій" if burned_totals is not None else "Калорії"
     return (
         f"<h3>Статистика {_weekly_period_text(period_days)}</h3>"
         + _format_weekly_meals_body(
@@ -637,6 +705,7 @@ def format_weekly_reply(
             daily_kcal_goal,
             daily_protein_goal,
             period_days=period_days,
+            end_day=end_day,
         )
         + f"<h4>{calories_heading}:</h4>"
         + _format_weekly_calories_body(
@@ -675,11 +744,18 @@ def format_day_reply(
     meals: list[DayMeal],
     daily_kcal_goal: int | None = None,
     daily_protein_goal: int | None = None,
+    *,
+    accounting_day: date | None = None,
 ) -> str:
     meal_nutrients = [
         (
             meal,
-            meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal),
+            _nutrition_for_day(
+                meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal),
+                accounting_day,
+            )
+            if accounting_day is not None
+            else meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal),
         )
         for meal in meals
     ]
@@ -774,6 +850,7 @@ class CaloriesService:
             self._store.get_day_meals(day),
             self._daily_kcal_goal,
             self._daily_protein_goal,
+            accounting_day=day,
         )
 
     def get_weekly_calories(
@@ -797,6 +874,7 @@ class CaloriesService:
                 meals,
                 daily_kcal_goal=self._daily_kcal_goal,
                 daily_protein_goal=self._daily_protein_goal,
+                end_day=end_day,
             )
 
         exact = _aggregate_weekly_meals(meals, collapse_tail=False)
@@ -811,6 +889,7 @@ class CaloriesService:
                 grouping.group_names,
                 self._daily_kcal_goal,
                 self._daily_protein_goal,
+                end_day=end_day,
             )
         except MealGroupingError:
             LOGGER.exception("Could not semantically group weekly meals")
@@ -818,6 +897,7 @@ class CaloriesService:
                 exact_meals,
                 daily_kcal_goal=self._daily_kcal_goal,
                 daily_protein_goal=self._daily_protein_goal,
+                end_day=end_day,
             )
 
     def get_weekly(
@@ -943,7 +1023,7 @@ class CaloriesService:
                 telegram_message_id=source_message_id,
                 accounting_day=day,
                 can_change_weight=len(first.meal.items) == 1,
-                daily_total_text=format_daily_total(
+                daily_total_text=_format_today_total(
                     today_nutrition,
                     self._daily_kcal_goal,
                     self._daily_protein_goal,
@@ -960,7 +1040,7 @@ class CaloriesService:
                     telegram_message_id=message_id,
                     accounting_day=day,
                     daily_total_text=(
-                        format_daily_total(
+                        _format_today_total(
                             today_nutrition,
                             self._daily_kcal_goal,
                             self._daily_protein_goal,
@@ -983,7 +1063,7 @@ class CaloriesService:
         return self._existing_component_replies(
             telegram_message_id,
             day,
-            _state_nutrition(state),
+            _state_nutrition(state, day),
             state.existing,
         )
 
@@ -1002,7 +1082,7 @@ class CaloriesService:
                 existing_reply = self._existing_component_replies(
                     telegram_message_id,
                     day,
-                    _state_nutrition(state),
+                    _state_nutrition(state, day),
                     state.existing,
                 )
                 if existing_reply is not None:
@@ -1028,7 +1108,7 @@ class CaloriesService:
                 existing_reply = self._existing_component_replies(
                     telegram_message_id,
                     day,
-                    _state_nutrition(state),
+                    _state_nutrition(state, day),
                     state.existing,
                 )
                 if existing_reply is not None:
@@ -1054,7 +1134,7 @@ class CaloriesService:
                             stored,
                         )
             stored_components: list[tuple[int, StoredMeal]] = []
-            today_nutrition = _state_nutrition(state)
+            today_nutrition = _state_nutrition(state, day)
             try:
                 for index, meal in enumerate(meals):
                     existing = existing_components.get(index)
@@ -1106,7 +1186,7 @@ class CaloriesService:
                         telegram_message_id=component_message_id,
                         accounting_day=day,
                         daily_total_text=(
-                            format_daily_total(
+                            _format_today_total(
                                 today_nutrition,
                                 self._daily_kcal_goal,
                                 self._daily_protein_goal,
@@ -1270,17 +1350,17 @@ class CaloriesService:
                     round_meal_nutrition(meal),
                     LLMMetadata(model=metadata_model, effort="none"),
                 )
-                total = _state_nutrition(state) + nutrition_summary(stored.meal)
+                total = _state_nutrition(state, day) + nutrition_summary(stored.meal)
             else:
                 stored = state.existing
-                total = _state_nutrition(state)
+                total = _state_nutrition(state, day)
         return MealReply(
             text=format_reply(stored.meal),
             telegram_message_id=event_id,
             accounting_day=day,
             can_save=can_save,
             can_change_weight=len(stored.meal.items) == 1,
-            daily_total_text=format_daily_total(
+            daily_total_text=_format_today_total(
                 total, self._daily_kcal_goal, self._daily_protein_goal
             ),
         )
@@ -1368,9 +1448,12 @@ class CaloriesService:
             accounting_day=updated.accounting_day,
             can_save=can_save,
             can_change_weight=True,
-            daily_total_text=format_daily_total(
-                updated.day_nutrition
-                or NutritionSummary.unknown_macros(updated.day_total),
+            daily_total_text=_format_today_total(
+                _nutrition_for_day(
+                    updated.day_nutrition
+                    or NutritionSummary.unknown_macros(updated.day_total),
+                    updated.accounting_day,
+                ),
                 self._daily_kcal_goal,
                 self._daily_protein_goal,
             ),
@@ -1406,8 +1489,10 @@ class CaloriesService:
         return f"Видалено {html.escape(display_name)}"
 
     def format_deletion_daily_total(self, deletion: MealDeletion) -> str:
-        nutrition = deletion.day_nutrition or NutritionSummary.unknown_macros(
-            deletion.day_total
+        nutrition = _nutrition_for_day(
+            deletion.day_nutrition
+            or NutritionSummary.unknown_macros(deletion.day_total),
+            deletion.accounting_day,
         )
         daily_total = format_daily_total(
             nutrition, self._daily_kcal_goal, self._daily_protein_goal
