@@ -38,8 +38,7 @@ async def configure_bot_commands(
         BotCommand("meals", "⭐ збережені страви"),
         BotCommand("recent", "🕘 нещодавні страви"),
         BotCommand("day", "📅 Сьогодні"),
-        BotCommand("weekly_calories", "📊 Баланс калорій за тиждень"),
-        BotCommand("weekly_meals", "🍽 Страви за тиждень"),
+        BotCommand("weekly", "📊 За тиждень"),
         BotCommand("goal", "🎯 ціль по калоріям"),
         BotCommand("protein_goal", "🥩 ціль по білку"),
         BotCommand("help", "❓ як користуватися ботом"),
@@ -213,12 +212,7 @@ def main() -> None:
     )
     application.add_handler(CommandHandler("day", handlers.day, filters=message_update))
     application.add_handler(
-        CommandHandler(
-            "weekly_calories", handlers.weekly_calories, filters=message_update
-        )
-    )
-    application.add_handler(
-        CommandHandler("weekly_meals", handlers.weekly_meals, filters=message_update)
+        CommandHandler("weekly", handlers.weekly, filters=message_update)
     )
     application.add_handler(
         CommandHandler("goal", handlers.goal, filters=message_update)

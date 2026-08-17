@@ -305,6 +305,39 @@ def test_period_meals_read_once_and_include_weight_and_calories() -> None:
     assert store._worksheet.read_count == 1
 
 
+def test_period_meals_restore_stored_macros_and_accounting_day() -> None:
+    store = build_store([HEADERS])
+    store.append_meal(
+        datetime(2026, 8, 2, 12, tzinfo=TZ),
+        42,
+        "сир",
+        "сир",
+        None,
+        make_meal(),
+        METADATA,
+    )
+
+    meals = store.get_period_meals(
+        datetime(2026, 8, 2).date(), datetime(2026, 8, 8).date()
+    )
+
+    assert len(meals) == 1
+    assert meals[0].accounting_day == datetime(2026, 8, 2).date()
+    assert meals[0].nutrition == NutritionSummary(
+        kcal=60, protein_g=10, fat_g=5, carbs_g=0
+    )
+
+
+def test_first_meal_day_uses_oldest_valid_stored_day() -> None:
+    malformed = ["bad"]
+    latest = stored_row(datetime(2026, 8, 5, 12, tzinfo=TZ), 2, 100)
+    earliest = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 1, 100)
+
+    assert build_store([HEADERS, latest, malformed, earliest]).get_first_meal_day() == (
+        datetime(2026, 8, 2).date()
+    )
+
+
 def test_duplicate_restores_photo_path_and_metadata() -> None:
     state = build_store(
         [

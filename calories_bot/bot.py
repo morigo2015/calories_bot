@@ -108,7 +108,7 @@ UNCERTAIN_WRITE_TEXT = (
 )
 ANALYSIS_ERROR_TEXT = "Не вдалося порахувати КБЖВ. Спробуй ще раз."
 GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Спробуй ще раз."
-WEEK_ERROR_TEXT = "Не вдалося сформувати підсумок за 7 днів. Спробуй ще раз."
+WEEK_ERROR_TEXT = "Не вдалося сформувати тижневий підсумок. Спробуй ще раз."
 VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
 LONG_OPERATION_TEXT = "⏳ Хвилинку, думаю. . ."
 LLM_OPERATION_TEXT = "⏳ Хвилинку, раджусь з AI. . ."
@@ -411,9 +411,37 @@ def format_weekly_calories_reply(
     end_day: date,
     totals: Mapping[date, float | NutritionSummary],
     burned_totals: dict[date, int] | None = None,
+    period_days: int = WEEK_DAYS,
 ) -> str:
-    start_day = end_day - timedelta(days=WEEK_DAYS - 1)
-    days = [start_day + timedelta(days=offset) for offset in range(WEEK_DAYS)]
+    return (
+        f"<h3>Баланс калорій {_weekly_period_text(period_days)}</h3>"
+        + _format_weekly_calories_body(
+            end_day, totals, burned_totals, period_days=period_days
+        )
+    )
+
+
+def _weekly_period_text(period_days: int) -> str:
+    if not 1 <= period_days <= WEEK_DAYS:
+        raise ValueError("Weekly report period must contain from one to seven days")
+    if period_days == WEEK_DAYS:
+        return "за тиждень"
+    if period_days == 1:
+        return "за останній день"
+    if period_days <= 4:
+        return f"за останні {period_days} дні"
+    return f"за останні {period_days} днів"
+
+
+def _format_weekly_calories_body(
+    end_day: date,
+    totals: Mapping[date, float | NutritionSummary],
+    burned_totals: dict[date, int] | None = None,
+    *,
+    period_days: int = WEEK_DAYS,
+) -> str:
+    start_day = end_day - timedelta(days=period_days - 1)
+    days = [start_day + timedelta(days=offset) for offset in range(period_days)]
     consumed = {
         day: (_as_summary(totals[day]) if day in totals else NutritionSummary())
         for day in days
@@ -427,53 +455,44 @@ def format_weekly_calories_reply(
     for day in days:
         consumed_kcal = round_whole(consumed[day].kcal)
         if burned_totals is None:
-            burned_text = "—"
-            balance_text = "—"
+            values = f"+ {consumed_kcal} ккал"
         else:
             burned = burned_totals[day]
             balance = consumed_kcal - burned
-            burned_text = f"{burned} ккал"
-            balance_text = f"{balance:+d} ккал"
+            values = (
+                f"+ {consumed_kcal} ккал&nbsp;&nbsp;"
+                f"- {burned} ккал&nbsp;&nbsp;"
+                f"= <b><u>{balance:+d} ккал</u></b>"
+            )
         day_rows.append(
-            f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
-            f"Спожито {consumed_kcal} ккал&nbsp;&nbsp;"
-            f"Витрачено {burned_text}&nbsp;&nbsp;"
-            f"Баланс: <b><u>{balance_text}</u></b></li>"
+            f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: {values}</li>"
         )
 
     total = sum((consumed[day] for day in days), NutritionSummary())
     total_consumed = round_whole(total.kcal)
-    average_consumed = round_whole(total.kcal / WEEK_DAYS)
+    average_consumed = round_whole(total.kcal / period_days)
     if burned_totals is None:
-        total_burned_text = "—"
-        total_balance_text = "—"
-        average_burned_text = "—"
-        average_balance_text = "—"
+        total_line = f"Спожито: {total_consumed} ккал"
+        average_line = f"Спожито: {average_consumed} ккал"
     else:
         total_burned = sum(burned_totals[day] for day in days)
         total_balance = total_consumed - total_burned
-        average_burned = round_whole(total_burned / WEEK_DAYS)
+        average_burned = round_whole(total_burned / period_days)
         average_balance = average_consumed - average_burned
-        total_burned_text = f"{total_burned} ккал"
-        total_balance_text = f"{total_balance:+d} ккал"
-        average_burned_text = f"{average_burned} ккал"
-        average_balance_text = f"{average_balance:+d} ккал"
-
-    def balance_line(consumed_kcal: int, burned_text: str, balance_text: str) -> str:
-        return (
-            f"Спожито: {consumed_kcal} ккал&nbsp;&nbsp;&nbsp;"
-            f"Витрачено: {burned_text}&nbsp;&nbsp;&nbsp;"
-            f"Баланс: <b><u>{balance_text}</u></b>"
+        total_line = (
+            f"Спожито: {total_consumed} ккал&nbsp;&nbsp;&nbsp;"
+            f"Витрачено: {total_burned} ккал&nbsp;&nbsp;&nbsp;"
+            f"Баланс: <b><u>{total_balance:+d} ккал</u></b>"
+        )
+        average_line = (
+            f"Спожито: {average_consumed} ккал&nbsp;&nbsp;&nbsp;"
+            f"Витрачено: {average_burned} ккал&nbsp;&nbsp;&nbsp;"
+            f"Баланс: <b><u>{average_balance:+d} ккал</u></b>"
         )
 
-    total_line = balance_line(total_consumed, total_burned_text, total_balance_text)
-    average_line = balance_line(
-        average_consumed, average_burned_text, average_balance_text
-    )
     return (
-        "<h3>Баланс калорій за тиждень:</h3>"
         f"<p>{total_line}</p>"
-        "<h3>В середньому за день:</h3>"
+        "<h4>В середньому за день:</h4>"
         f"<p>{average_line}</p>"
         "<details><summary>По дням</summary>"
         f"<ul>{''.join(day_rows)}</ul></details>"
@@ -531,7 +550,29 @@ def format_weekly_meals_reply(
     group_names: tuple[str, ...] | None = None,
     daily_kcal_goal: int | None = None,
     daily_protein_goal: int | None = None,
+    period_days: int = WEEK_DAYS,
 ) -> str:
+    return (
+        f"<h3>КБЖВ {_weekly_period_text(period_days)}</h3>"
+        + _format_weekly_meals_body(
+            meals,
+            group_names,
+            daily_kcal_goal,
+            daily_protein_goal,
+            period_days=period_days,
+        )
+    )
+
+
+def _format_weekly_meals_body(
+    meals: list[PeriodMeal],
+    group_names: tuple[str, ...] | None = None,
+    daily_kcal_goal: int | None = None,
+    daily_protein_goal: int | None = None,
+    *,
+    period_days: int = WEEK_DAYS,
+) -> str:
+    _weekly_period_text(period_days)
     total = sum(
         (
             meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
@@ -540,15 +581,15 @@ def format_weekly_meals_reply(
         NutritionSummary(),
     )
     average = NutritionSummary(
-        kcal=round_whole(total.kcal / WEEK_DAYS),
+        kcal=round_whole(total.kcal / period_days),
         protein_g=(
             None
             if total.protein_g is None
-            else round_whole(total.protein_g / WEEK_DAYS)
+            else round_whole(total.protein_g / period_days)
         ),
-        fat_g=(None if total.fat_g is None else round_whole(total.fat_g / WEEK_DAYS)),
+        fat_g=(None if total.fat_g is None else round_whole(total.fat_g / period_days)),
         carbs_g=(
-            None if total.carbs_g is None else round_whole(total.carbs_g / WEEK_DAYS)
+            None if total.carbs_g is None else round_whole(total.carbs_g / period_days)
         ),
         kcal_estimated=total.kcal_estimated,
         protein_estimated=total.protein_estimated,
@@ -558,7 +599,7 @@ def format_weekly_meals_reply(
     progress = "<br/>".join(
         _daily_progress_lines(average, daily_kcal_goal, daily_protein_goal)
     )
-    heading = f"<h3>КБЖВ за тиждень:</h3><h4>В середньому в день:</h4><p>{progress}</p>"
+    heading = f"<h4>В середньому в день:</h4><p>{progress}</p>"
     if not meals:
         return f"{heading}<p>Записів немає.</p>"
 
@@ -574,6 +615,36 @@ def format_weekly_meals_reply(
     return (
         f"{heading}<details><summary>Деталі по стравам</summary>"
         f"<ul>{''.join(rows)}</ul></details>"
+    )
+
+
+def format_weekly_reply(
+    end_day: date,
+    totals: Mapping[date, float | NutritionSummary],
+    meals: list[PeriodMeal],
+    burned_totals: dict[date, int] | None = None,
+    group_names: tuple[str, ...] | None = None,
+    daily_kcal_goal: int | None = None,
+    daily_protein_goal: int | None = None,
+    period_days: int = WEEK_DAYS,
+) -> str:
+    calories_heading = "Баланс калорій" if burned_totals is not None else "Калорії"
+    return (
+        f"<h3>Статистика {_weekly_period_text(period_days)}</h3>"
+        + _format_weekly_meals_body(
+            meals,
+            group_names,
+            daily_kcal_goal,
+            daily_protein_goal,
+            period_days=period_days,
+        )
+        + f"<h4>{calories_heading}:</h4>"
+        + _format_weekly_calories_body(
+            end_day,
+            totals,
+            burned_totals,
+            period_days=period_days,
+        )
     )
 
 
@@ -748,6 +819,71 @@ class CaloriesService:
                 daily_kcal_goal=self._daily_kcal_goal,
                 daily_protein_goal=self._daily_protein_goal,
             )
+
+    def get_weekly(
+        self,
+        timestamp: datetime,
+        burned_totals: dict[date, int] | None = None,
+        meal_grouper: MealGrouper | None = None,
+    ) -> str:
+        end_day = self._accounting_day(timestamp) - timedelta(days=1)
+        full_start_day = end_day - timedelta(days=WEEK_DAYS - 1)
+        first_meal_day = self._store.get_first_meal_day()
+        if first_meal_day is None:
+            period_days = 1
+        elif first_meal_day <= full_start_day:
+            period_days = WEEK_DAYS
+        else:
+            period_days = max(1, min(WEEK_DAYS, (end_day - first_meal_day).days + 1))
+        start_day = end_day - timedelta(days=period_days - 1)
+        meals = self._store.get_period_meals(start_day, end_day)
+
+        totals: dict[date, NutritionSummary] = {}
+        for meal in meals:
+            if meal.accounting_day is None:
+                continue
+            nutrition = meal.nutrition or NutritionSummary.unknown_macros(
+                meal.meal_kcal
+            )
+            totals[meal.accounting_day] = (
+                totals.get(meal.accounting_day, NutritionSummary()) + nutrition
+            )
+
+        report_meals = meals
+        group_names: tuple[str, ...] | None = None
+        if meals and meal_grouper is not None:
+            exact = _aggregate_weekly_meals(meals, collapse_tail=False)
+            report_meals = [
+                PeriodMeal(name, weight, nutrients.kcal, nutrients)
+                for name, weight, nutrients in exact
+            ]
+            try:
+                grouping = meal_grouper.group(
+                    tuple(meal.meal_name for meal in report_meals)
+                )
+                group_names = grouping.group_names
+            except MealGroupingError:
+                LOGGER.exception("Could not semantically group weekly meals")
+
+        if burned_totals is not None and any(
+            start_day + timedelta(days=offset) not in burned_totals
+            for offset in range(period_days)
+        ):
+            LOGGER.warning(
+                "Garmin calorie data does not cover the weekly report period"
+            )
+            burned_totals = None
+
+        return format_weekly_reply(
+            end_day,
+            totals,
+            report_meals,
+            burned_totals,
+            group_names,
+            self._daily_kcal_goal,
+            self._daily_protein_goal,
+            period_days,
+        )
 
     @staticmethod
     def _component_message_id(source_message_id: int, component_index: int) -> int:
@@ -1859,11 +1995,15 @@ class TelegramHandlers:
             try:
                 burned_totals = None
                 if self._is_admin(update):
-                    if self._garmin_calories is None:
-                        raise RuntimeError("Garmin calorie store is unavailable")
-                    burned_totals = await asyncio.to_thread(
-                        self._garmin_calories.get_daily_calories
-                    )
+                    if self._garmin_calories is not None:
+                        try:
+                            burned_totals = await asyncio.to_thread(
+                                self._garmin_calories.get_daily_calories
+                            )
+                        except Exception:
+                            LOGGER.exception(
+                                "Garmin calories are unavailable for /weekly"
+                            )
                 reply = await asyncio.to_thread(
                     service.get_weekly_calories,
                     message.date,
@@ -1878,6 +2018,46 @@ class TelegramHandlers:
                     context,
                     reply,
                     operation="/weekly_calories report",
+                )
+            else:
+                await message.reply_text(reply, do_quote=False)
+
+    async def weekly(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if message is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        async with self._temporary_status(message, llm=self._meal_grouper is not None):
+            try:
+                burned_totals = None
+                if self._is_admin(update):
+                    if self._garmin_calories is not None:
+                        try:
+                            burned_totals = await asyncio.to_thread(
+                                self._garmin_calories.get_daily_calories
+                            )
+                        except Exception:
+                            LOGGER.exception(
+                                "Garmin calories are unavailable for /weekly"
+                            )
+                reply = await asyncio.to_thread(
+                    service.get_weekly,
+                    message.date,
+                    burned_totals,
+                    self._meal_grouper,
+                )
+            except Exception:
+                LOGGER.exception("Could not build /weekly")
+                reply = WEEK_ERROR_TEXT
+            if reply.startswith("<h3>"):
+                await self._send_rich_html(
+                    message,
+                    context,
+                    reply,
+                    operation="/weekly report",
                 )
             else:
                 await message.reply_text(reply, do_quote=False)

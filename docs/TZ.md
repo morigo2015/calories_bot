@@ -248,8 +248,8 @@ recent-add:<message_id>:<day>:<weight_g>
 
 ## 10. Telegram handlers і стани
 
-У command menu користувача: `/meals`, `/recent`, `/day`, `/weekly_calories`,
-`/weekly_meals`, `/goal`, `/help`, `/tips`. Адміністратор додатково має
+У command menu користувача: `/meals`, `/recent`, `/day`, `/weekly`, `/goal`,
+`/help`, `/tips`. Адміністратор додатково має
 `/burned`, `/invite`, `/users`, `/block`, `/unblock`, `/delete`. `/save`
 зареєстрований як handler, але не показується в меню. Кожен опис команди й
 кожна службова inline-кнопка мають emoji-іконку.

@@ -110,6 +110,7 @@ class PeriodMeal:
     total_weight_g: float
     meal_kcal: float
     nutrition: NutritionSummary | None = None
+    accounting_day: date | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,8 @@ class MealStore(Protocol):
     ) -> dict[date, NutritionSummary]: ...
 
     def get_period_meals(self, start_day: date, end_day: date) -> list[PeriodMeal]: ...
+
+    def get_first_meal_day(self) -> date | None: ...
 
     def get_meal(self, day: date, telegram_message_id: int) -> StoredMeal | None: ...
 
@@ -706,11 +709,29 @@ class GoogleSheetsStore:
                             total_weight_g=float(str(row[TOTAL_WEIGHT_COLUMN])),
                             meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
                             nutrition=nutrition_summary(_meal_from_row(row).meal),
+                            accounting_day=row_day,
                         )
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
             return meals
+        except Exception as exc:
+            raise SheetsReadError("Could not read Google Sheets") from exc
+
+    def get_first_meal_day(self) -> date | None:
+        try:
+            first_day: date | None = None
+            for row in self._data_rows():
+                if len(row) <= MEAL_KCAL_COLUMN:
+                    continue
+                try:
+                    row_day = self._row_day(row)
+                except (TypeError, ValueError):
+                    LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+                    continue
+                if first_day is None or row_day < first_day:
+                    first_day = row_day
+            return first_day
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc
 
