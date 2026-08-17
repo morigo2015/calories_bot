@@ -40,7 +40,8 @@ async def configure_bot_commands(
         BotCommand("day", "📅 Сьогодні"),
         BotCommand("weekly_calories", "📊 КБЖВ за тиждень"),
         BotCommand("weekly_meals", "🍽 Страви за тиждень"),
-        BotCommand("goal", "🎯 встановити денну ціль"),
+        BotCommand("goal", "🎯 ціль по калоріям"),
+        BotCommand("protein_goal", "🥩 ціль по білку"),
         BotCommand("help", "❓ як користуватися ботом"),
         BotCommand("tips", "💡 додаткові можливості"),
     ]
@@ -223,6 +224,9 @@ def main() -> None:
         CommandHandler("goal", handlers.goal, filters=message_update)
     )
     application.add_handler(
+        CommandHandler("protein_goal", handlers.protein_goal, filters=message_update)
+    )
+    application.add_handler(
         CommandHandler("meals", handlers.meals, filters=message_update)
     )
     application.add_handler(
@@ -297,6 +301,12 @@ def main() -> None:
         CallbackQueryHandler(
             handlers.goal_disable_callback,
             pattern=r"^goal-disable:\d+$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.protein_goal_disable_callback,
+            pattern=r"^protein-goal-disable:\d+$",
         )
     )
     application.add_handler(

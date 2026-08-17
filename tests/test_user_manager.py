@@ -16,6 +16,7 @@ def record(
     sheet="",
     cutoff=time(1),
     goal=None,
+    protein_goal=None,
 ):
     return UserRecord(
         row_number=2,
@@ -27,6 +28,7 @@ def record(
         spreadsheet_id=sheet,
         day_start=cutoff,
         daily_kcal_goal=goal,
+        daily_protein_goal=protein_goal,
     )
 
 
@@ -87,6 +89,7 @@ class Registry:
             sheet=self.current.spreadsheet_id,
             cutoff=self.current.day_start,
             goal=self.current.daily_kcal_goal,
+            protein_goal=self.current.daily_protein_goal,
         )
         return self.current
 
@@ -98,6 +101,19 @@ class Registry:
             sheet=self.current.spreadsheet_id,
             cutoff=self.current.day_start,
             goal=goal,
+            protein_goal=self.current.daily_protein_goal,
+        )
+        return self.current
+
+    def set_daily_protein_goal(self, user_id, goal):
+        self.current = record(
+            user_id=user_id,
+            status=self.current.status,
+            token="",
+            sheet=self.current.spreadsheet_id,
+            cutoff=self.current.day_start,
+            goal=self.current.daily_kcal_goal,
+            protein_goal=goal,
         )
         return self.current
 
@@ -227,6 +243,17 @@ def test_goal_update_refreshes_cached_service(tmp_path) -> None:
 
     assert updated.daily_kcal_goal == 2000
     assert service._daily_kcal_goal == 2000
+
+
+def test_protein_goal_update_refreshes_cached_service(tmp_path) -> None:
+    registry = Registry(record(user_id=123, status="active", token="", sheet="sheet"))
+    users = manager(tmp_path, registry, Workspace())
+    service = users.service_for(registry.current)
+
+    updated = users.set_daily_protein_goal(123, 100)
+
+    assert updated.daily_protein_goal == 100
+    assert service._daily_protein_goal == 100
 
 
 def test_delete_failure_keeps_user_blocked_and_registry_row(tmp_path) -> None:

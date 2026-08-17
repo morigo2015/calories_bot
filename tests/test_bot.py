@@ -186,16 +186,21 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
     )
 
     assert reply == (
-        "Сьогодні: <b><u>К:810 Б:— Ж:— В:—</u></b>\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n"
-        "• <b>вівсянка з бананом</b> ×2 — К:350\n"
-        "• <b>курка з рисом</b> — К:460"
+        "<blockquote expandable>🔥 810 ккал\n"
+        "• курка з рисом  🔥460\n"
+        "• вівсянка з бананом ×2  🔥350</blockquote>\n"
+        "<blockquote expandable>🥩 Б — г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
+        "<blockquote expandable>🍞 В — г</blockquote>"
     )
 
 
 def test_format_day_reply_handles_empty_day() -> None:
     assert format_day_reply([]) == (
-        "Сьогодні: <b><u>К:0 Б:0 Ж:0 В:0</u></b>\nЗаписів ще немає."
+        "<blockquote expandable>🔥 0 ккал</blockquote>\n"
+        "<blockquote expandable>🥩 Б 0 г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж 0 г</blockquote>\n"
+        "<blockquote expandable>🍞 В 0 г</blockquote>"
     )
 
 
@@ -215,23 +220,26 @@ def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
         ]
     )
 
-    assert "Сьогодні: <b><u>К:575 Б:36 Ж:17 В:40</u></b>" in reply
-    assert "• <b>сир</b> — К:375" in reply
-    assert "• <b>хліб</b> — К:200" in reply
-    assert reply.count("Б:") == 1
+    assert "<blockquote expandable>🔥 575 ккал" in reply
+    assert "<blockquote expandable>🥩 Б 36 г" in reply
+    assert "• сир  🥩30" in reply
+    assert "• хліб  🥩6" in reply
+    assert "• сир  🍞" not in reply
+    assert reply.count("<blockquote expandable>") == 4
 
 
 def test_format_day_reply_escapes_html_in_meal_names() -> None:
     reply = format_day_reply([DayMeal(meal_name="<сир & хліб>", meal_kcal=100)])
 
-    assert "• <b>&lt;сир &amp; хліб&gt;</b> — К:100" in reply
+    assert "• &lt;сир &amp; хліб&gt;  🔥100" in reply
 
 
 def test_format_day_reply_shows_goal_for_empty_day() -> None:
     assert format_day_reply([], 1500) == (
-        "Сьогодні: <b><u>К:0 Б:0 Ж:0 В:0</u></b>\n"
-        "Ціль: 1500 кк · залишилось 1500 кк\n"
-        "Записів ще немає."
+        "<blockquote expandable>🔥 0 / 1500 ккал  -1500</blockquote>\n"
+        "<blockquote expandable>🥩 Б 0 г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж 0 г</blockquote>\n"
+        "<blockquote expandable>🍞 В 0 г</blockquote>"
     )
 
 
@@ -242,10 +250,11 @@ def test_format_day_reply_includes_daily_goal_and_remaining_calories() -> None:
     )
 
     assert reply == (
-        "Сьогодні: <b><u>К:360 Б:— Ж:— В:—</u></b>\n"
-        "Ціль: 1500 кк · залишилось 1140 кк\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n"
-        "• <b>сир</b> — К:360"
+        "<blockquote expandable>🔥 360 / 1500 ккал  -1140\n"
+        "• сир  🔥360</blockquote>\n"
+        "<blockquote expandable>🥩 Б — г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
+        "<blockquote expandable>🍞 В — г</blockquote>"
     )
 
 
@@ -256,10 +265,11 @@ def test_format_day_reply_shows_goal_overage_without_negative_remaining() -> Non
     )
 
     assert reply == (
-        "Сьогодні: <b><u>К:1600 Б:— Ж:— В:—</u></b>\n"
-        "Ціль: 1500 кк · перевищено на 100 кк\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n"
-        "• <b>піца</b> — К:1600"
+        "<blockquote expandable>🔥 1600 / 1500 ккал  +100\n"
+        "• піца  🔥1600</blockquote>\n"
+        "<blockquote expandable>🥩 Б — г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
+        "<blockquote expandable>🍞 В — г</blockquote>"
     )
 
 
@@ -274,9 +284,10 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
 
     assert store.day.isoformat() == "2026-08-01"
     assert reply == (
-        "Сьогодні: <b><u>К:60 Б:— Ж:— В:—</u></b>\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n"
-        "• <b>сир</b> — К:60"
+        "<blockquote expandable>🔥 60 ккал\n• сир  🔥60</blockquote>\n"
+        "<blockquote expandable>🥩 Б — г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
+        "<blockquote expandable>🍞 В — г</blockquote>"
     )
 
 
@@ -297,10 +308,11 @@ def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 12, tzinfo=TZ))
 
     assert reply == (
-        "Сьогодні: <b><u>К:60 Б:— Ж:— В:—</u></b>\n"
-        "Ціль: 1500 кк · залишилось 1440 кк\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n"
-        "• <b>сир</b> — К:60"
+        "<blockquote expandable>🔥 60 / 1500 ккал  -1440\n"
+        "• сир  🔥60</blockquote>\n"
+        "<blockquote expandable>🥩 Б — г</blockquote>\n"
+        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
+        "<blockquote expandable>🍞 В — г</blockquote>"
     )
 
 
@@ -316,7 +328,7 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
         "<b><u>К:60 Б:10 Ж:5 В:0</u></b>\n"
         "На 100 г: К:120 Б:20 Ж:10 В:0"
     )
-    assert reply.daily_total_text == "За день: <b><u>К:360 Б:— Ж:— В:—</u></b>"
+    assert reply.daily_total_text == "🔥 360 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
     assert reply.accounting_day == date(2026, 8, 2)
     marker = parse_simple_meal_request(store.appended[0][3])
     assert marker is not None
@@ -361,7 +373,7 @@ def test_composite_input_is_stored_and_replied_to_per_component(tmp_path) -> Non
     assert replies[0].telegram_message_id == 42
     assert replies[1].telegram_message_id < 0
     assert replies[0].daily_total_text is None
-    assert replies[1].daily_total_text == ("За день: <b><u>К:≈410 Б:— Ж:— В:—</u></b>")
+    assert replies[1].daily_total_text == ("🔥 410 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г")
     markers = [parse_simple_meal_request(entry[3]) for entry in store.appended]
     assert [marker.component_index for marker in markers if marker] == [0, 1]
     assert all(marker and marker.component_count == 2 for marker in markers)
@@ -488,7 +500,7 @@ def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> Non
     worker.join(timeout=1)
 
     assert not worker.is_alive()
-    assert result[0].daily_total_text == ("За день: <b><u>К:334 Б:— Ж:— В:—</u></b>")
+    assert result[0].daily_total_text == ("🔥 334 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г")
 
 
 def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
@@ -508,7 +520,7 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
     assert "<b>Сир 50 г</b>" in reply.text
     assert "К:60 Б:10 Ж:5 В:0" in reply.text
     assert "На 100 г: К:120 Б:20 Ж:10 В:0" in reply.text
-    assert reply.daily_total_text == "За день: <b><u>К:360 Б:— Ж:— В:—</u></b>"
+    assert reply.daily_total_text == "🔥 360 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
     assert analyzer.calls == 0
     assert store.appended == []
 
@@ -544,7 +556,7 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     photo_path = store.appended[0][4]
     assert "<b>Сир 50 г</b>" in reply.text
     assert "К:60 Б:10 Ж:5 В:0" in reply.text
-    assert reply.daily_total_text == "За день: <b><u>К:360 Б:— Ж:— В:—</u></b>"
+    assert reply.daily_total_text == "🔥 360 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
     expected_photo = tmp_path / "photos" / "2026-08-02-42.jpg"
@@ -566,7 +578,7 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
         "<b><u>К:≈60 Б:≈10 Ж:≈5 В:≈0</u></b>\n"
         "На 100 г: К:≈120 Б:≈20 Ж:≈10 В:≈0"
     )
-    assert reply.daily_total_text == ("За день: <b><u>К:≈60 Б:≈10 Ж:≈5 В:≈0</u></b>")
+    assert reply.daily_total_text == "🔥 60 ккал\n🥩 Б 10 г\n🥑 Ж 5 г\n🍞 В 0 г"
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
 
@@ -746,11 +758,20 @@ def test_reply_does_not_repeat_weight_already_shown_as_portion() -> None:
 
 def test_daily_goal_does_not_show_negative_remainder() -> None:
     reply = format_daily_total(2130, 2000)
-    assert reply == (
-        "За день: <b><u>К:2130 Б:— Ж:— В:—</u></b>\n"
-        "Ціль: 2000 кк · перевищено на 130 кк"
+    assert reply == ("🔥 2130 / 2000 ккал  +130\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г")
+    assert "+130" in reply
+
+
+def test_daily_total_shows_calorie_and_protein_goal_progress() -> None:
+    reply = format_daily_total(
+        NutritionSummary(kcal=905, protein_g=122, fat_g=19, carbs_g=92),
+        1500,
+        100,
     )
-    assert "залишилось" not in reply
+
+    assert reply == (
+        "🔥 905 / 1500 ккал  -595\n🥩 Б 122 / 100 г  +22\n🥑 Ж 19 г\n🍞 В 92 г"
+    )
 
 
 def test_weekly_calories_includes_seven_days_admin_balance_and_averages() -> None:
@@ -996,8 +1017,10 @@ def test_service_formats_deletion_confirmation_and_updated_daily_total(
     assert deleted == "Видалено Сир &lt;міцний&gt;"
     assert daily_total == (
         "Оновлено після видалення\n"
-        "За день: <b><u>К:905 Б:— Ж:— В:—</u></b>\n"
-        "Ціль: 1500 кк · залишилось 595 кк"
+        "🔥 905 / 1500 ккал  -595\n"
+        "🥩 Б — г\n"
+        "🥑 Ж — г\n"
+        "🍞 В — г"
     )
     assert repeated == "Цей запис уже видалено"
 
@@ -1085,6 +1108,7 @@ def user_record(
     sheet="sheet-123",
     cutoff=time(1),
     goal=None,
+    protein_goal=None,
 ):
     from calories_bot.users import UserRecord
 
@@ -1098,6 +1122,7 @@ def user_record(
         spreadsheet_id=sheet,
         day_start=cutoff,
         daily_kcal_goal=goal,
+        daily_protein_goal=protein_goal,
     )
 
 
@@ -1149,11 +1174,28 @@ class FakeManager:
             sheet=current.spreadsheet_id,
             cutoff=current.day_start,
             goal=goal,
+            protein_goal=current.daily_protein_goal,
         )
         self.users[user_id] = updated
         service = self.services.get(user_id)
         if service is not None and hasattr(service, "set_daily_kcal_goal"):
             service.set_daily_kcal_goal(goal)
+        return updated
+
+    def set_daily_protein_goal(self, user_id, goal):
+        current = self.users[user_id]
+        updated = user_record(
+            user_id,
+            status=current.status,
+            sheet=current.spreadsheet_id,
+            cutoff=current.day_start,
+            goal=current.daily_kcal_goal,
+            protein_goal=goal,
+        )
+        self.users[user_id] = updated
+        service = self.services.get(user_id)
+        if service is not None and hasattr(service, "set_daily_protein_goal"):
+            service.set_daily_protein_goal(goal)
         return updated
 
     def delete_user(self, user_id):
@@ -1383,7 +1425,7 @@ def test_day_handler_passes_telegram_message_date() -> None:
 
         def get_day_summary(self, timestamp):
             self.timestamp = timestamp
-            return "Сьогодні: 60 кк\n• сир — 60 кк"
+            return "<blockquote expandable>🔥 60 ккал\n• сир  🔥60</blockquote>"
 
     class Statistics:
         def __init__(self):
@@ -1424,7 +1466,9 @@ def test_day_handler_passes_telegram_message_date() -> None:
     asyncio.run(handlers.day(update, None))
 
     assert service.timestamp == message.date
-    assert message.replies == ["Сьогодні: 60 кк\n• сир — 60 кк"]
+    assert message.replies == [
+        "<blockquote expandable>🔥 60 ккал\n• сир  🔥60</blockquote>"
+    ]
     assert message.reply_kwargs == [{"parse_mode": ParseMode.HTML, "do_quote": False}]
     assert statistics.recorded == [(123, 600, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
@@ -1530,6 +1574,36 @@ def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
     assert service.food_calls == 0
     assert context.user_data == {}
     assert message.replies[-1] == "Денну ціль встановлено: 2000 кк ✓"
+
+
+def test_protein_goal_waiting_state_saves_grams_without_food_analysis() -> None:
+    class GoalService:
+        def __init__(self):
+            self.food_calls = 0
+            self.protein_goal = None
+
+        def process_message(self, *args):
+            self.food_calls += 1
+
+        def set_daily_protein_goal(self, goal):
+            self.protein_goal = goal
+
+    service = GoalService()
+    manager = FakeManager({123: user_record()}, {123: service})
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update()
+    context = SimpleNamespace(args=[], user_data={})
+
+    asyncio.run(handlers.protein_goal(update, context))
+    assert context.user_data == {"awaiting_daily_kcal_goal": {"kind": "protein_goal"}}
+    message.text = "100"
+    asyncio.run(handlers.text(update, context))
+
+    assert manager.users[123].daily_protein_goal == 100
+    assert service.protein_goal == 100
+    assert service.food_calls == 0
+    assert context.user_data == {}
+    assert message.replies[-1] == "Ціль по білку встановлено: 100 г ✓"
 
 
 def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> None:
@@ -1725,6 +1799,27 @@ def test_goal_with_existing_value_can_be_disabled() -> None:
 
     assert manager.users[123].daily_kcal_goal is None
     assert query.edits == [("Денну ціль вимкнено ✓", {"reply_markup": None})]
+
+
+def test_protein_goal_with_existing_value_can_be_disabled() -> None:
+    service = SimpleNamespace(set_daily_protein_goal=lambda goal: None)
+    manager = FakeManager(
+        {123: user_record(protein_goal=100)},
+        {123: service},
+    )
+    handlers = TelegramHandlers(999, manager)
+    update, message = make_update()
+    context = SimpleNamespace(args=[], user_data={})
+
+    asyncio.run(handlers.protein_goal(update, context))
+    button = message.reply_kwargs[-1]["reply_markup"].inline_keyboard[0][0]
+    assert button.callback_data == "protein-goal-disable:123"
+
+    callback_update, query = make_callback_update("protein-goal-disable:123")
+    asyncio.run(handlers.protein_goal_disable_callback(callback_update, context))
+
+    assert manager.users[123].daily_protein_goal is None
+    assert query.edits == [("Ціль по білку вимкнено ✓", {"reply_markup": None})]
 
 
 def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
@@ -2376,7 +2471,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.3.1"]
+    assert admin_message.replies == ["Версія: 1.4.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2405,7 +2500,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.3.1\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.4.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

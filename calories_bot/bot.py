@@ -117,6 +117,7 @@ SAVE_CALLBACK_PREFIX = "save:"
 ADMIN_DELETE_CALLBACK_PREFIX = "admin-delete:"
 ADMIN_CANCEL_CALLBACK_PREFIX = "admin-cancel:"
 GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
+PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX = "protein-goal-disable:"
 GOAL_WAITING_KEY = "awaiting_daily_kcal_goal"
 MEAL_WEIGHT_WAITING_KEY = "awaiting_meal_weight"
 INVITE_WAITING_KEY = "awaiting_invite_name"
@@ -313,25 +314,51 @@ def _state_nutrition(state: SheetState) -> NutritionSummary:
     return NutritionSummary() if total == 0 else NutritionSummary.unknown_macros(total)
 
 
-def _format_goal(today_kcal: float, daily_kcal_goal: int | None) -> str | None:
-    if daily_kcal_goal is None:
-        return None
-    rounded_total = round_whole(today_kcal)
-    if rounded_total <= daily_kcal_goal:
-        remaining = daily_kcal_goal - rounded_total
-        return f"Ціль: {daily_kcal_goal} кк · залишилось {remaining} кк"
-    overage = rounded_total - daily_kcal_goal
-    return f"Ціль: {daily_kcal_goal} кк · перевищено на {overage} кк"
+def _format_progress_value(
+    value: float | None,
+    goal: int | None,
+    *,
+    emoji: str,
+    label: str = "",
+    unit: str,
+) -> str:
+    prefix = f"{emoji} {label}" if label else f"{emoji} "
+    if value is None:
+        return f"{prefix}— {unit}"
+    rounded = round_whole(value)
+    if goal is None:
+        return f"{prefix}{rounded} {unit}"
+    return f"{prefix}{rounded} / {goal} {unit}  {rounded - goal:+d}"
+
+
+def _daily_progress_lines(
+    summary: NutritionSummary,
+    daily_kcal_goal: int | None,
+    daily_protein_goal: int | None,
+) -> list[str]:
+    return [
+        _format_progress_value(summary.kcal, daily_kcal_goal, emoji="🔥", unit="ккал"),
+        _format_progress_value(
+            summary.protein_g,
+            daily_protein_goal,
+            emoji="🥩",
+            label="Б ",
+            unit="г",
+        ),
+        _format_progress_value(summary.fat_g, None, emoji="🥑", label="Ж ", unit="г"),
+        _format_progress_value(summary.carbs_g, None, emoji="🍞", label="В ", unit="г"),
+    ]
 
 
 def format_daily_total(
-    today_total: float | NutritionSummary, daily_kcal_goal: int | None
+    today_total: float | NutritionSummary,
+    daily_kcal_goal: int | None,
+    daily_protein_goal: int | None = None,
 ) -> str:
     summary = _as_summary(today_total)
-    lines = [f"За день: {_highlight_calories(_format_nutrition(summary))}"]
-    if goal := _format_goal(summary.kcal, daily_kcal_goal):
-        lines.append(goal)
-    return "\n".join(lines)
+    return "\n".join(
+        _daily_progress_lines(summary, daily_kcal_goal, daily_protein_goal)
+    )
 
 
 def format_reply(meal: MealResult) -> str:
@@ -524,7 +551,11 @@ def format_users_reply(users: list[UserRecord]) -> str:
     return "\n".join(lines)
 
 
-def format_day_reply(meals: list[DayMeal], daily_kcal_goal: int | None = None) -> str:
+def format_day_reply(
+    meals: list[DayMeal],
+    daily_kcal_goal: int | None = None,
+    daily_protein_goal: int | None = None,
+) -> str:
     total = sum(
         (
             meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
@@ -532,12 +563,6 @@ def format_day_reply(meals: list[DayMeal], daily_kcal_goal: int | None = None) -
         ),
         NutritionSummary(),
     )
-    heading = f"Сьогодні: {_highlight_calories(_format_nutrition(total))}"
-    if goal := _format_goal(total.kcal, daily_kcal_goal):
-        heading += f"\n{goal}"
-    if not meals:
-        return f"{heading}\nЗаписів ще немає."
-
     grouped: dict[str, tuple[str, NutritionSummary, int]] = {}
     for meal in meals:
         display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
@@ -549,14 +574,30 @@ def format_day_reply(meals: list[DayMeal], daily_kcal_goal: int | None = None) -
         else:
             grouped[key] = (display_name, nutrients, 1)
 
-    lines = [heading, SUMMARY_EXPLANATION]
-    for meal_name, nutrients, count in grouped.values():
-        count_suffix = f" ×{count}" if count > 1 else ""
-        lines.append(
-            f"• <b>{html.escape(meal_name)}</b>{count_suffix} — "
-            f"К:{_format_nutrition_value(nutrients.kcal, nutrients.kcal_estimated)}"
-        )
-    return "\n".join(lines)
+    specs = (
+        ("kcal", "🔥"),
+        ("protein_g", "🥩"),
+        ("fat_g", "🥑"),
+        ("carbs_g", "🍞"),
+    )
+    summary_lines = _daily_progress_lines(total, daily_kcal_goal, daily_protein_goal)
+    blocks: list[str] = []
+    for summary_line, (attribute, emoji) in zip(summary_lines, specs, strict=True):
+        contributions: list[tuple[float, str, int]] = []
+        for meal_name, nutrients, count in grouped.values():
+            value = getattr(nutrients, attribute)
+            if value is not None and value > 0:
+                contributions.append((value, meal_name, count))
+        contributions.sort(key=lambda item: item[0], reverse=True)
+        details = []
+        for value, meal_name, count in contributions:
+            count_suffix = f" ×{count}" if count > 1 else ""
+            details.append(
+                f"• {html.escape(meal_name)}{count_suffix}  {emoji}{round_whole(value)}"
+            )
+        content = "\n".join([summary_line, *details])
+        blocks.append(f"<blockquote expandable>{content}</blockquote>")
+    return "\n".join(blocks)
 
 
 class CaloriesService:
@@ -569,6 +610,7 @@ class CaloriesService:
         photo_storage_dir: Path,
         daily_kcal_goal: int | None = None,
         saved_store: SavedMealStore | None = None,
+        daily_protein_goal: int | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._store = store
@@ -577,6 +619,7 @@ class CaloriesService:
         self._photo_storage_dir = photo_storage_dir.resolve()
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
         self._daily_kcal_goal = daily_kcal_goal
+        self._daily_protein_goal = daily_protein_goal
         self._saved_store = saved_store
         # A message analysis can take long enough for a deletion callback to be
         # handled in between its first read and the eventual append.  Keep the
@@ -600,11 +643,16 @@ class CaloriesService:
         with self._store_lock:
             self._daily_kcal_goal = goal
 
+    def set_daily_protein_goal(self, goal: int | None) -> None:
+        with self._store_lock:
+            self._daily_protein_goal = goal
+
     def get_day_summary(self, timestamp: datetime) -> str:
         day = self._accounting_day(timestamp)
         return format_day_reply(
             self._store.get_day_meals(day),
             self._daily_kcal_goal,
+            self._daily_protein_goal,
         )
 
     def get_weekly_calories(
@@ -697,7 +745,9 @@ class CaloriesService:
                 accounting_day=day,
                 can_change_weight=len(first.meal.items) == 1,
                 daily_total_text=format_daily_total(
-                    today_nutrition, self._daily_kcal_goal
+                    today_nutrition,
+                    self._daily_kcal_goal,
+                    self._daily_protein_goal,
                 ),
             )
         components = self._store.get_component_meals(day, source_message_id)
@@ -711,7 +761,11 @@ class CaloriesService:
                     telegram_message_id=message_id,
                     accounting_day=day,
                     daily_total_text=(
-                        format_daily_total(today_nutrition, self._daily_kcal_goal)
+                        format_daily_total(
+                            today_nutrition,
+                            self._daily_kcal_goal,
+                            self._daily_protein_goal,
+                        )
                         if index == len(components) - 1
                         else None
                     ),
@@ -853,7 +907,11 @@ class CaloriesService:
                         telegram_message_id=component_message_id,
                         accounting_day=day,
                         daily_total_text=(
-                            format_daily_total(today_nutrition, self._daily_kcal_goal)
+                            format_daily_total(
+                                today_nutrition,
+                                self._daily_kcal_goal,
+                                self._daily_protein_goal,
+                            )
                             if index == len(stored_components) - 1
                             else None
                         ),
@@ -1023,7 +1081,9 @@ class CaloriesService:
             accounting_day=day,
             can_save=can_save,
             can_change_weight=len(stored.meal.items) == 1,
-            daily_total_text=format_daily_total(total, self._daily_kcal_goal),
+            daily_total_text=format_daily_total(
+                total, self._daily_kcal_goal, self._daily_protein_goal
+            ),
         )
 
     def add_saved_meal(
@@ -1111,6 +1171,7 @@ class CaloriesService:
                 updated.day_nutrition
                 or NutritionSummary.unknown_macros(updated.day_total),
                 self._daily_kcal_goal,
+                self._daily_protein_goal,
             ),
         )
 
@@ -1147,10 +1208,10 @@ class CaloriesService:
         nutrition = deletion.day_nutrition or NutritionSummary.unknown_macros(
             deletion.day_total
         )
-        return (
-            "Оновлено після видалення\n"
-            f"{format_daily_total(nutrition, self._daily_kcal_goal)}"
+        daily_total = format_daily_total(
+            nutrition, self._daily_kcal_goal, self._daily_protein_goal
         )
+        return f"Оновлено після видалення\n{daily_total}"
 
     def _delete_photo(self, photo_path: str) -> None:
         try:
@@ -1243,10 +1304,12 @@ class UserManager:
                     self._photo_storage_dir / str(user.telegram_user_id),
                     user.daily_kcal_goal,
                     saved_store,
+                    user.daily_protein_goal,
                 )
                 self._services[key] = service
             else:
                 service.set_daily_kcal_goal(user.daily_kcal_goal)
+                service.set_daily_protein_goal(user.daily_protein_goal)
             return service
 
     def create_invite(self, display_name: str) -> str:
@@ -1296,6 +1359,16 @@ class UserManager:
             for key, service in self._services.items():
                 if key[0] == telegram_user_id:
                     service.set_daily_kcal_goal(goal)
+        return updated
+
+    def set_daily_protein_goal(
+        self, telegram_user_id: int, goal: int | None
+    ) -> UserRecord:
+        updated = self._registry.set_daily_protein_goal(telegram_user_id, goal)
+        with self._lock:
+            for key, service in self._services.items():
+                if key[0] == telegram_user_id:
+                    service.set_daily_protein_goal(goal)
         return updated
 
     def delete_user(self, telegram_user_id: int) -> None:
@@ -1648,7 +1721,7 @@ class TelegramHandlers:
             sent = await message.reply_text(
                 reply, parse_mode=ParseMode.HTML, do_quote=False
             )
-            if reply.startswith("Сьогодні:"):
+            if reply.startswith("<blockquote expandable>"):
                 await self._remember_daily_total_message(sent)
 
     async def weekly_calories(
@@ -1880,6 +1953,54 @@ class TelegramHandlers:
         )
         self._remember_prompt(waiting_state, prompt)
 
+    async def protein_goal(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None:
+            return
+        current = await self._active_user(update)
+        if current is None:
+            self._clear_pending_input(context)
+            return
+        args = list(getattr(context, "args", None) or [])
+        if args:
+            self._clear_pending_input(context)
+            if len(args) != 1:
+                await message.reply_text(
+                    self._goal_validation_text("protein_goal"), do_quote=False
+                )
+                return
+            await self._save_goal(update, args[0], "protein_goal")
+            return
+
+        waiting_state: dict[str, object] = {"kind": "protein_goal"}
+        self._start_waiting(context, GOAL_WAITING_KEY, waiting_state)
+        rows: list[list[InlineKeyboardButton]] = []
+        if current.daily_protein_goal is None:
+            reply = "Яка твоя денна ціль білка?\nНадішли ціле число, наприклад: 100"
+        else:
+            reply = (
+                f"Поточна ціль білка: {current.daily_protein_goal} г.\n"
+                "Надішли нове ціле число або вимкни ціль."
+            )
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🚫 Вимкнути ціль",
+                        callback_data=(
+                            f"{PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX}{user.id}"
+                        ),
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton("❌ Скасувати", callback_data="wait-cancel")])
+        prompt = await message.reply_text(
+            reply, reply_markup=InlineKeyboardMarkup(rows), do_quote=False
+        )
+        self._remember_prompt(waiting_state, prompt)
+
     async def goal_disable_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1913,6 +2034,40 @@ class TelegramHandlers:
             self._clear_pending_input(context)
             await query.answer()
             await query.edit_message_text("Денну ціль вимкнено ✓", reply_markup=None)
+
+    async def protein_goal_disable_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        user = update.effective_user
+        if query is None or user is None:
+            return
+        if await self._active_user(update, callback=True) is None:
+            return
+        try:
+            target_id = int(
+                (query.data or "").removeprefix(PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX)
+            )
+            if (
+                not (query.data or "").startswith(PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX)
+                or target_id != user.id
+            ):
+                raise ValueError
+        except ValueError:
+            await query.answer("Некоректна кнопка.", show_alert=True)
+            return
+        async with self._temporary_status(query.message):
+            try:
+                await asyncio.to_thread(
+                    self._manager.set_daily_protein_goal, user.id, None
+                )
+            except Exception:
+                LOGGER.exception("Could not disable daily protein goal")
+                await query.answer(GOAL_ERROR_TEXT, show_alert=True)
+                return
+            self._clear_pending_input(context)
+            await query.answer()
+            await query.edit_message_text("Ціль по білку вимкнено ✓", reply_markup=None)
 
     async def delete(
         self,
@@ -2336,7 +2491,12 @@ class TelegramHandlers:
             return
         goal_waiting = self._user_state(context).get(GOAL_WAITING_KEY)
         if goal_waiting:
-            if await self._save_goal(update, message.text):
+            goal_kind = (
+                str(goal_waiting.get("kind", "daily_goal"))
+                if isinstance(goal_waiting, dict)
+                else "daily_goal"
+            )
+            if await self._save_goal(update, message.text, goal_kind):
                 if isinstance(goal_waiting, dict):
                     await self._remove_waiting_prompt_buttons(context, goal_waiting)
                 self._clear_pending_input(context)
@@ -2453,48 +2613,77 @@ class TelegramHandlers:
             )
 
     @staticmethod
-    def _parse_goal(raw: str) -> int:
+    def _parse_goal(raw: str, kind: str = "daily_goal") -> int:
         text = raw.strip()
         if not text.isascii() or not text.isdecimal():
             raise ValueError
-        from .users import MAX_DAILY_KCAL_GOAL, MIN_DAILY_KCAL_GOAL
+        from .users import (
+            MAX_DAILY_KCAL_GOAL,
+            MAX_DAILY_PROTEIN_GOAL,
+            MIN_DAILY_KCAL_GOAL,
+            MIN_DAILY_PROTEIN_GOAL,
+        )
 
         goal = int(text)
-        if not MIN_DAILY_KCAL_GOAL <= goal <= MAX_DAILY_KCAL_GOAL:
+        limits = (
+            (MIN_DAILY_PROTEIN_GOAL, MAX_DAILY_PROTEIN_GOAL)
+            if kind == "protein_goal"
+            else (MIN_DAILY_KCAL_GOAL, MAX_DAILY_KCAL_GOAL)
+        )
+        if not limits[0] <= goal <= limits[1]:
             raise ValueError
         return goal
 
     @staticmethod
-    def _goal_validation_text() -> str:
-        from .users import MAX_DAILY_KCAL_GOAL, MIN_DAILY_KCAL_GOAL
+    def _goal_validation_text(kind: str = "daily_goal") -> str:
+        from .users import (
+            MAX_DAILY_KCAL_GOAL,
+            MAX_DAILY_PROTEIN_GOAL,
+            MIN_DAILY_KCAL_GOAL,
+            MIN_DAILY_PROTEIN_GOAL,
+        )
+
+        if kind == "protein_goal":
+            return (
+                f"Надішли ціле число від {MIN_DAILY_PROTEIN_GOAL} до "
+                f"{MAX_DAILY_PROTEIN_GOAL}, наприклад: 100"
+            )
 
         return (
             f"Надішли ціле число від {MIN_DAILY_KCAL_GOAL} до "
             f"{MAX_DAILY_KCAL_GOAL}, наприклад: 2000"
         )
 
-    async def _save_goal(self, update: Update, raw: str) -> bool:
+    async def _save_goal(
+        self, update: Update, raw: str, kind: str = "daily_goal"
+    ) -> bool:
         message = update.effective_message
         user = update.effective_user
         if message is None or user is None:
             return False
         try:
-            goal = self._parse_goal(raw)
+            goal = self._parse_goal(raw, kind)
         except ValueError:
-            await message.reply_text(self._goal_validation_text(), do_quote=False)
+            await message.reply_text(self._goal_validation_text(kind), do_quote=False)
             return False
         async with self._temporary_status(message):
             try:
-                await asyncio.to_thread(
-                    self._manager.set_daily_kcal_goal, user.id, goal
+                setter = (
+                    self._manager.set_daily_protein_goal
+                    if kind == "protein_goal"
+                    else self._manager.set_daily_kcal_goal
                 )
+                await asyncio.to_thread(setter, user.id, goal)
             except Exception:
                 LOGGER.exception("Could not save daily goal")
                 await message.reply_text(GOAL_ERROR_TEXT, do_quote=False)
                 return False
-            await message.reply_text(
-                f"Денну ціль встановлено: {goal} кк ✓", do_quote=False
+            confirmation = (
+                f"Ціль по білку встановлено: {goal} г ✓"
+                if kind == "protein_goal"
+                else f"Денну ціль встановлено: {goal} кк ✓"
             )
+            await message.reply_text(confirmation, do_quote=False)
             return True
 
     async def photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -102,6 +102,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         weekly_calories=lambda: None,
         weekly_meals=lambda: None,
         goal=lambda: None,
+        protein_goal=lambda: None,
         meals=lambda: None,
         recent=lambda: None,
         save=lambda: None,
@@ -120,6 +121,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         cancel_pending_input=lambda: None,
         admin_delete_callback=lambda: None,
         goal_disable_callback=lambda: None,
+        protein_goal_disable_callback=lambda: None,
         text=lambda: None,
         photo=lambda: None,
         voice=lambda: None,
@@ -167,7 +169,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 29
+    assert len(app.handlers) == 31
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
@@ -226,7 +228,8 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("day", "📅 Сьогодні"),
         ("weekly_calories", "📊 КБЖВ за тиждень"),
         ("weekly_meals", "🍽 Страви за тиждень"),
-        ("goal", "🎯 встановити денну ціль"),
+        ("goal", "🎯 ціль по калоріям"),
+        ("protein_goal", "🥩 ціль по білку"),
         ("help", "❓ як користуватися ботом"),
         ("tips", "💡 додаткові можливості"),
     ]
@@ -237,6 +240,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "weekly_calories",
         "weekly_meals",
         "goal",
+        "protein_goal",
         "help",
         "tips",
         "burned",

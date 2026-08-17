@@ -3,6 +3,7 @@ from datetime import time
 import pytest
 
 from calories_bot.users import (
+    KCAL_GOAL_USER_HEADERS,
     LEGACY_USER_HEADERS,
     USER_HEADERS,
     GoogleUserRegistry,
@@ -10,6 +11,7 @@ from calories_bot.users import (
     UserAlreadyRegisteredError,
     UserRegistryError,
     parse_daily_kcal_goal,
+    parse_daily_protein_goal,
     parse_day_start,
 )
 
@@ -28,7 +30,7 @@ class FakeWorksheet:
 
     def update(self, values, range_name=None, **kwargs):
         del kwargs
-        if range_name == "H1:H1":
+        if range_name in {"H1:H1", "I1:I1"}:
             self.rows[0].append(values[0][0])
             return
         row_number = int(range_name.split(":", maxsplit=1)[0][1:])
@@ -67,6 +69,18 @@ def test_known_legacy_registry_header_is_migrated_without_changing_rows() -> Non
 
     assert registry._worksheet.rows == [USER_HEADERS, row]
     assert registry.get_user(123).daily_kcal_goal is None
+    assert registry.get_user(123).daily_protein_goal is None
+
+
+def test_kcal_goal_registry_header_is_migrated_for_protein_goal() -> None:
+    row = [123, "A", "a", "active", "", "sheet", "01:00", 2000]
+    registry = build_registry([list(KCAL_GOAL_USER_HEADERS), list(row)])
+
+    registry._ensure_headers()
+
+    assert registry._worksheet.rows == [USER_HEADERS, row]
+    assert registry.get_user(123).daily_kcal_goal == 2000
+    assert registry.get_user(123).daily_protein_goal is None
 
 
 def test_invalid_day_start_and_malformed_rows_fail() -> None:
@@ -104,6 +118,12 @@ def test_invalid_daily_goal_is_rejected(value) -> None:
         parse_daily_kcal_goal(value)
 
 
+@pytest.mark.parametrize("value", ["0", "-1", "1001", "1.5", "two"])
+def test_invalid_daily_protein_goal_is_rejected(value) -> None:
+    with pytest.raises(UserRegistryError, match="daily_protein_goal"):
+        parse_daily_protein_goal(value)
+
+
 def test_daily_goal_is_read_written_disabled_and_verified() -> None:
     registry = build_registry(
         [USER_HEADERS, [123, "A", "", "active", "", "sheet", "01:00", ""]]
@@ -114,6 +134,18 @@ def test_daily_goal_is_read_written_disabled_and_verified() -> None:
 
     assert enabled.daily_kcal_goal == 2000
     assert disabled.daily_kcal_goal is None
+
+
+def test_daily_protein_goal_is_read_written_disabled_and_verified() -> None:
+    registry = build_registry(
+        [USER_HEADERS, [123, "A", "", "active", "", "sheet", "01:00", "", ""]]
+    )
+
+    enabled = registry.set_daily_protein_goal(123, 100)
+    disabled = registry.set_daily_protein_goal(123, None)
+
+    assert enabled.daily_protein_goal == 100
+    assert disabled.daily_protein_goal is None
 
 
 def test_invite_activation_is_one_time_and_retains_personal_context() -> None:
