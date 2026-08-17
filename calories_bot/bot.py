@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -132,7 +132,6 @@ GARMIN_READ_ERROR_TEXT = (
     "Перевір журнал оновлення або спробуй після наступного оновлення доби."
 )
 WEEK_DAYS = 7
-SUMMARY_EXPLANATION = "КБЖВ — у підсумку, біля страв — лише калорії."
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
 
@@ -217,8 +216,23 @@ def _split_telegram_text(text: str, limit: int = 4000) -> list[str]:
     return chunks or [""]
 
 
-def _highlight_calories(value: str) -> str:
-    return f"<b><u>{value}</u></b>"
+def _rich_html_fallback(rich_html: str) -> str:
+    """Convert rich-only blocks into regular Telegram HTML."""
+
+    text = re.sub(
+        r"<details><summary>(.*?)</summary>",
+        r"<b>\1</b>\n",
+        rich_html,
+        flags=re.DOTALL,
+    )
+    text = text.replace("</details>", "")
+    text = re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<b>\1</b>\n", text)
+    text = text.replace("<sub>", "<i>").replace("</sub>", "</i>")
+    text = text.replace("<p>", "").replace("</p>", "\n")
+    text = text.replace("<ul>", "").replace("</ul>", "")
+    text = text.replace("<li>", "• ").replace("</li>", "\n")
+    text = text.replace("<br/>", "\n").replace("<br>", "\n")
+    return text.replace("&nbsp;", " ").strip()
 
 
 def _format_nutrition_value(value: float | None, estimated: bool = False) -> str:
@@ -278,9 +292,25 @@ def _portion_includes_weight(portion: str, weight_g: float) -> bool:
     )
 
 
-def _format_item_calculation(
-    item: CalculatedFoodItem, *, highlight_total: bool = True
-) -> str:
+def _format_icon_value(value: float | None) -> str:
+    if value is None or value <= 0:
+        return "-"
+    return format(value, "g")
+
+
+def _format_icon_nutrition(summary: NutritionSummary) -> str:
+    separator = "&nbsp;&nbsp;&nbsp;"
+    return separator.join(
+        (
+            f"🔥{_format_icon_value(summary.kcal)}",
+            f"🥩 {_format_icon_value(summary.protein_g)}",
+            f"🥑 {_format_icon_value(summary.fat_g)}",
+            f"🍞 {_format_icon_value(summary.carbs_g)}",
+        )
+    )
+
+
+def _format_item_calculation(item: CalculatedFoodItem, *, heading_level: int) -> str:
     display_name = item.name[:1].upper() + item.name[1:]
     weight_prefix = "≈" if item.weight_origin != "user_text" else ""
     heading = html.escape(display_name)
@@ -289,15 +319,13 @@ def _format_item_calculation(
     if not item.portion_display or not _portion_includes_weight(
         item.portion_display, item.weight_g
     ):
-        separator = " · " if item.portion_display else " "
+        separator = "&nbsp;&nbsp;" if item.portion_display else " "
         heading += f"{separator}{weight_prefix}{round_whole(item.weight_g)} г"
-    total = _format_nutrition(_summary_for_item(item))
-    if highlight_total:
-        total = _highlight_calories(total)
     return (
-        f"<b>{heading}</b>\n"
-        f"{total}\n"
-        f"На 100 г: {_format_nutrition(_per_100g_summary(item))}"
+        f"<h{heading_level}>{heading}</h{heading_level}>"
+        f"<p>{_format_icon_nutrition(_summary_for_item(item))}</p>"
+        f"<p><sub>На 100 г:</sub><br/>"
+        f"{_format_icon_nutrition(_per_100g_summary(item))}</p>"
     )
 
 
@@ -367,19 +395,16 @@ def format_reply(meal: MealResult) -> str:
     if len(meal.items) > 1:
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
         calculations = [
-            _format_item_calculation(item, highlight_total=False) for item in meal.items
+            _format_item_calculation(item, heading_level=4) for item in meal.items
         ]
         body = [
-            f"<b>{meal_name} {round_whole(meal.total_weight_g)} г</b>",
-            _highlight_calories(_format_nutrition(nutrition_summary(meal))),
-            *(
-                f"• {calculation.replace(chr(10), chr(10) + '  ')}"
-                for calculation in calculations
-            ),
+            f"<h3>{meal_name} {round_whole(meal.total_weight_g)} г</h3>",
+            f"<p>{_format_icon_nutrition(nutrition_summary(meal))}</p>",
+            *calculations,
         ]
     else:
-        body = [_format_item_calculation(meal.items[0])]
-    return "\n".join(body)
+        body = [_format_item_calculation(meal.items[0], heading_level=3)]
+    return "".join(body)
 
 
 def format_weekly_calories_reply(
@@ -398,51 +423,61 @@ def format_weekly_calories_reply(
         if missing:
             raise ValueError("Burned-calorie data does not cover the completed week")
 
-    legend = "+спожито   −витрачено   =баланс"
-    lines = [
-        "КБЖВ за тиждень",
-        legend,
-        "КБЖВ — у підсумку, за днями — лише калорії.",
-        "",
-    ]
+    day_rows: list[str] = []
     for day in days:
-        prefix = f"• {UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}: "
         consumed_kcal = round_whole(consumed[day].kcal)
-        consumed_text = f"К:{consumed_kcal:+d}"
         if burned_totals is None:
-            lines.append(prefix + consumed_text)
-            continue
-        burned = burned_totals[day]
-        balance = consumed_kcal - burned
-        lines.append(prefix + f"{consumed_text} {-burned:+d} ={balance:+d}")
-
-    total = NutritionSummary()
-    for day in days:
-        total += consumed[day]
-
-    def average_value(value: float | None) -> float | None:
-        return None if value is None else value / WEEK_DAYS
-
-    average_summary = NutritionSummary(
-        kcal=total.kcal / WEEK_DAYS,
-        protein_g=average_value(total.protein_g),
-        fat_g=average_value(total.fat_g),
-        carbs_g=average_value(total.carbs_g),
-        kcal_estimated=total.kcal_estimated,
-        protein_estimated=total.protein_estimated,
-        fat_estimated=total.fat_estimated,
-        carbs_estimated=total.carbs_estimated,
-    )
-    average_consumed = round_whole(average_summary.kcal)
-    average = f"Середнє за день: {_format_nutrition(average_summary)}"
-    if burned_totals is not None:
-        average_burned = round_whole(
-            sum(burned_totals[day] for day in days) / WEEK_DAYS
+            burned_text = "—"
+            balance_text = "—"
+        else:
+            burned = burned_totals[day]
+            balance = consumed_kcal - burned
+            burned_text = f"{burned} ккал"
+            balance_text = f"{balance:+d} ккал"
+        day_rows.append(
+            f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
+            f"Спожито {consumed_kcal} ккал&nbsp;&nbsp;"
+            f"Витрачено {burned_text}&nbsp;&nbsp;"
+            f"Баланс: <b><u>{balance_text}</u></b></li>"
         )
+
+    total = sum((consumed[day] for day in days), NutritionSummary())
+    total_consumed = round_whole(total.kcal)
+    average_consumed = round_whole(total.kcal / WEEK_DAYS)
+    if burned_totals is None:
+        total_burned_text = "—"
+        total_balance_text = "—"
+        average_burned_text = "—"
+        average_balance_text = "—"
+    else:
+        total_burned = sum(burned_totals[day] for day in days)
+        total_balance = total_consumed - total_burned
+        average_burned = round_whole(total_burned / WEEK_DAYS)
         average_balance = average_consumed - average_burned
-        average += f" · витрачено {-average_burned:+d} · баланс ={average_balance:+d}"
-    lines.extend(("", f"Разом: {_format_nutrition(total)}", average))
-    return "\n".join(lines)
+        total_burned_text = f"{total_burned} ккал"
+        total_balance_text = f"{total_balance:+d} ккал"
+        average_burned_text = f"{average_burned} ккал"
+        average_balance_text = f"{average_balance:+d} ккал"
+
+    def balance_line(consumed_kcal: int, burned_text: str, balance_text: str) -> str:
+        return (
+            f"Спожито: {consumed_kcal} ккал&nbsp;&nbsp;&nbsp;"
+            f"Витрачено: {burned_text}&nbsp;&nbsp;&nbsp;"
+            f"Баланс: <b><u>{balance_text}</u></b>"
+        )
+
+    total_line = balance_line(total_consumed, total_burned_text, total_balance_text)
+    average_line = balance_line(
+        average_consumed, average_burned_text, average_balance_text
+    )
+    return (
+        "<h3>Баланс калорій за тиждень:</h3>"
+        f"<p>{total_line}</p>"
+        "<h3>В середньому за день:</h3>"
+        f"<p>{average_line}</p>"
+        "<details><summary>По дням</summary>"
+        f"<ul>{''.join(day_rows)}</ul></details>"
+    )
 
 
 def _aggregate_weekly_meals(
@@ -492,7 +527,10 @@ def _aggregate_weekly_meals(
 
 
 def format_weekly_meals_reply(
-    meals: list[PeriodMeal], group_names: tuple[str, ...] | None = None
+    meals: list[PeriodMeal],
+    group_names: tuple[str, ...] | None = None,
+    daily_kcal_goal: int | None = None,
+    daily_protein_goal: int | None = None,
 ) -> str:
     total = sum(
         (
@@ -502,32 +540,41 @@ def format_weekly_meals_reply(
         NutritionSummary(),
     )
     average = NutritionSummary(
-        kcal=total.kcal / WEEK_DAYS,
-        protein_g=None if total.protein_g is None else total.protein_g / WEEK_DAYS,
-        fat_g=None if total.fat_g is None else total.fat_g / WEEK_DAYS,
-        carbs_g=None if total.carbs_g is None else total.carbs_g / WEEK_DAYS,
+        kcal=round_whole(total.kcal / WEEK_DAYS),
+        protein_g=(
+            None
+            if total.protein_g is None
+            else round_whole(total.protein_g / WEEK_DAYS)
+        ),
+        fat_g=(None if total.fat_g is None else round_whole(total.fat_g / WEEK_DAYS)),
+        carbs_g=(
+            None if total.carbs_g is None else round_whole(total.carbs_g / WEEK_DAYS)
+        ),
         kcal_estimated=total.kcal_estimated,
         protein_estimated=total.protein_estimated,
         fat_estimated=total.fat_estimated,
         carbs_estimated=total.carbs_estimated,
     )
-    summary = (
-        f"Всього: {_format_nutrition(total)}\n"
-        f"Середнє за день: {_format_nutrition(average)}"
+    progress = "<br/>".join(
+        _daily_progress_lines(average, daily_kcal_goal, daily_protein_goal)
     )
+    heading = f"<h3>КБЖВ за тиждень:</h3><h4>В середньому в день:</h4><p>{progress}</p>"
     if not meals:
-        return f"Страви за тиждень\n\nЗаписів немає.\n\n{summary}"
+        return f"{heading}<p>Записів немає.</p>"
 
     aggregated = _aggregate_weekly_meals(meals, group_names)
-    lines = ["Страви за тиждень", SUMMARY_EXPLANATION, ""]
+    rows = []
     for meal_name, total_weight_g, nutrients in aggregated:
         display_name = meal_name[:1].upper() + meal_name[1:]
-        lines.append(
-            f"• <b>{html.escape(display_name)}</b> {round_whole(total_weight_g)} г — "
-            f"К:{_format_nutrition_value(nutrients.kcal, nutrients.kcal_estimated)}"
+        rows.append(
+            f"<li><b><u>{html.escape(display_name)}</u></b> "
+            f"{round_whole(total_weight_g)} г — "
+            f"{_format_icon_nutrition(nutrients)}</li>"
         )
-    lines.extend(("", summary))
-    return "\n".join(lines)
+    return (
+        f"{heading}<details><summary>Деталі по стравам</summary>"
+        f"<ul>{''.join(rows)}</ul></details>"
+    )
 
 
 def format_users_reply(users: list[UserRecord]) -> str:
@@ -675,7 +722,11 @@ class CaloriesService:
         start_day = end_day - timedelta(days=WEEK_DAYS - 1)
         meals = self._store.get_period_meals(start_day, end_day)
         if not meals or meal_grouper is None:
-            return format_weekly_meals_reply(meals)
+            return format_weekly_meals_reply(
+                meals,
+                daily_kcal_goal=self._daily_kcal_goal,
+                daily_protein_goal=self._daily_protein_goal,
+            )
 
         exact = _aggregate_weekly_meals(meals, collapse_tail=False)
         exact_meals = [
@@ -684,10 +735,19 @@ class CaloriesService:
         ]
         try:
             grouping = meal_grouper.group(tuple(meal.meal_name for meal in exact_meals))
-            return format_weekly_meals_reply(exact_meals, grouping.group_names)
+            return format_weekly_meals_reply(
+                exact_meals,
+                grouping.group_names,
+                self._daily_kcal_goal,
+                self._daily_protein_goal,
+            )
         except MealGroupingError:
             LOGGER.exception("Could not semantically group weekly meals")
-            return format_weekly_meals_reply(exact_meals)
+            return format_weekly_meals_reply(
+                exact_meals,
+                daily_kcal_goal=self._daily_kcal_goal,
+                daily_protein_goal=self._daily_protein_goal,
+            )
 
     @staticmethod
     def _component_message_id(source_message_id: int, component_index: int) -> int:
@@ -1451,6 +1511,44 @@ class TelegramHandlers:
                         exc_info=True,
                     )
 
+    @staticmethod
+    async def _send_rich_html(
+        message: Message,
+        context: ContextTypes.DEFAULT_TYPE | object | None,
+        rich_html: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        operation: str,
+    ) -> Message | None:
+        bot = getattr(context, "bot", None)
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id is None:
+            chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if bot is not None and chat_id is not None:
+            api_kwargs: dict[str, object] = {
+                "chat_id": chat_id,
+                "rich_message": {"html": rich_html},
+            }
+            if reply_markup is not None:
+                api_kwargs["reply_markup"] = reply_markup.to_dict()
+            try:
+                return cast(
+                    Message,
+                    await bot.do_api_request(
+                        "sendRichMessage",
+                        api_kwargs=api_kwargs,
+                        return_type=Message,
+                    ),
+                )
+            except Exception:
+                LOGGER.exception("Could not send rich %s", operation)
+        return await message.reply_text(
+            _rich_html_fallback(rich_html),
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            do_quote=False,
+        )
+
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1774,7 +1872,15 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Could not build /weekly_calories")
                 reply = WEEK_ERROR_TEXT
-            await message.reply_text(reply, do_quote=False)
+            if reply.startswith("<h3>"):
+                await self._send_rich_html(
+                    message,
+                    context,
+                    reply,
+                    operation="/weekly_calories report",
+                )
+            else:
+                await message.reply_text(reply, do_quote=False)
 
     async def weekly_meals(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1794,10 +1900,15 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Could not build /weekly_meals")
                 reply = WEEK_ERROR_TEXT
-            for chunk in _split_telegram_text(reply):
-                await message.reply_text(
-                    chunk, parse_mode=ParseMode.HTML, do_quote=False
+            if reply.startswith("<h3>"):
+                await self._send_rich_html(
+                    message,
+                    context,
+                    reply,
+                    operation="/weekly_meals report",
                 )
+            else:
+                await message.reply_text(reply, do_quote=False)
 
     @staticmethod
     def _short_button_name(name: str, limit: int = 34) -> str:
@@ -2457,7 +2568,7 @@ class TelegramHandlers:
                     raise LookupError
                 await query.answer("Додано")
                 if isinstance(query.message, Message):
-                    await self._send_meal_replies(query.message, result)
+                    await self._send_meal_replies(query.message, result, context)
                 return
             if data.startswith("recent-add:"):
                 message_id_raw, day_raw, weight_raw = data.removeprefix(
@@ -2477,7 +2588,7 @@ class TelegramHandlers:
                     raise LookupError
                 await query.answer("Додано")
                 if isinstance(query.message, Message):
-                    await self._send_meal_replies(query.message, result)
+                    await self._send_meal_replies(query.message, result, context)
                 return
             if data.startswith("manage-delete:"):
                 saved_id = data.split(":", maxsplit=1)[1]
@@ -2530,7 +2641,7 @@ class TelegramHandlers:
                 update, context, service, meal_weight_state, message.text
             )
             return
-        await self._process(service, message, message.text)
+        await self._process(service, message, message.text, context=context)
 
     async def _handle_meal_weight_input(
         self,
@@ -2592,7 +2703,7 @@ class TelegramHandlers:
             )
             if result is None:
                 raise LookupError
-            await self._send_meal_replies(message, result)
+            await self._send_meal_replies(message, result, context)
             self._clear_pending_input(context)
             try:
                 await context.bot.edit_message_text(
@@ -2726,7 +2837,7 @@ class TelegramHandlers:
             await message.reply_text(READ_ERROR_TEXT, do_quote=False)
             return
         if existing is not None:
-            await self._send_meal_replies(message, existing)
+            await self._send_meal_replies(message, existing, context)
             return
         async with self._temporary_status(message, llm=True):
             try:
@@ -2741,6 +2852,7 @@ class TelegramHandlers:
                 message,
                 message.caption or "",
                 image_bytes,
+                context=context,
                 show_status=False,
             )
 
@@ -2764,7 +2876,7 @@ class TelegramHandlers:
             await message.reply_text(READ_ERROR_TEXT, do_quote=False)
             return
         if existing is not None:
-            await self._send_meal_replies(message, existing)
+            await self._send_meal_replies(message, existing, context)
             return
         async with self._temporary_status(message, llm=True):
             try:
@@ -2781,7 +2893,9 @@ class TelegramHandlers:
                 LOGGER.exception("Could not download or transcribe a voice message")
                 await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
                 return
-            await self._process(service, message, transcript, show_status=False)
+            await self._process(
+                service, message, transcript, context=context, show_status=False
+            )
 
     @staticmethod
     def _meal_reply_markup(result: MealReply) -> InlineKeyboardMarkup:
@@ -2814,20 +2928,29 @@ class TelegramHandlers:
         rows.append([InlineKeyboardButton("🗑 Видалити", callback_data=delete_callback)])
         return InlineKeyboardMarkup(rows)
 
-    async def _send_meal_reply(self, message: Message, result: MealReply) -> None:
-        await message.reply_text(
+    async def _send_meal_reply(
+        self,
+        message: Message,
+        result: MealReply,
+        context: ContextTypes.DEFAULT_TYPE | object | None,
+    ) -> None:
+        await self._send_rich_html(
+            message,
+            context,
             result.text,
-            parse_mode=ParseMode.HTML,
             reply_markup=self._meal_reply_markup(result),
-            do_quote=False,
+            operation="meal reply",
         )
 
     async def _send_meal_replies(
-        self, message: Message, result: MealReply | list[MealReply]
+        self,
+        message: Message,
+        result: MealReply | list[MealReply],
+        context: ContextTypes.DEFAULT_TYPE | object | None = None,
     ) -> None:
         replies = result if isinstance(result, list) else [result]
         for reply in replies:
-            await self._send_meal_reply(message, reply)
+            await self._send_meal_reply(message, reply, context)
         daily_total_text = next(
             (
                 reply.daily_total_text
@@ -2922,6 +3045,7 @@ class TelegramHandlers:
         text: str,
         image_bytes: bytes | None = None,
         *,
+        context: ContextTypes.DEFAULT_TYPE | object | None = None,
         show_status: bool = True,
     ) -> None:
         if show_status:
@@ -2931,6 +3055,7 @@ class TelegramHandlers:
                     message,
                     text,
                     image_bytes,
+                    context=context,
                     show_status=False,
                 )
             return
@@ -2962,7 +3087,7 @@ class TelegramHandlers:
             LOGGER.exception("Unexpected error while handling a Telegram message")
             reply = ANALYSIS_ERROR_TEXT
         else:
-            await self._send_meal_replies(message, result)
+            await self._send_meal_replies(message, result, context)
             return
         await message.reply_text(reply, do_quote=False)
 

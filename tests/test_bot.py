@@ -45,6 +45,7 @@ from calories_bot.models import (
     StoredMeal,
     calculate_meal,
     parse_simple_meal_request,
+    round_meal_nutrition,
 )
 from calories_bot.sheets import (
     DayMeal,
@@ -364,11 +365,9 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
 
-    assert reply.text == (
-        "<b>Сир 50 г</b>\n"
-        "<b><u>К:60 Б:10 Ж:5 В:0</u></b>\n"
-        "На 100 г: К:120 Б:20 Ж:10 В:0"
-    )
+    assert reply.text.startswith("<h3>Сир 50 г</h3>")
+    assert "🔥60&nbsp;&nbsp;&nbsp;🥩 10&nbsp;&nbsp;&nbsp;🥑 5" in reply.text
+    assert "<sub>На 100 г:</sub><br/>🔥120" in reply.text
     assert reply.daily_total_text == "🔥 360 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
     assert reply.accounting_day == date(2026, 8, 2)
     marker = parse_simple_meal_request(store.appended[0][3])
@@ -455,6 +454,35 @@ def test_handler_sends_each_component_with_the_same_standard_buttons() -> None:
             ["🗑 Видалити"],
         ]
     assert "reply_markup" not in message.reply_kwargs[2]
+
+
+def test_handler_sends_meal_reply_as_rich_message_with_buttons() -> None:
+    class Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def do_api_request(self, endpoint, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return SimpleNamespace()
+
+    handlers = TelegramHandlers(999, FakeManager())
+    _, message = make_update()
+    bot = Bot()
+    result = MealReply(
+        "<h3>Сир 50 г</h3><p>🔥60&nbsp;&nbsp;&nbsp;🥩 10</p>",
+        42,
+        date(2026, 8, 2),
+    )
+
+    asyncio.run(handlers._send_meal_replies(message, result, SimpleNamespace(bot=bot)))
+
+    assert message.replies == []
+    assert bot.calls[0][0] == "sendRichMessage"
+    api_kwargs = bot.calls[0][1]["api_kwargs"]
+    assert api_kwargs["rich_message"] == {"html": result.text}
+    assert api_kwargs["reply_markup"]["inline_keyboard"][0][0]["text"] == (
+        "⭐ Зберегти"
+    )
 
 
 def test_handler_remembers_the_separate_daily_total_message() -> None:
@@ -558,9 +586,9 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
     service = build_service(analyzer, store, tmp_path)
 
     reply = service.process_message("сир 50", 42, datetime(2026, 8, 2, 12, tzinfo=TZ))
-    assert "<b>Сир 50 г</b>" in reply.text
-    assert "К:60 Б:10 Ж:5 В:0" in reply.text
-    assert "На 100 г: К:120 Б:20 Ж:10 В:0" in reply.text
+    assert "<h3>Сир 50 г</h3>" in reply.text
+    assert "🔥60&nbsp;&nbsp;&nbsp;🥩 10&nbsp;&nbsp;&nbsp;🥑 5" in reply.text
+    assert "<sub>На 100 г:</sub><br/>🔥120" in reply.text
     assert reply.daily_total_text == "🔥 360 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
     assert analyzer.calls == 0
     assert store.appended == []
@@ -595,8 +623,8 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     )
 
     photo_path = store.appended[0][4]
-    assert "<b>Сир 50 г</b>" in reply.text
-    assert "К:60 Б:10 Ж:5 В:0" in reply.text
+    assert "<h3>Сир 50 г</h3>" in reply.text
+    assert "🔥60&nbsp;&nbsp;&nbsp;🥩 10&nbsp;&nbsp;&nbsp;🥑 5" in reply.text
     assert reply.daily_total_text == "🔥 360 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
@@ -614,24 +642,21 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
         "", 43, datetime(2026, 8, 2, 12, tzinfo=TZ), b"jpeg-data"
     )
 
-    assert reply.text == (
-        "<b>Сир ≈50 г</b>\n"
-        "<b><u>К:≈60 Б:≈10 Ж:≈5 В:≈0</u></b>\n"
-        "На 100 г: К:≈120 Б:≈20 Ж:≈10 В:≈0"
-    )
+    assert reply.text.startswith("<h3>Сир ≈50 г</h3>")
+    assert "<p>🔥60&nbsp;&nbsp;&nbsp;🥩 10" in reply.text
+    assert "<sub>На 100 г:</sub><br/>🔥120" in reply.text
     assert reply.daily_total_text == "🔥 60 ккал\n🥩 Б 10 г\n🥑 Ж 5 г\n🍞 В 0 г"
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
 
 
-def test_estimate_is_marked_in_reply() -> None:
+def test_estimated_weight_is_marked_but_nutrition_stays_compact() -> None:
     meal = calculate_meal(food_analysis(estimated=True))
     reply = format_reply(meal)
-    assert reply == (
-        "<b>Сир ≈50 г</b>\n"
-        "<b><u>К:≈60 Б:≈10 Ж:≈5 В:≈0</u></b>\n"
-        "На 100 г: К:≈120 Б:≈20 Ж:≈10 В:≈0"
-    )
+    assert reply.startswith("<h3>Сир ≈50 г</h3>")
+    assert "🔥60" in reply
+    assert "К:" not in reply
+    assert "≈60" not in reply
 
 
 def test_reply_uses_compact_requested_format() -> None:
@@ -652,9 +677,10 @@ def test_reply_uses_compact_requested_format() -> None:
     reply = format_reply(calculate_meal(analysis))
 
     assert reply == (
-        "<b>Яблучні оладки 50 г</b>\n"
-        "<b><u>К:≈110 Б:— Ж:— В:—</u></b>\n"
-        "На 100 г: К:≈220 Б:— Ж:— В:—"
+        "<h3>Яблучні оладки 50 г</h3>"
+        "<p>🔥110&nbsp;&nbsp;&nbsp;🥩 -&nbsp;&nbsp;&nbsp;🥑 -&nbsp;&nbsp;&nbsp;🍞 -</p>"
+        "<p><sub>На 100 г:</sub><br/>"
+        "🔥220&nbsp;&nbsp;&nbsp;🥩 -&nbsp;&nbsp;&nbsp;🥑 -&nbsp;&nbsp;&nbsp;🍞 -</p>"
     )
 
 
@@ -680,9 +706,9 @@ def test_composite_reply_stays_compact() -> None:
         ],
     )
     reply = format_reply(calculate_meal(analysis))
-    assert reply.startswith("<b>Перекус 150 г</b>\n<b><u>К:≈110 Б:— Ж:— В:—</u></b>")
-    assert "• <b>Яблуко ≈100 г</b>" in reply
-    assert "• <b>Сир 50 г</b>" in reply
+    assert reply.startswith("<h3>Перекус 150 г</h3><p>🔥110")
+    assert "<h4>Яблуко ≈100 г</h4>" in reply
+    assert "<h4>Сир 50 г</h4>" in reply
     assert reply.count("На 100 г:") == 2
 
 
@@ -691,7 +717,7 @@ def test_reply_escapes_html_in_item_name() -> None:
     analysis.items[0].name = "сир <міцний>"
     meal = calculate_meal(analysis)
     reply = format_reply(meal)
-    assert reply.startswith("<b>Сир &lt;міцний&gt; 50 г</b>\n")
+    assert reply.startswith("<h3>Сир &lt;міцний&gt; 50 г</h3>")
 
 
 def test_reply_uses_portion_display() -> None:
@@ -714,11 +740,8 @@ def test_reply_uses_portion_display() -> None:
 
     reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "<b>Яйця 2 шт. · ≈100 г</b>\n"
-        "<b><u>К:≈140 Б:— Ж:— В:—</u></b>\n"
-        "На 100 г: К:≈140 Б:— Ж:— В:—"
-    )
+    assert reply.startswith("<h3>Яйця 2 шт.&nbsp;&nbsp;≈100 г</h3>")
+    assert "<p>🔥140&nbsp;&nbsp;&nbsp;🥩 -" in reply
 
 
 def test_reply_explains_estimated_weight_per_piece() -> None:
@@ -737,13 +760,11 @@ def test_reply_explains_estimated_weight_per_piece() -> None:
         ],
     )
 
-    reply = format_reply(calculate_meal(analysis))
+    reply = format_reply(round_meal_nutrition(calculate_meal(analysis)))
 
-    assert reply == (
-        "<b>Сирники 5 шт. · ≈250 г</b>\n"
-        "<b><u>К:≈63 Б:— Ж:— В:—</u></b>\n"
-        "На 100 г: К:25 Б:— Ж:— В:—"
-    )
+    assert reply.startswith("<h3>Сирники 5 шт.&nbsp;&nbsp;≈250 г</h3>")
+    assert "<p>🔥63&nbsp;&nbsp;&nbsp;🥩 -" in reply
+    assert "<sub>На 100 г:</sub><br/>🔥25" in reply
 
 
 def test_reply_explains_non_count_portion_weight() -> None:
@@ -764,11 +785,8 @@ def test_reply_explains_non_count_portion_weight() -> None:
 
     reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "<b>Борщ 1 тарілка · ≈300 г</b>\n"
-        "<b><u>К:≈120 Б:— Ж:— В:—</u></b>\n"
-        "На 100 г: К:≈40 Б:— Ж:— В:—"
-    )
+    assert reply.startswith("<h3>Борщ 1 тарілка&nbsp;&nbsp;≈300 г</h3>")
+    assert "<p>🔥120&nbsp;&nbsp;&nbsp;🥩 -" in reply
 
 
 def test_reply_does_not_repeat_weight_already_shown_as_portion() -> None:
@@ -789,11 +807,8 @@ def test_reply_does_not_repeat_weight_already_shown_as_portion() -> None:
 
     reply = format_reply(calculate_meal(analysis))
 
-    assert reply == (
-        "<b>Ковбаски з яловичини та свинини 150 г</b>\n"
-        "<b><u>К:≈450 Б:— Ж:— В:—</u></b>\n"
-        "На 100 г: К:≈300 Б:— Ж:— В:—"
-    )
+    assert reply.startswith("<h3>Ковбаски з яловичини та свинини 150 г</h3>")
+    assert "<p>🔥450&nbsp;&nbsp;&nbsp;🥩 -" in reply
     assert "150 г (150 г)" not in reply
 
 
@@ -829,34 +844,30 @@ def test_weekly_calories_includes_seven_days_admin_balance_and_averages() -> Non
         burned,
     )
 
-    assert reply == (
-        "КБЖВ за тиждень\n"
-        "+спожито   −витрачено   =баланс\n"
-        "КБЖВ — у підсумку, за днями — лише калорії.\n\n"
-        "• нд 02.08: К:+1640 -2000 =-360\n"
-        "• пн 03.08: К:+1800 -2000 =-200\n"
-        "• вт 04.08: К:+0 -2000 =-2000\n"
-        "• ср 05.08: К:+1870 -2000 =-130\n"
-        "• чт 06.08: К:+1730 -2000 =-270\n"
-        "• пт 07.08: К:+0 -2000 =-2000\n"
-        "• сб 08.08: К:+2310 -2000 =+310\n\n"
-        "Разом: К:9350 Б:— Ж:— В:—\n"
-        "Середнє за день: К:1336 Б:— Ж:— В:— · "
-        "витрачено -2000 · баланс =-664"
-    )
+    assert reply.startswith("<h3>Баланс калорій за тиждень:</h3>")
+    assert "Спожито: 9350 ккал" in reply
+    assert "Витрачено: 14000 ккал" in reply
+    assert "Баланс: <b><u>-4650 ккал</u></b>" in reply
+    assert "<h3>В середньому за день:</h3>" in reply
+    assert "Спожито: 1336 ккал" in reply
+    assert "Баланс: <b><u>-664 ккал</u></b>" in reply
+    assert "<details><summary>По дням</summary>" in reply
+    assert reply.count("<li>") == 7
+    assert "<b>сб 08.08</b>: Спожито 2310 ккал" in reply
+    assert "Баланс: <b><u>+310 ккал</u></b>" in reply
 
 
-def test_weekly_calories_for_regular_user_shows_only_consumed() -> None:
+def test_weekly_calories_for_regular_user_marks_unavailable_burned_values() -> None:
     reply = format_weekly_calories_reply(date(2026, 8, 8), {date(2026, 8, 8): 700})
 
-    assert "+спожито   −витрачено   =баланс" in reply
-    assert "• сб 08.08: К:+700" in reply
-    assert "Середнє за день: К:100 Б:— Ж:— В:—" in reply
-    day_lines = [line for line in reply.splitlines() if line.startswith("• ")]
-    assert all(" -" not in line and "=" not in line for line in day_lines)
+    assert "Спожито: 700 ккал" in reply
+    assert "Витрачено: —" in reply
+    assert "Баланс: <b><u>—</u></b>" in reply
+    assert "Спожито: 100 ккал" in reply
+    assert "<b>сб 08.08</b>: Спожито 700 ккал" in reply
 
 
-def test_weekly_calories_sums_full_nutrition_only_in_summary() -> None:
+def test_weekly_calories_uses_only_calories_from_nutrition_summaries() -> None:
     reply = format_weekly_calories_reply(
         date(2026, 8, 8),
         {
@@ -869,11 +880,10 @@ def test_weekly_calories_sums_full_nutrition_only_in_summary() -> None:
         },
     )
 
-    assert "Разом: К:1500 Б:110 Ж:45 В:170" in reply
-    day_lines = [line for line in reply.splitlines() if line.startswith("• ")]
-    assert all(
-        "Б:" not in line and "Ж:" not in line and "В:" not in line for line in day_lines
-    )
+    assert "Спожито: 1500 ккал" in reply
+    assert "Б:" not in reply
+    assert "Ж:" not in reply
+    assert "В:" not in reply
 
 
 def test_weekly_meals_aggregates_names_weights_and_sorts_by_calories() -> None:
@@ -885,25 +895,27 @@ def test_weekly_meals_aggregates_names_weights_and_sorts_by_calories() -> None:
         ]
     )
 
-    assert reply == (
-        "Страви за тиждень\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n\n"
-        "• <b>Сир</b> 100 г — К:360\n"
-        "• <b>Вино сухе</b> 350 г — К:200\n\n"
-        "Всього: К:560 Б:— Ж:— В:—\n"
-        "Середнє за день: К:80 Б:— Ж:— В:—"
-    )
+    assert reply.startswith("<h3>КБЖВ за тиждень:</h3>")
+    assert "<h4>В середньому в день:</h4>" in reply
+    assert "🔥 80 ккал" in reply
+    assert "<details><summary>Деталі по стравам</summary>" in reply
+    cheese = "<li><b><u>Сир</u></b> 100 г — 🔥360"
+    wine = "<li><b><u>Вино сухе</u></b> 350 г — 🔥200"
+    assert cheese in reply
+    assert wine in reply
+    assert reply.index(cheese) < reply.index(wine)
 
 
 def test_weekly_meals_handles_no_records() -> None:
     assert format_weekly_meals_reply([]) == (
-        "Страви за тиждень\n\nЗаписів немає.\n\n"
-        "Всього: К:0 Б:0 Ж:0 В:0\n"
-        "Середнє за день: К:0 Б:0 Ж:0 В:0"
+        "<h3>КБЖВ за тиждень:</h3>"
+        "<h4>В середньому в день:</h4>"
+        "<p>🔥 0 ккал<br/>🥩 Б 0 г<br/>🥑 Ж 0 г<br/>🍞 В 0 г</p>"
+        "<p>Записів немає.</p>"
     )
 
 
-def test_weekly_meals_sums_full_nutrition_but_rows_show_only_calories() -> None:
+def test_weekly_meals_shows_full_nutrition_after_each_meal() -> None:
     reply = format_weekly_meals_reply(
         [
             PeriodMeal(
@@ -915,8 +927,29 @@ def test_weekly_meals_sums_full_nutrition_but_rows_show_only_calories() -> None:
         ]
     )
 
-    assert "• <b>Сир</b> 150 г — К:375" in reply
-    assert "Всього: К:375 Б:30 Ж:15 В:0" in reply
+    assert (
+        "<li><b><u>Сир</u></b> 150 г — "
+        "🔥375&nbsp;&nbsp;&nbsp;🥩 30&nbsp;&nbsp;&nbsp;🥑 15"
+    ) in reply
+    assert "🔥 54 ккал<br/>🥩 Б 4 г<br/>🥑 Ж 2 г<br/>🍞 В 0 г" in reply
+
+
+def test_weekly_meals_average_uses_daily_calorie_and_protein_goals() -> None:
+    meals = [
+        PeriodMeal(
+            f"страва {index}",
+            100,
+            913,
+            NutritionSummary(kcal=913, protein_g=21, fat_g=20, carbs_g=93),
+        )
+        for index in range(7)
+    ]
+
+    reply = format_weekly_meals_reply(meals, None, 1500, 145)
+
+    assert (
+        "🔥 913 / 1500 ккал  -587<br/>🥩 Б 21 / 145 г  -124<br/>🥑 Ж 20 г<br/>🍞 В 93 г"
+    ) in reply
 
 
 def test_weekly_meals_never_exceeds_twenty_rows() -> None:
@@ -924,9 +957,8 @@ def test_weekly_meals_never_exceeds_twenty_rows() -> None:
 
     reply = format_weekly_meals_reply(meals)
 
-    rows = [line for line in reply.splitlines() if line.startswith("• ")]
-    assert len(rows) == 20
-    assert rows[-1].startswith("• <b>Інше (6 категорій)</b>")
+    assert reply.count("<li>") == 20
+    assert "<li><b><u>Інше (6 категорій)</u></b>" in reply
 
 
 def test_weekly_meals_semantically_groups_names_and_sums_locally(tmp_path) -> None:
@@ -955,14 +987,11 @@ def test_weekly_meals_semantically_groups_names_and_sums_locally(tmp_path) -> No
         "Кава",
         "Кава чорна",
     }
-    assert reply == (
-        "Страви за тиждень\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n\n"
-        "• <b>Вино</b> 300 г — К:240\n"
-        "• <b>Кава</b> 500 г — К:6\n\n"
-        "Всього: К:246 Б:— Ж:— В:—\n"
-        "Середнє за день: К:35 Б:— Ж:— В:—"
-    )
+    wine = "<li><b><u>Вино</u></b> 300 г — 🔥240"
+    coffee = "<li><b><u>Кава</u></b> 500 г — 🔥6"
+    assert wine in reply
+    assert coffee in reply
+    assert reply.index(wine) < reply.index(coffee)
 
 
 def test_weekly_meals_falls_back_when_llm_grouping_fails(tmp_path) -> None:
@@ -976,10 +1005,8 @@ def test_weekly_meals_falls_back_when_llm_grouping_fails(tmp_path) -> None:
 
     reply = service.get_weekly_meals(datetime(2026, 8, 2, tzinfo=UTC), Grouper())
 
-    assert "• <b>Сухе вино</b> 200 г — К:160" in reply
-    assert reply.endswith(
-        "Всього: К:160 Б:— Ж:— В:—\nСереднє за день: К:23 Б:— Ж:— В:—"
-    )
+    assert "<li><b><u>Сухе вино</u></b> 200 г — 🔥160" in reply
+    assert "🔥 23 ккал" in reply
 
 
 def test_user_list_contains_status_ids_and_pending_invites() -> None:
@@ -1272,6 +1299,7 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
             self.replies = []
             self.reply_kwargs = []
             self.deleted_replies = []
+            self.chat_id = user_id if chat_id is None else chat_id
 
         async def reply_text(self, text, **kwargs):
             self.replies.append(text)
@@ -1553,10 +1581,24 @@ def test_weekly_calories_excludes_current_accounting_day_for_user(tmp_path) -> N
     update, message = make_update()
     message.date = datetime(2026, 8, 2, 0, 30, tzinfo=TZ)
 
-    asyncio.run(handlers.weekly_calories(update, SimpleNamespace(user_data={})))
+    class Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def do_api_request(self, endpoint, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return SimpleNamespace()
+
+    bot = Bot()
+    asyncio.run(
+        handlers.weekly_calories(update, SimpleNamespace(user_data={}, bot=bot))
+    )
 
     assert store.range == (date(2026, 7, 25), date(2026, 7, 31))
-    assert message.replies[0].startswith("КБЖВ за тиждень")
+    assert bot.calls[0][0] == "sendRichMessage"
+    rich_html = bot.calls[0][1]["api_kwargs"]["rich_message"]["html"]
+    assert rich_html.startswith("<h3>Баланс калорій за тиждень:</h3>")
+    assert "<details><summary>По дням</summary>" in rich_html
     assert message.deleted_replies == [LONG_OPERATION_TEXT]
 
 
@@ -1575,7 +1617,8 @@ def test_admin_weekly_calories_includes_garmin_balance(tmp_path) -> None:
 
     asyncio.run(handlers.weekly_calories(update, SimpleNamespace(user_data={})))
 
-    assert "• сб 01.08: К:+2300 -2500 =-200" in message.replies[0]
+    assert "<b>сб 01.08</b>: Спожито 2300 ккал" in message.replies[0]
+    assert "Баланс: <b><u>-200 ккал</u></b>" in message.replies[0]
 
 
 def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:
@@ -1595,13 +1638,10 @@ def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:
     asyncio.run(handlers.weekly_meals(update, SimpleNamespace(user_data={})))
 
     assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
-    assert message.replies == [
-        "Страви за тиждень\n"
-        "КБЖВ — у підсумку, біля страв — лише калорії.\n\n"
-        "• <b>Сир</b> 100 г — К:360\n\n"
-        "Всього: К:360 Б:— Ж:— В:—\n"
-        "Середнє за день: К:51 Б:— Ж:— В:—"
-    ]
+    assert len(message.replies) == 1
+    assert message.replies[0].startswith("<b>КБЖВ за тиждень:</b>")
+    assert "<b>Деталі по стравам</b>" in message.replies[0]
+    assert "<b><u>Сир</u></b> 100 г — 🔥360" in message.replies[0]
     assert message.deleted_replies == [LLM_OPERATION_TEXT]
 
 
@@ -2527,7 +2567,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.4.3"]
+    assert admin_message.replies == ["Версія: 1.5.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2556,7 +2596,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.4.3\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.5.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

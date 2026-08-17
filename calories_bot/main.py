@@ -38,7 +38,7 @@ async def configure_bot_commands(
         BotCommand("meals", "⭐ збережені страви"),
         BotCommand("recent", "🕘 нещодавні страви"),
         BotCommand("day", "📅 Сьогодні"),
-        BotCommand("weekly_calories", "📊 КБЖВ за тиждень"),
+        BotCommand("weekly_calories", "📊 Баланс калорій за тиждень"),
         BotCommand("weekly_meals", "🍽 Страви за тиждень"),
         BotCommand("goal", "🎯 ціль по калоріям"),
         BotCommand("protein_goal", "🥩 ціль по білку"),
