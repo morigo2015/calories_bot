@@ -186,22 +186,23 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
     )
 
     assert reply == (
-        "<blockquote expandable>🔥 810 ккал\n"
-        "• курка з рисом  🔥460\n"
-        "• вівсянка з бананом ×2  🔥350</blockquote>\n"
-        "<blockquote expandable>🥩 Б — г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
-        "<blockquote expandable>🍞 В — г</blockquote>"
+        "<details><summary>🔥 810 ккал</summary>"
+        "<ul><li>курка з рисом  🔥460</li>"
+        "<li>вівсянка з бананом ×2  🔥350</li></ul></details>"
+        "<details><summary>🥩 Б — г</summary><p>Немає внесків</p></details>"
+        "<details><summary>🥑 Ж — г</summary><p>Немає внесків</p></details>"
+        "<details><summary>🍞 В — г</summary><p>Немає внесків</p></details>"
     )
 
 
 def test_format_day_reply_handles_empty_day() -> None:
-    assert format_day_reply([]) == (
-        "<blockquote expandable>🔥 0 ккал</blockquote>\n"
-        "<blockquote expandable>🥩 Б 0 г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж 0 г</blockquote>\n"
-        "<blockquote expandable>🍞 В 0 г</blockquote>"
-    )
+    reply = format_day_reply([])
+
+    assert reply.count("<details>") == 4
+    assert "<summary>🔥 0 ккал</summary>" in reply
+    assert "<summary>🥩 Б 0 г</summary>" in reply
+    assert "<summary>🥑 Ж 0 г</summary>" in reply
+    assert "<summary>🍞 В 0 г</summary>" in reply
 
 
 def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
@@ -220,27 +221,25 @@ def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
         ]
     )
 
-    assert "<blockquote expandable>🔥 575 ккал" in reply
-    assert "<blockquote expandable>🥩 Б 36 г" in reply
-    assert "• сир  🥩30" in reply
-    assert "• хліб  🥩6" in reply
-    assert "• сир  🍞" not in reply
-    assert reply.count("<blockquote expandable>") == 4
+    assert "<summary>🔥 575 ккал</summary>" in reply
+    assert "<summary>🥩 Б 36 г</summary>" in reply
+    assert "<li>сир  🥩30</li>" in reply
+    assert "<li>хліб  🥩6</li>" in reply
+    assert "сир  🍞" not in reply
+    assert reply.count("<details>") == 4
 
 
 def test_format_day_reply_escapes_html_in_meal_names() -> None:
     reply = format_day_reply([DayMeal(meal_name="<сир & хліб>", meal_kcal=100)])
 
-    assert "• &lt;сир &amp; хліб&gt;  🔥100" in reply
+    assert "<li>&lt;сир &amp; хліб&gt;  🔥100</li>" in reply
 
 
 def test_format_day_reply_shows_goal_for_empty_day() -> None:
-    assert format_day_reply([], 1500) == (
-        "<blockquote expandable>🔥 0 / 1500 ккал  -1500</blockquote>\n"
-        "<blockquote expandable>🥩 Б 0 г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж 0 г</blockquote>\n"
-        "<blockquote expandable>🍞 В 0 г</blockquote>"
-    )
+    reply = format_day_reply([], 1500)
+
+    assert "<summary>🔥 0 / 1500 ккал  -1500</summary>" in reply
+    assert reply.count("<details>") == 4
 
 
 def test_format_day_reply_includes_daily_goal_and_remaining_calories() -> None:
@@ -249,13 +248,9 @@ def test_format_day_reply_includes_daily_goal_and_remaining_calories() -> None:
         daily_kcal_goal=1500,
     )
 
-    assert reply == (
-        "<blockquote expandable>🔥 360 / 1500 ккал  -1140\n"
-        "• сир  🔥360</blockquote>\n"
-        "<blockquote expandable>🥩 Б — г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
-        "<blockquote expandable>🍞 В — г</blockquote>"
-    )
+    assert "<summary>🔥 360 / 1500 ккал  -1140</summary>" in reply
+    assert "<ul><li>сир  🔥360</li></ul>" in reply
+    assert reply.count("<details>") == 4
 
 
 def test_format_day_reply_shows_goal_overage_without_negative_remaining() -> None:
@@ -264,13 +259,8 @@ def test_format_day_reply_shows_goal_overage_without_negative_remaining() -> Non
         daily_kcal_goal=1500,
     )
 
-    assert reply == (
-        "<blockquote expandable>🔥 1600 / 1500 ккал  +100\n"
-        "• піца  🔥1600</blockquote>\n"
-        "<blockquote expandable>🥩 Б — г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
-        "<blockquote expandable>🍞 В — г</blockquote>"
-    )
+    assert "<summary>🔥 1600 / 1500 ккал  +100</summary>" in reply
+    assert "<ul><li>піца  🔥1600</li></ul>" in reply
 
 
 def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
@@ -283,12 +273,8 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 0, 30, tzinfo=TZ))
 
     assert store.day.isoformat() == "2026-08-01"
-    assert reply == (
-        "<blockquote expandable>🔥 60 ккал\n• сир  🔥60</blockquote>\n"
-        "<blockquote expandable>🥩 Б — г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
-        "<blockquote expandable>🍞 В — г</blockquote>"
-    )
+    assert "<summary>🔥 60 ккал</summary>" in reply
+    assert "<li>сир  🔥60</li>" in reply
 
 
 def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
@@ -307,13 +293,8 @@ def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
 
     reply = service.get_day_summary(datetime(2026, 8, 2, 12, tzinfo=TZ))
 
-    assert reply == (
-        "<blockquote expandable>🔥 60 / 1500 ккал  -1440\n"
-        "• сир  🔥60</blockquote>\n"
-        "<blockquote expandable>🥩 Б — г</blockquote>\n"
-        "<blockquote expandable>🥑 Ж — г</blockquote>\n"
-        "<blockquote expandable>🍞 В — г</blockquote>"
-    )
+    assert "<summary>🔥 60 / 1500 ккал  -1440</summary>" in reply
+    assert "<li>сир  🔥60</li>" in reply
 
 
 def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> None:
@@ -1419,13 +1400,17 @@ def test_duplicate_photo_is_checked_before_download() -> None:
 
 
 def test_day_handler_passes_telegram_message_date() -> None:
+    rich_reply = (
+        "<details><summary>🔥 60 ккал</summary><ul><li>сир  🔥60</li></ul></details>"
+    )
+
     class FakeService:
         def __init__(self):
             self.timestamp = None
 
         def get_day_summary(self, timestamp):
             self.timestamp = timestamp
-            return "<blockquote expandable>🔥 60 ккал\n• сир  🔥60</blockquote>"
+            return rich_reply
 
     class Statistics:
         def __init__(self):
@@ -1456,20 +1441,31 @@ def test_day_handler_passes_telegram_message_date() -> None:
             message.replies.pop(index)
             message.reply_kwargs.pop(index)
 
-    async def reply_text(text, **kwargs):
-        message.replies.append(text)
-        message.reply_kwargs.append(kwargs)
-        return SentMessage(text)
+    class Bot:
+        def __init__(self):
+            self.calls = []
 
-    message.reply_text = reply_text
+        async def do_api_request(self, endpoint, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return SentMessage(rich_reply)
 
-    asyncio.run(handlers.day(update, None))
+    bot = Bot()
+    asyncio.run(handlers.day(update, SimpleNamespace(bot=bot)))
 
     assert service.timestamp == message.date
-    assert message.replies == [
-        "<blockquote expandable>🔥 60 ккал\n• сир  🔥60</blockquote>"
+    assert message.replies == []
+    assert bot.calls == [
+        (
+            "sendRichMessage",
+            {
+                "api_kwargs": {
+                    "chat_id": 123,
+                    "rich_message": {"html": rich_reply},
+                },
+                "return_type": bot_module.Message,
+            },
+        )
     ]
-    assert message.reply_kwargs == [{"parse_mode": ParseMode.HTML, "do_quote": False}]
     assert statistics.recorded == [(123, 600, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
 
@@ -2471,7 +2467,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.4.0"]
+    assert admin_message.replies == ["Версія: 1.4.1"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2500,7 +2496,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.4.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.4.1\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

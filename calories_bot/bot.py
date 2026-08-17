@@ -593,11 +593,12 @@ def format_day_reply(
         for value, meal_name, count in contributions:
             count_suffix = f" ×{count}" if count > 1 else ""
             details.append(
-                f"• {html.escape(meal_name)}{count_suffix}  {emoji}{round_whole(value)}"
+                f"<li>{html.escape(meal_name)}{count_suffix}  "
+                f"{emoji}{round_whole(value)}</li>"
             )
-        content = "\n".join([summary_line, *details])
-        blocks.append(f"<blockquote expandable>{content}</blockquote>")
-    return "\n".join(blocks)
+        body = f"<ul>{''.join(details)}</ul>" if details else "<p>Немає внесків</p>"
+        blocks.append(f"<details><summary>{summary_line}</summary>{body}</details>")
+    return "".join(blocks)
 
 
 class CaloriesService:
@@ -1718,10 +1719,28 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Unexpected error while handling /day")
                 reply = READ_ERROR_TEXT
-            sent = await message.reply_text(
-                reply, parse_mode=ParseMode.HTML, do_quote=False
-            )
-            if reply.startswith("<blockquote expandable>"):
+            is_rich_day = reply.startswith("<details>")
+            if is_rich_day:
+                try:
+                    bot = getattr(context, "bot", None)
+                    chat = update.effective_chat
+                    if bot is None or chat is None:
+                        raise RuntimeError("Rich-message bot context is unavailable")
+                    sent = await bot.do_api_request(
+                        "sendRichMessage",
+                        api_kwargs={
+                            "chat_id": chat.id,
+                            "rich_message": {"html": reply},
+                        },
+                        return_type=Message,
+                    )
+                except Exception:
+                    LOGGER.exception("Could not send rich /day summary")
+                    compact = "\n".join(re.findall(r"<summary>(.*?)</summary>", reply))
+                    sent = await message.reply_text(compact, do_quote=False)
+            else:
+                sent = await message.reply_text(reply, do_quote=False)
+            if is_rich_day:
                 await self._remember_daily_total_message(sent)
 
     async def weekly_calories(
