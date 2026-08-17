@@ -229,6 +229,47 @@ def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
     assert reply.count("<details>") == 4
 
 
+def test_day_reply_rounds_each_meal_before_grouping_and_sums_visible_rows() -> None:
+    meals = [
+        DayMeal(
+            "спагеті",
+            419.6,
+            NutritionSummary(kcal=419.6, protein_g=14.4, fat_g=10.6, carbs_g=71.6),
+        ),
+        DayMeal(
+            "сир",
+            105.6,
+            NutritionSummary(kcal=105.6, protein_g=6.4, fat_g=8.5, carbs_g=0.8),
+        ),
+        DayMeal(
+            "вино",
+            350.4,
+            NutritionSummary(kcal=350.4, protein_g=0.1, fat_g=0, carbs_g=12.6),
+        ),
+        *[
+            DayMeal(
+                "кава",
+                2.4,
+                NutritionSummary(kcal=2.4, protein_g=0.2, fat_g=0, carbs_g=0.4),
+            )
+            for _ in range(5)
+        ],
+    ]
+
+    reply = format_day_reply(meals)
+
+    assert "<summary>🔥 886 ккал</summary>" in reply
+    assert "<summary>🥩 Б 20 г</summary>" in reply
+    assert "<li>спагеті  🥩14</li>" in reply
+    assert "<li>сир  🥩6</li>" in reply
+    assert "кава ×5  🥩" not in reply
+    assert "вино  🥩" not in reply
+    assert "<summary>🥑 Ж 20 г</summary>" in reply
+    assert "<li>спагеті  🥑11</li><li>сир  🥑9</li>" in reply
+    assert "<summary>🍞 В 86 г</summary>" in reply
+    assert "<li>спагеті  🍞72</li><li>вино  🍞13</li><li>сир  🍞1</li>" in reply
+
+
 def test_format_day_reply_escapes_html_in_meal_names() -> None:
     reply = format_day_reply([DayMeal(meal_name="<сир & хліб>", meal_kcal=100)])
 
@@ -2467,7 +2508,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.4.1"]
+    assert admin_message.replies == ["Версія: 1.4.2"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2496,7 +2537,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.4.1\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.4.2\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

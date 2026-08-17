@@ -556,18 +556,31 @@ def format_day_reply(
     daily_kcal_goal: int | None = None,
     daily_protein_goal: int | None = None,
 ) -> str:
-    total = sum(
+    def rounded_summary(summary: NutritionSummary) -> NutritionSummary:
+        def rounded(value: float | None) -> float | None:
+            return None if value is None else float(round_whole(value))
+
+        return NutritionSummary(
+            kcal=float(round_whole(summary.kcal)),
+            protein_g=rounded(summary.protein_g),
+            fat_g=rounded(summary.fat_g),
+            carbs_g=rounded(summary.carbs_g),
+        )
+
+    rounded_meals = [
         (
-            meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
-            for meal in meals
-        ),
-        NutritionSummary(),
-    )
+            meal,
+            rounded_summary(
+                meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
+            ),
+        )
+        for meal in meals
+    ]
+    total = sum((nutrients for _, nutrients in rounded_meals), NutritionSummary())
     grouped: dict[str, tuple[str, NutritionSummary, int]] = {}
-    for meal in meals:
+    for meal, nutrients in rounded_meals:
         display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
         key = display_name.casefold()
-        nutrients = meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
         if key in grouped:
             original_name, current, count = grouped[key]
             grouped[key] = (original_name, current + nutrients, count + 1)
