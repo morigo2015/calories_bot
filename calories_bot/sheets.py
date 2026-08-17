@@ -23,6 +23,7 @@ from .models import (
     StoredMeal,
     nutrition_summary,
     parse_simple_meal_request,
+    round_meal_nutrition,
     round_whole,
 )
 
@@ -259,7 +260,7 @@ def _meal_from_row(row: list[object]) -> StoredMeal:
     )
     return StoredMeal(
         normalized_request=str(padded[NORMALIZED_REQUEST_COLUMN]),
-        meal=meal,
+        meal=round_meal_nutrition(meal),
         metadata=metadata,
         photo_path=str(padded[PHOTO_PATH_COLUMN]) or None,
     )
@@ -557,6 +558,7 @@ class GoogleSheetsStore:
     def update_meal(
         self, day: date, telegram_message_id: int, meal: MealResult
     ) -> MealUpdate | None:
+        meal = round_meal_nutrition(meal)
         try:
             rows = self._data_rows()
         except Exception as exc:
@@ -799,6 +801,7 @@ class GoogleSheetsStore:
         meal: MealResult,
         metadata: LLMMetadata,
     ) -> StoredMeal:
+        meal = round_meal_nutrition(meal)
         items_json = json.dumps(
             [item.model_dump() for item in meal.items],
             ensure_ascii=False,

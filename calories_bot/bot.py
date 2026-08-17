@@ -49,6 +49,7 @@ from .models import (
     item_nutrient_total_estimated,
     nutrition_summary,
     parse_simple_meal_request,
+    round_meal_nutrition,
     round_whole,
     scale_meal,
 )
@@ -325,10 +326,11 @@ def _format_progress_value(
     prefix = f"{emoji} {label}" if label else f"{emoji} "
     if value is None:
         return f"{prefix}— {unit}"
-    rounded = round_whole(value)
+    stored = format(value, "g")
     if goal is None:
-        return f"{prefix}{rounded} {unit}"
-    return f"{prefix}{rounded} / {goal} {unit}  {rounded - goal:+d}"
+        return f"{prefix}{stored} {unit}"
+    difference = format(value - goal, "+g")
+    return f"{prefix}{stored} / {goal} {unit}  {difference}"
 
 
 def _daily_progress_lines(
@@ -556,29 +558,16 @@ def format_day_reply(
     daily_kcal_goal: int | None = None,
     daily_protein_goal: int | None = None,
 ) -> str:
-    def rounded_summary(summary: NutritionSummary) -> NutritionSummary:
-        def rounded(value: float | None) -> float | None:
-            return None if value is None else float(round_whole(value))
-
-        return NutritionSummary(
-            kcal=float(round_whole(summary.kcal)),
-            protein_g=rounded(summary.protein_g),
-            fat_g=rounded(summary.fat_g),
-            carbs_g=rounded(summary.carbs_g),
-        )
-
-    rounded_meals = [
+    meal_nutrients = [
         (
             meal,
-            rounded_summary(
-                meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal)
-            ),
+            meal.nutrition or NutritionSummary.unknown_macros(meal.meal_kcal),
         )
         for meal in meals
     ]
-    total = sum((nutrients for _, nutrients in rounded_meals), NutritionSummary())
+    total = sum((nutrients for _, nutrients in meal_nutrients), NutritionSummary())
     grouped: dict[str, tuple[str, NutritionSummary, int]] = {}
-    for meal, nutrients in rounded_meals:
+    for meal, nutrients in meal_nutrients:
         display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
         key = display_name.casefold()
         if key in grouped:
@@ -607,7 +596,7 @@ def format_day_reply(
             count_suffix = f" ×{count}" if count > 1 else ""
             details.append(
                 f"<li>{html.escape(meal_name)}{count_suffix}  "
-                f"{emoji}{round_whole(value)}</li>"
+                f"{emoji}{format(value, 'g')}</li>"
             )
         body = f"<ul>{''.join(details)}</ul>" if details else "<p>Немає внесків</p>"
         blocks.append(f"<details><summary>{summary_line}</summary>{body}</details>")
@@ -891,7 +880,7 @@ class CaloriesService:
                             normalized.text,
                         ),
                         photo_path,
-                        meal,
+                        round_meal_nutrition(meal),
                         (
                             result.metadata
                             if index == 0
@@ -1082,7 +1071,7 @@ class CaloriesService:
                         event_id, 0, 1, request_kind, request_payload
                     ),
                     None,
-                    meal,
+                    round_meal_nutrition(meal),
                     LLMMetadata(model=metadata_model, effort="none"),
                 )
                 total = _state_nutrition(state) + nutrition_summary(stored.meal)
@@ -1165,7 +1154,9 @@ class CaloriesService:
             if round_whole(source.meal.total_weight_g) == weight_g:
                 raise MealWeightUnchangedError(weight_g)
             updated = self._store.update_meal(
-                day, message_id, scale_meal(source.meal, weight_g)
+                day,
+                message_id,
+                round_meal_nutrition(scale_meal(source.meal, weight_g)),
             )
             if updated is None:
                 return None

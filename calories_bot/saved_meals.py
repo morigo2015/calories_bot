@@ -6,7 +6,7 @@ from typing import Protocol
 import gspread
 from gspread.utils import ValueInputOption, ValueRenderOption
 
-from .models import MealResult, SavedMeal
+from .models import MealResult, SavedMeal, round_meal_nutrition
 
 LEGACY_SAVED_MEALS_HEADERS = [
     "saved_meal_id",
@@ -65,7 +65,7 @@ def _saved_meal_from_row(row: list[object]) -> SavedMeal:
         source_message_id=int(str(padded[1])),
         display_name=str(padded[2]),
         default_total_weight_g=int(str(padded[3])),
-        base_meal=MealResult.model_validate_json(str(padded[4])),
+        base_meal=round_meal_nutrition(MealResult.model_validate_json(str(padded[4]))),
         icon=str(padded[5]).strip() or None,
     )
 
@@ -163,6 +163,9 @@ class GoogleSavedMealStore:
         )
 
     def append(self, saved_meal: SavedMeal) -> SavedMeal:
+        saved_meal = saved_meal.model_copy(
+            update={"base_meal": round_meal_nutrition(saved_meal.base_meal)}
+        )
         existing = self.get(saved_meal.saved_meal_id)
         if existing is not None:
             return existing

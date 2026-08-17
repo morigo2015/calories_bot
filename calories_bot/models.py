@@ -362,6 +362,49 @@ def round_whole(value: float) -> int:
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def round_meal_nutrition(meal: MealResult) -> MealResult:
+    """Return a storage-safe meal whose nutritional values are whole numbers."""
+
+    nutrient_fields = ("protein", "fat", "carbs")
+
+    def rounded_optional(value: float | None) -> int | None:
+        return None if value is None else round_whole(value)
+
+    items = [
+        item.model_copy(
+            update={
+                "kcal_per_100g": round_whole(item.kcal_per_100g),
+                "protein_per_100g": rounded_optional(item.protein_per_100g),
+                "fat_per_100g": rounded_optional(item.fat_per_100g),
+                "carbs_per_100g": rounded_optional(item.carbs_per_100g),
+                "calories": round_whole(item.calories),
+                "protein_g": rounded_optional(item.protein_g),
+                "fat_g": rounded_optional(item.fat_g),
+                "carbs_g": rounded_optional(item.carbs_g),
+            }
+        )
+        for item in meal.items
+    ]
+
+    def item_total(nutrient: str) -> int | None:
+        values = [getattr(item, f"{nutrient}_g") for item in items]
+        if any(value is None for value in values):
+            return None
+        return sum(int(value) for value in values if value is not None)
+
+    return meal.model_copy(
+        update={
+            "items": items,
+            "kcal_per_100g": round_whole(meal.kcal_per_100g),
+            "protein_per_100g": rounded_optional(meal.protein_per_100g),
+            "fat_per_100g": rounded_optional(meal.fat_per_100g),
+            "carbs_per_100g": rounded_optional(meal.carbs_per_100g),
+            "meal_kcal": round_whole(meal.meal_kcal),
+            **{f"{nutrient}_g": item_total(nutrient) for nutrient in nutrient_fields},
+        }
+    )
+
+
 def calculate_meal(analysis: FoodAnalysis) -> MealResult:
     if not analysis.is_food or not analysis.items:
         raise ValueError("Cannot calculate a non-food response")

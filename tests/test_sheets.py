@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -264,7 +265,7 @@ def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
     )
 
 
-def test_daily_totals_read_once_and_keep_exact_values() -> None:
+def test_daily_totals_read_once_and_sum_whole_stored_values() -> None:
     first = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 1, 100)
     first[4] = 100.4
     second = stored_row(datetime(2026, 8, 2, 13, tzinfo=TZ), 2, 200)
@@ -278,7 +279,7 @@ def test_daily_totals_read_once_and_keep_exact_values() -> None:
 
     assert set(totals) == {datetime(2026, 8, 2).date()}
     total = totals[datetime(2026, 8, 2).date()]
-    assert total.kcal == pytest.approx(300.8)
+    assert total.kcal == 300
     assert total.protein_g is None
     assert store._worksheet.read_count == 1
 
@@ -438,6 +439,52 @@ def test_append_stores_new_schema_native_timestamp_and_photo_path() -> None:
     ]
     assert row[12:16] == ["gpt-test", "none", 100, 20]
     assert row[16] == 0.00123457
+
+
+def test_append_rounds_all_nutrition_before_storing() -> None:
+    meal = calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name="кава",
+            items=[
+                FoodItem(
+                    name="кава",
+                    weight_g=33,
+                    weight_estimated=False,
+                    kcal_per_100g=123.4,
+                    kcal_estimated=False,
+                    protein_per_100g=1.2,
+                    fat_per_100g=1.2,
+                    carbs_per_100g=10.4,
+                )
+            ],
+        )
+    )
+    store = build_store([HEADERS])
+
+    saved = store.append_meal(
+        datetime(2026, 8, 2, 12, tzinfo=TZ),
+        42,
+        "кава",
+        "кава",
+        None,
+        meal,
+        METADATA,
+    )
+
+    assert saved.meal.meal_kcal == 41
+    assert saved.meal.protein_g == 0
+    assert saved.meal.fat_g == 0
+    assert saved.meal.carbs_g == 3
+    stored_item = json.loads(store._worksheet.rows[1][10])[0]
+    assert stored_item["kcal_per_100g"] == 123
+    assert stored_item["protein_per_100g"] == 1
+    assert stored_item["fat_per_100g"] == 1
+    assert stored_item["carbs_per_100g"] == 10
+    assert stored_item["calories"] == 41
+    assert stored_item["protein_g"] == 0
+    assert stored_item["fat_g"] == 0
+    assert stored_item["carbs_g"] == 3
 
 
 def test_append_allows_blank_photo_usage_and_cost() -> None:

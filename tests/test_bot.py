@@ -229,28 +229,28 @@ def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
     assert reply.count("<details>") == 4
 
 
-def test_day_reply_rounds_each_meal_before_grouping_and_sums_visible_rows() -> None:
+def test_day_reply_sums_whole_values_saved_for_each_meal() -> None:
     meals = [
         DayMeal(
             "спагеті",
-            419.6,
-            NutritionSummary(kcal=419.6, protein_g=14.4, fat_g=10.6, carbs_g=71.6),
+            420,
+            NutritionSummary(kcal=420, protein_g=14, fat_g=11, carbs_g=72),
         ),
         DayMeal(
             "сир",
-            105.6,
-            NutritionSummary(kcal=105.6, protein_g=6.4, fat_g=8.5, carbs_g=0.8),
+            106,
+            NutritionSummary(kcal=106, protein_g=6, fat_g=9, carbs_g=1),
         ),
         DayMeal(
             "вино",
-            350.4,
-            NutritionSummary(kcal=350.4, protein_g=0.1, fat_g=0, carbs_g=12.6),
+            350,
+            NutritionSummary(kcal=350, protein_g=0, fat_g=0, carbs_g=13),
         ),
         *[
             DayMeal(
                 "кава",
-                2.4,
-                NutritionSummary(kcal=2.4, protein_g=0.2, fat_g=0, carbs_g=0.4),
+                2,
+                NutritionSummary(kcal=2, protein_g=0, fat_g=0, carbs_g=0),
             )
             for _ in range(5)
         ],
@@ -259,6 +259,8 @@ def test_day_reply_rounds_each_meal_before_grouping_and_sums_visible_rows() -> N
     reply = format_day_reply(meals)
 
     assert "<summary>🔥 886 ккал</summary>" in reply
+    assert "<li>спагеті  🔥420</li><li>вино  🔥350</li>" in reply
+    assert "<li>сир  🔥106</li><li>кава ×5  🔥10</li>" in reply
     assert "<summary>🥩 Б 20 г</summary>" in reply
     assert "<li>спагеті  🥩14</li>" in reply
     assert "<li>сир  🥩6</li>" in reply
@@ -268,6 +270,23 @@ def test_day_reply_rounds_each_meal_before_grouping_and_sums_visible_rows() -> N
     assert "<li>спагеті  🥑11</li><li>сир  🥑9</li>" in reply
     assert "<summary>🍞 В 86 г</summary>" in reply
     assert "<li>спагеті  🍞72</li><li>вино  🍞13</li><li>сир  🍞1</li>" in reply
+
+    daily_total = format_daily_total(
+        NutritionSummary(kcal=886, protein_g=20, fat_g=20, carbs_g=86),
+        None,
+    )
+    assert daily_total == "🔥 886 ккал\n🥩 Б 20 г\n🥑 Ж 20 г\n🍞 В 86 г"
+
+
+def test_daily_views_do_not_round_values_while_formatting() -> None:
+    nutrition = NutritionSummary(kcal=10.5, protein_g=2.5, fat_g=1.5, carbs_g=3.5)
+
+    assert format_daily_total(nutrition, 20, 5) == (
+        "🔥 10.5 / 20 ккал  -9.5\n🥩 Б 2.5 / 5 г  -2.5\n🥑 Ж 1.5 г\n🍞 В 3.5 г"
+    )
+    day_reply = format_day_reply([DayMeal("тест", 10.5, nutrition)])
+    assert "<summary>🔥 10.5 ккал</summary><ul><li>тест  🔥10.5</li>" in day_reply
+    assert "<summary>🥩 Б 2.5 г</summary><ul><li>тест  🥩2.5</li>" in day_reply
 
 
 def test_format_day_reply_escapes_html_in_meal_names() -> None:
@@ -2508,7 +2527,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.4.2"]
+    assert admin_message.replies == ["Версія: 1.4.3"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2537,7 +2556,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.4.2\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.4.3\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
