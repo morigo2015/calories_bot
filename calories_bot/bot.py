@@ -820,7 +820,7 @@ def format_weekly_reply(
             balance_label = " 0 ккал"
         balance_details = (
             f"<details><summary>"
-            f"Баланс калорій за добу: "
+            f"Баланс калорій за добу: <br/>"
             f"<b><u>{balance_label}</u></b><br/>"
             f"+ {average_consumed}  - {average_burned}&nbsp;&nbsp;&nbsp;<br/>"
             f"</summary>"
