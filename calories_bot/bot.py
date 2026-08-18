@@ -401,7 +401,7 @@ def _daily_progress_lines(
     daily_protein_goal: int | None,
 ) -> list[str]:
     return [
-        _format_progress_value(summary.kcal, daily_kcal_goal, emoji="🔥", unit="ккал"),
+        _format_progress_value(summary.kcal, daily_kcal_goal, emoji="🔥", unit="кк"),
         _format_progress_value(
             summary.protein_g,
             daily_protein_goal,
@@ -836,7 +836,7 @@ def format_weekly_reply(
     )
     return (
         f"<h3>Попередні {period_days} {day_word} (без сьогодні):</h3>"
-        f"{history_note}<p><sub>В середньому за день:</sub></p>"
+        f"{history_note}<p><sub>КБЖВ в середньому за день:</sub></p>"
         f"{''.join(progress_blocks)}{daily_macros}{balance_details}"
     )
 
