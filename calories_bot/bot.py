@@ -769,7 +769,7 @@ def format_weekly_reply(
                 value = getattr(nutrition, attribute)
                 if value is not None and value > 0:
                     contributions.append((round_whole(value / divisor), meal_name))
-        contributions.sort(key=lambda item: item[0], reverse=True)
+        # contributions.sort(key=lambda item: item[0], reverse=True)
         rows = [
             f"<li>{html.escape(name)}  {emoji}{value}</li>"
             for value, name in contributions
@@ -822,7 +822,7 @@ def format_weekly_reply(
             f"<details><summary>"
             f"Баланс калорій за добу: <br/>"
             f"<b><u>{balance_label}</u></b><br/>"
-            f"+ {average_consumed}  - {average_burned}&nbsp;&nbsp;&nbsp;<br/>"
+            f"+ {average_consumed}  - {average_burned}<br/>"
             f"</summary>"
             "<p>+ спожито ккал, - витрачено, = різниця</p>"
             f"<ul>{''.join(balance_rows)}</ul></details>"
@@ -835,7 +835,7 @@ def format_weekly_reply(
         else "<p><sub>історія повного тижня ще не накопичена</sub></p>"
     )
     return (
-        f"<h3>За {period_days} {day_word} (без сьогодні):</h3>"
+        f"<h3>Попередні {period_days} {day_word} (без сьогодні):</h3>"
         f"{history_note}<p><sub>В середньому за день:</sub></p>"
         f"{''.join(progress_blocks)}{daily_macros}{balance_details}"
     )
