@@ -817,12 +817,13 @@ def format_weekly_reply(
         elif average_balance < 0:
             balance_label = f"Дефіцит {abs(average_balance)} ккал"
         else:
-            balance_label = "Баланс 0 ккал"
+            balance_label = " 0 ккал"
         balance_details = (
-            "<details><summary>Баланс калорій (в середньому за добу):<br/>"
-            f"Спожито {average_consumed} ккал&nbsp;&nbsp;&nbsp;"
-            f"Витрачено {average_burned} ккал<br/>"
-            f"<b><u>{balance_label}</u></b></summary>"
+            f"<details><summary>"
+            f"Баланс калорій за добу: "
+            f"<b><u>{balance_label}</u></b><br/>"
+            f"+ {average_consumed}  - {average_burned}&nbsp;&nbsp;&nbsp;<br/>"
+            f"</summary>"
             "<p>+ спожито ккал, - витрачено, = різниця</p>"
             f"<ul>{''.join(balance_rows)}</ul></details>"
         )
