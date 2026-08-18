@@ -993,7 +993,7 @@ def test_weekly_reply_combines_meals_macros_and_consumed_calories() -> None:
     assert "<details><summary>КБЖВ по дням</summary>" in reply
     assert "<b>сб 08.08</b>: 🔥700" in reply
     assert "Витрачено" not in reply
-    assert "Профіцит/Дефіцит калорій" not in reply
+    assert "Баланс калорій" not in reply
 
 
 def test_weekly_reply_uses_actual_days_for_averages_and_garmin_details() -> None:
@@ -1021,9 +1021,30 @@ def test_weekly_reply_uses_actual_days_for_averages_and_garmin_details() -> None
     assert "<summary>🍞 В 100 г</summary>" in reply
     assert "<details><summary>КБЖВ по дням</summary>" in reply
     assert "<b>сб 22.08</b>: 🔥600" in reply
-    assert "<details><summary>Профіцит/Дефіцит калорій</summary>" in reply
+    assert (
+        "<details><summary>Баланс калорій (в середньому за добу):<br/>"
+        "Спожито 800 ккал&nbsp;&nbsp;&nbsp;Витрачено 2050 ккал<br/>"
+        "<b><u>Дефіцит 1250 ккал</u></b></summary>"
+    ) in reply
     assert "<b>нд 23.08</b>: + 1000&nbsp;&nbsp;- 2100" in reply
     assert "= <b><u>-1100</u></b>" in reply
+
+
+def test_weekly_reply_labels_average_calorie_surplus() -> None:
+    day = date(2026, 8, 23)
+    nutrition = NutritionSummary(kcal=2500, protein_g=100, fat_g=70, carbs_g=300)
+
+    reply = format_weekly_reply(
+        day,
+        {day: nutrition},
+        [PeriodMeal("вечеря", 500, 2500, nutrition, day)],
+        {day: 2000},
+        period_days=1,
+    )
+
+    assert "Спожито 2500 ккал" in reply
+    assert "Витрачено 2000 ккал" in reply
+    assert "<b><u>Профіцит 500 ккал</u></b>" in reply
 
 
 def test_weekly_macros_are_unavailable_before_tracking_start_date() -> None:
@@ -2800,7 +2821,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.7.0"]
+    assert admin_message.replies == ["Версія: 1.7.1"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2829,7 +2850,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.7.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.7.1\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

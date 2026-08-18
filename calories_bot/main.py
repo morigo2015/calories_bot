@@ -212,7 +212,7 @@ def main() -> None:
     )
     application.add_handler(CommandHandler("day", handlers.day, filters=message_update))
     application.add_handler(
-        CommandHandler(("week", "weekly"), handlers.weekly, filters=message_update)
+        CommandHandler("week", handlers.weekly, filters=message_update)
     )
     application.add_handler(
         CommandHandler("goal", handlers.goal, filters=message_update)

@@ -805,8 +805,24 @@ def format_weekly_reply(
                 f"+ {consumed_kcal}&nbsp;&nbsp;- {burned}&nbsp;&nbsp;"
                 f"= <b><u>{balance:+d}</u></b></li>"
             )
+        average_consumed = round_whole(
+            sum(consumed[day].kcal for day in days) / period_days
+        )
+        average_burned = round_whole(
+            sum(burned_totals[day] for day in days) / period_days
+        )
+        average_balance = average_consumed - average_burned
+        if average_balance > 0:
+            balance_label = f"Профіцит {average_balance} ккал"
+        elif average_balance < 0:
+            balance_label = f"Дефіцит {abs(average_balance)} ккал"
+        else:
+            balance_label = "Баланс 0 ккал"
         balance_details = (
-            "<details><summary>Профіцит/Дефіцит калорій</summary>"
+            "<details><summary>Баланс калорій (в середньому за добу):<br/>"
+            f"Спожито {average_consumed} ккал&nbsp;&nbsp;&nbsp;"
+            f"Витрачено {average_burned} ккал<br/>"
+            f"<b><u>{balance_label}</u></b></summary>"
             "<p>+ спожито ккал, - витрачено, = різниця</p>"
             f"<ul>{''.join(balance_rows)}</ul></details>"
         )
@@ -2196,7 +2212,7 @@ class TelegramHandlers:
                             )
                         except Exception:
                             LOGGER.exception(
-                                "Garmin calories are unavailable for /weekly"
+                                "Garmin calories are unavailable for /week"
                             )
                 reply = await asyncio.to_thread(
                     service.get_weekly_calories,
@@ -2235,7 +2251,7 @@ class TelegramHandlers:
                             )
                         except Exception:
                             LOGGER.exception(
-                                "Garmin calories are unavailable for /weekly"
+                                "Garmin calories are unavailable for /week"
                             )
                 reply = await asyncio.to_thread(
                     service.get_weekly,
@@ -2244,14 +2260,14 @@ class TelegramHandlers:
                     self._meal_grouper,
                 )
             except Exception:
-                LOGGER.exception("Could not build /weekly")
+                LOGGER.exception("Could not build /week")
                 reply = WEEK_ERROR_TEXT
             if reply.startswith("<h3>"):
                 await self._send_rich_html(
                     message,
                     context,
                     reply,
-                    operation="/weekly report",
+                    operation="/week report",
                 )
             else:
                 await message.reply_text(reply, do_quote=False)

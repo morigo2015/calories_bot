@@ -201,10 +201,32 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     command.set_bot(SimpleNamespace(username="calorie_bot"))
     assert app.handlers[4][0].check_update(Update(3, message=command))
     assert not app.handlers[4][0].check_update(Update(4, edited_message=command))
+
+    week_command = Message(
+        message_id=3,
+        date=datetime(2026, 8, 2, tzinfo=UTC),
+        chat=Chat(123, ChatType.PRIVATE),
+        from_user=User(123, "Igor", False),
+        text="/week",
+        entities=[MessageEntity(MessageEntity.BOT_COMMAND, 0, 5)],
+    )
+    week_command.set_bot(SimpleNamespace(username="calorie_bot"))
+    assert app.handlers[5][0].check_update(Update(5, message=week_command))
+
+    removed_command = Message(
+        message_id=4,
+        date=datetime(2026, 8, 2, tzinfo=UTC),
+        chat=Chat(123, ChatType.PRIVATE),
+        from_user=User(123, "Igor", False),
+        text="/weekly",
+        entities=[MessageEntity(MessageEntity.BOT_COMMAND, 0, 7)],
+    )
+    removed_command.set_bot(SimpleNamespace(username="calorie_bot"))
+    assert not app.handlers[5][0].check_update(Update(6, message=removed_command))
     assert app.handlers[0][1] == -1
 
     callback = Update(
-        5,
+        7,
         callback_query=SimpleNamespace(from_user=User(456, "Yulia", False)),
     )
     assert app.handlers[0][0].check_update(callback)
