@@ -425,7 +425,7 @@ async def run_journey(
                 ("/start", "Напиши"),
                 ("/help", "/day"),
                 ("/tips", "Скорочений запис"),
-                ("/weekly", "Статистика"),
+                ("/week", "За 7 днів"),
             ):
                 _, response = await driver.send_text(command)
                 _require(

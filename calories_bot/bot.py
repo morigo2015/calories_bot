@@ -311,6 +311,21 @@ def _format_icon_nutrition(summary: NutritionSummary) -> str:
     )
 
 
+def _format_daily_icon_nutrition(summary: NutritionSummary) -> str:
+    def value(amount: float | None) -> str:
+        return "—" if amount is None else format(amount, "g")
+
+    separator = "&nbsp;&nbsp;&nbsp;"
+    return separator.join(
+        (
+            f"🔥{value(summary.kcal)}",
+            f"🥩 {value(summary.protein_g)}",
+            f"🥑 {value(summary.fat_g)}",
+            f"🍞 {value(summary.carbs_g)}",
+        )
+    )
+
+
 def _format_item_calculation(item: CalculatedFoodItem, *, heading_level: int) -> str:
     display_name = item.name[:1].upper() + item.name[1:]
     weight_prefix = "≈" if item.weight_origin != "user_text" else ""
@@ -696,24 +711,116 @@ def format_weekly_reply(
     daily_protein_goal: int | None = None,
     period_days: int = WEEK_DAYS,
 ) -> str:
-    calories_heading = "Різниця калорій" if burned_totals is not None else "Калорії"
+    _weekly_period_text(period_days)
+    start_day = end_day - timedelta(days=period_days - 1)
+    days = [start_day + timedelta(days=offset) for offset in range(period_days)]
+    consumed = {
+        day: (_as_summary(totals[day]) if day in totals else NutritionSummary())
+        for day in days
+    }
+    macro_days = _macro_average_days(end_day, period_days)
+    total = sum(
+        (
+            _calories_only(consumed[day])
+            if day < MACRO_TRACKING_START_DATE
+            else consumed[day]
+            for day in days
+        ),
+        NutritionSummary(),
+    )
+    average = NutritionSummary(
+        kcal=round_whole(total.kcal / period_days),
+        protein_g=(
+            None
+            if macro_days == 0 or total.protein_g is None
+            else round_whole(total.protein_g / macro_days)
+        ),
+        fat_g=(
+            None
+            if macro_days == 0 or total.fat_g is None
+            else round_whole(total.fat_g / macro_days)
+        ),
+        carbs_g=(
+            None
+            if macro_days == 0 or total.carbs_g is None
+            else round_whole(total.carbs_g / macro_days)
+        ),
+        kcal_estimated=total.kcal_estimated,
+        protein_estimated=total.protein_estimated,
+        fat_estimated=total.fat_estimated,
+        carbs_estimated=total.carbs_estimated,
+    )
+
+    aggregated = _aggregate_weekly_meals(meals, group_names)
+    specs = (
+        ("kcal", "🔥", period_days),
+        ("protein_g", "🥩", macro_days),
+        ("fat_g", "🥑", macro_days),
+        ("carbs_g", "🍞", macro_days),
+    )
+    summary_lines = _daily_progress_lines(average, daily_kcal_goal, daily_protein_goal)
+    progress_blocks: list[str] = []
+    for summary_line, (attribute, emoji, divisor) in zip(
+        summary_lines, specs, strict=True
+    ):
+        contributions: list[tuple[int, str]] = []
+        if divisor:
+            for meal_name, _weight, nutrition in aggregated:
+                value = getattr(nutrition, attribute)
+                if value is not None and value > 0:
+                    contributions.append((round_whole(value / divisor), meal_name))
+        contributions.sort(key=lambda item: item[0], reverse=True)
+        rows = [
+            f"<li>{html.escape(name)}  {emoji}{value}</li>"
+            for value, name in contributions
+            if value > 0
+        ]
+        body = f"<ul>{''.join(rows)}</ul>" if rows else "<p>Немає внесків</p>"
+        progress_blocks.append(
+            f"<details><summary>{summary_line}</summary>{body}</details>"
+        )
+
+    day_rows = [
+        f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
+        f"{_format_daily_icon_nutrition(consumed[day])}</li>"
+        for day in days
+    ]
+    daily_macros = (
+        "<details><summary>КБЖВ по дням</summary>"
+        f"<ul>{''.join(day_rows)}</ul></details>"
+    )
+
+    balance_details = ""
+    if burned_totals is not None:
+        missing = [day for day in days if day not in burned_totals]
+        if missing:
+            raise ValueError("Burned-calorie data does not cover the report period")
+        balance_rows = []
+        for day in days:
+            consumed_kcal = round_whole(consumed[day].kcal)
+            burned = burned_totals[day]
+            balance = consumed_kcal - burned
+            balance_rows.append(
+                f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
+                f"+ {consumed_kcal}&nbsp;&nbsp;- {burned}&nbsp;&nbsp;"
+                f"= <b><u>{balance:+d}</u></b></li>"
+            )
+        balance_details = (
+            "<details><summary>Профіцит/Дефіцит калорій</summary>"
+            "<p>+ спожито ккал, - витрачено, = різниця</p>"
+            f"<ul>{''.join(balance_rows)}</ul></details>"
+        )
+
+    day_word = "день" if period_days == 1 else "дні" if period_days <= 4 else "днів"
+    history_note = (
+        ""
+        if period_days == WEEK_DAYS
+        else "<p><sub>історія повного тижня ще не накопичена</sub></p>"
+    )
     return (
-        f"<h3>Статистика {_weekly_period_text(period_days)}</h3>"
-        + _format_weekly_meals_body(
-            meals,
-            group_names,
-            daily_kcal_goal,
-            daily_protein_goal,
-            period_days=period_days,
-            end_day=end_day,
-        )
-        + f"<h4>{calories_heading}:</h4>"
-        + _format_weekly_calories_body(
-            end_day,
-            totals,
-            burned_totals,
-            period_days=period_days,
-        )
+        f"<h3>За {period_days} {day_word} (без сьогодні):</h3>"
+        f"{history_note}<p><sub>В середньому за день:</sub></p>"
+        f"{''.join(progress_blocks)}{daily_macros}{balance_details}"
     )
 
 
@@ -794,7 +901,7 @@ def format_day_reply(
             )
         body = f"<ul>{''.join(details)}</ul>" if details else "<p>Немає внесків</p>"
         blocks.append(f"<details><summary>{summary_line}</summary>{body}</details>")
-    return "".join(blocks)
+    return "<h3>За сьогодні:</h3>" + "".join(blocks)
 
 
 class CaloriesService:
@@ -2042,7 +2149,7 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Unexpected error while handling /day")
                 reply = READ_ERROR_TEXT
-            is_rich_day = reply.startswith("<details>")
+            is_rich_day = reply.startswith(("<h3>За сьогодні:</h3>", "<details>"))
             if is_rich_day:
                 try:
                     bot = getattr(context, "bot", None)
@@ -2059,7 +2166,9 @@ class TelegramHandlers:
                     )
                 except Exception:
                     LOGGER.exception("Could not send rich /day summary")
-                    compact = "\n".join(re.findall(r"<summary>(.*?)</summary>", reply))
+                    compact = "За сьогодні:\n" + "\n".join(
+                        re.findall(r"<summary>(.*?)</summary>", reply)
+                    )
                     sent = await message.reply_text(compact, do_quote=False)
             else:
                 sent = await message.reply_text(reply, do_quote=False)

@@ -191,6 +191,7 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
     )
 
     assert reply == (
+        "<h3>За сьогодні:</h3>"
         "<details><summary>🔥 810 ккал</summary>"
         "<ul><li>курка з рисом  🔥460</li>"
         "<li>вівсянка з бананом ×2  🔥350</li></ul></details>"
@@ -986,13 +987,43 @@ def test_weekly_reply_combines_meals_macros_and_consumed_calories() -> None:
         [PeriodMeal("сир", 200, 700, nutrition, day)],
     )
 
-    assert reply.startswith("<h3>Статистика за тиждень</h3>")
-    assert "🔥 100 ккал<br/>🥩 Б — г<br/>🥑 Ж — г<br/>🍞 В — г" in reply
-    assert "<details><summary>Деталі по стравам</summary>" in reply
-    assert "<h4>Калорії:</h4><p>Спожито: 700 ккал</p>" in reply
-    assert "<b>сб 08.08</b>: + 700" in reply
+    assert reply.startswith("<h3>За 7 днів (без сьогодні):</h3>")
+    assert "<summary>🔥 100 ккал</summary>" in reply
+    assert "<li>сир  🔥100</li>" in reply
+    assert "<details><summary>КБЖВ по дням</summary>" in reply
+    assert "<b>сб 08.08</b>: 🔥700" in reply
     assert "Витрачено" not in reply
-    assert reply.index("Деталі по стравам") < reply.index("<h4>Калорії:</h4>")
+    assert "Профіцит/Дефіцит калорій" not in reply
+
+
+def test_weekly_reply_uses_actual_days_for_averages_and_garmin_details() -> None:
+    first_day = date(2026, 8, 22)
+    last_day = date(2026, 8, 23)
+    first = NutritionSummary(kcal=600, protein_g=40, fat_g=20, carbs_g=80)
+    last = NutritionSummary(kcal=1000, protein_g=60, fat_g=30, carbs_g=120)
+
+    reply = format_weekly_reply(
+        last_day,
+        {first_day: first, last_day: last},
+        [
+            PeriodMeal("сир", 100, 600, first, first_day),
+            PeriodMeal("рис", 200, 1000, last, last_day),
+        ],
+        {first_day: 2000, last_day: 2100},
+        period_days=2,
+    )
+
+    assert reply.startswith("<h3>За 2 дні (без сьогодні):</h3>")
+    assert "<sub>історія повного тижня ще не накопичена</sub>" in reply
+    assert "<summary>🔥 800 ккал</summary>" in reply
+    assert "<summary>🥩 Б 50 г</summary>" in reply
+    assert "<summary>🥑 Ж 25 г</summary>" in reply
+    assert "<summary>🍞 В 100 г</summary>" in reply
+    assert "<details><summary>КБЖВ по дням</summary>" in reply
+    assert "<b>сб 22.08</b>: 🔥600" in reply
+    assert "<details><summary>Профіцит/Дефіцит калорій</summary>" in reply
+    assert "<b>нд 23.08</b>: + 1000&nbsp;&nbsp;- 2100" in reply
+    assert "= <b><u>-1100</u></b>" in reply
 
 
 def test_weekly_macros_are_unavailable_before_tracking_start_date() -> None:
@@ -1012,8 +1043,8 @@ def test_weekly_macros_are_unavailable_before_tracking_start_date() -> None:
         period_days=3,
     )
 
-    assert "🔥 100 ккал<br/>🥩 Б — г<br/>🥑 Ж — г<br/>🍞 В — г" in reply
-    assert "Спожито: 300 ккал" in reply
+    assert "<summary>🔥 100 ккал</summary>" in reply
+    assert "<summary>🥩 Б — г</summary>" in reply
 
 
 def test_weekly_macros_after_tracking_start_use_completed_macro_days() -> None:
@@ -1039,7 +1070,10 @@ def test_weekly_macros_after_tracking_start_use_completed_macro_days() -> None:
         period_days=3,
     )
 
-    assert "🔥 300 ккал<br/>🥩 Б 30 г<br/>🥑 Ж 15 г<br/>🍞 В 45 г" in reply
+    assert "<summary>🔥 300 ккал</summary>" in reply
+    assert "<summary>🥩 Б 30 г</summary>" in reply
+    assert "<summary>🥑 Ж 15 г</summary>" in reply
+    assert "<summary>🍞 В 45 г</summary>" in reply
 
 
 def test_weekly_period_crossing_tracking_start_ignores_old_missing_macros() -> None:
@@ -1073,8 +1107,10 @@ def test_weekly_period_crossing_tracking_start_ignores_old_missing_macros() -> N
         meals,
     )
 
-    assert "🔥 700 ккал<br/>🥩 Б 40 г<br/>🥑 Ж 20 г<br/>🍞 В 80 г" in reply
-    assert "Спожито: 4900 ккал" in reply
+    assert "<summary>🔥 700 ккал</summary>" in reply
+    assert "<summary>🥩 Б 40 г</summary>" in reply
+    assert "<summary>🥑 Ж 20 г</summary>" in reply
+    assert "<summary>🍞 В 80 г</summary>" in reply
 
 
 def test_weekly_service_uses_short_history_for_heading_and_averages(tmp_path) -> None:
@@ -1101,11 +1137,13 @@ def test_weekly_service_uses_short_history_for_heading_and_averages(tmp_path) ->
     reply = service.get_weekly(datetime(2026, 8, 9, 12, tzinfo=TZ))
 
     assert store.range == (date(2026, 8, 6), date(2026, 8, 8))
-    assert reply.startswith("<h3>Статистика за останні 3 дні</h3>")
-    assert "🔥 300 ккал<br/>🥩 Б — г<br/>🥑 Ж — г<br/>🍞 В — г" in reply
-    assert "<p>Спожито: 900 ккал</p>" in reply
-    assert "<p>Спожито: 300 ккал</p>" in reply
-    daily_details = reply.split("<details><summary>По дням</summary>", maxsplit=1)[1]
+    assert reply.startswith("<h3>За 3 дні (без сьогодні):</h3>")
+    assert "<sub>історія повного тижня ще не накопичена</sub>" in reply
+    assert "<summary>🔥 300 ккал</summary>" in reply
+    assert "<summary>🥩 Б — г</summary>" in reply
+    daily_details = reply.split("<details><summary>КБЖВ по дням</summary>", maxsplit=1)[
+        1
+    ]
     assert daily_details.count("<li><b>") == 3
 
 
@@ -1116,7 +1154,7 @@ def test_weekly_service_uses_one_completed_day_when_history_is_empty(tmp_path) -
     reply = service.get_weekly(datetime(2026, 8, 9, 12, tzinfo=TZ))
 
     assert store.range == (date(2026, 8, 8), date(2026, 8, 8))
-    assert reply.startswith("<h3>Статистика за останній день</h3>")
+    assert reply.startswith("<h3>За 1 день (без сьогодні):</h3>")
 
 
 def test_weekly_meals_never_exceeds_twenty_rows() -> None:
@@ -2762,7 +2800,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.6.0"]
+    assert admin_message.replies == ["Версія: 1.7.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -2791,7 +2829,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.6.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.7.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

@@ -5,7 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Protocol, cast
 
 from openai import OpenAI
@@ -186,7 +186,8 @@ class OpenAITranscriber:
 _DECIMAL = re.compile(r"\d+[.,]\d+")
 _HASH_MARKER = re.compile(r"(?<![\w#])(?:#(?P<prefix>\d+)|(?P<suffix>\d+)#)(?![\w#])")
 _COMPACT_NUTRIENT = re.compile(
-    r"(?<!\w)(?P<marker>[кkбжвb])(?P<separator>[:_ -]?)(?P<value>\d+)(?!\w)",
+    r"(?<!\w)(?P<marker>[кkбжвb])\s*(?:[:_·-]\s*)?"
+    r"(?P<value>\d+(?:[.,]\d+)?)(?!\w)",
     re.IGNORECASE,
 )
 _KCAL_UNIT = (
@@ -421,8 +422,6 @@ def normalize_input(text: str) -> NormalizedInput:
     if not normalized:
         raise InputFormatError("Message is empty")
     normalized = _SPOKEN_NUMBER.sub(_replace_spoken_number, normalized)
-    if _DECIMAL.search(normalized):
-        raise InputFormatError("Decimal values are not supported; use whole numbers")
 
     def replace_hash(match: re.Match[str]) -> str:
         value = _nonnegative_integer(
@@ -448,10 +447,13 @@ def normalize_input(text: str) -> NormalizedInput:
     def replace_compact(match: re.Match[str]) -> str:
         marker = match.group("marker").casefold()
         _kind, label = compact_labels[marker]
-        value = _nonnegative_integer(match.group("value"), label)
+        raw_value = match.group("value").replace(",", ".")
+        value = int(Decimal(raw_value).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         return f"{value} {label}/100г"
 
     normalized = _COMPACT_NUTRIENT.sub(replace_compact, normalized)
+    if _DECIMAL.search(normalized):
+        raise InputFormatError("Decimal values are not supported; use whole numbers")
 
     def replace_text_kcal(match: re.Match[str]) -> str:
         value = _nonnegative_integer(match.group("value"), "Calories")

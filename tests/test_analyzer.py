@@ -281,6 +281,20 @@ def test_compact_kbjv_values_are_normalized_as_per_100g(source: str) -> None:
     ]
 
 
+def test_compact_kbjv_accepts_spaces_middle_dot_and_rounded_decimals() -> None:
+    normalized = normalize_input("К 250 Б 100 Ж 7,9 В · 8.1")
+
+    assert normalized.text == (
+        "250 ккал/100г 100 г білків/100г 8 г жирів/100г 8 г вуглеводів/100г"
+    )
+    assert [(value.kind, value.value) for value in normalized.explicit_values] == [
+        ("kcal", 250),
+        ("protein", 100),
+        ("fat", 8),
+        ("carbs", 8),
+    ]
+
+
 def test_natural_macros_support_per_100g_and_portion_basis() -> None:
     per_100g = normalize_input("на 100 гр білки 20 г жири 10 г вуглеводи 0")
     portion = normalize_input("у порції 250 г білки 20 г жири 10 г вуглеводи 0")
