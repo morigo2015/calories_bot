@@ -820,7 +820,7 @@ def format_weekly_reply(
         )
 
     day_rows = [
-        f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
+        f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>:\n"
         f"{_format_daily_icon_nutrition(consumed[day])}</li>"
         for day in days
     ]
