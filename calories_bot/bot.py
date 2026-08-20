@@ -304,10 +304,10 @@ def _format_icon_nutrition(summary: NutritionSummary) -> str:
     separator = "&nbsp;&nbsp;&nbsp;"
     return separator.join(
         (
-            f"🔥{_format_icon_value(summary.kcal)}",
-            f"🥩 {_format_icon_value(summary.protein_g)}",
-            f"🥑 {_format_icon_value(summary.fat_g)}",
-            f"🍞 {_format_icon_value(summary.carbs_g)}",
+            f"🔥 К {_format_icon_value(summary.kcal)}",
+            f"🥩 Б {_format_icon_value(summary.protein_g)}",
+            f"🥑 Ж {_format_icon_value(summary.fat_g)}",
+            f"🍞 В {_format_icon_value(summary.carbs_g)}",
         )
     )
 
@@ -319,10 +319,10 @@ def _format_daily_icon_nutrition(summary: NutritionSummary) -> str:
     separator = "&nbsp;&nbsp;&nbsp;"
     return separator.join(
         (
-            f"🔥{value(summary.kcal)}",
-            f"🥩 {value(summary.protein_g)}",
-            f"🥑 {value(summary.fat_g)}",
-            f"🍞 {value(summary.carbs_g)}",
+            f"🔥 К {value(summary.kcal)}",
+            f"🥩 Б {value(summary.protein_g)}",
+            f"🥑 Ж {value(summary.fat_g)}",
+            f"🍞 В {value(summary.carbs_g)}",
         )
     )
 
@@ -379,17 +379,17 @@ def _format_progress_value(
 ) -> str:
     prefix = f"{emoji} {label}" if label else f"{emoji} "
     if value is None:
-        return f"{prefix}— {unit}"
+        return f"{prefix}<b><u>— {unit}</u></b>"
     stored = format(value, "g")
     if goal is None:
-        return f"{prefix}{stored} {unit}"
+        return f"{prefix}<b><u>{stored} {unit}</u></b>"
     difference = value - goal
     deviation = ""
     if difference > 0:
-        deviation = f" · +{format(difference, 'g')} {unit}"
+        deviation = f" → +{format(difference, 'g')} {unit}"
     elif difference < 0:
-        deviation = f" · −{format(abs(difference), 'g')} {unit}"
-    line = f"{prefix}<b>{stored} / {goal} {unit}{deviation}</b>"
+        deviation = f" → −{format(abs(difference), 'g')} {unit}"
+    line = f"{prefix}<b><u>{stored} / {goal} {unit}{deviation}</u></b>"
     if include_bar:
         line += f"{bar_separator}<code>{_format_progress_bar(value, goal)}</code>"
     return line
@@ -426,7 +426,8 @@ def _daily_progress_lines(
             summary.kcal,
             daily_kcal_goal,
             emoji="🔥",
-            unit="ккал",
+            label="К ",
+            unit="кк",
             include_bar=include_bars,
             bar_separator=bar_separator,
         ),
@@ -434,7 +435,7 @@ def _daily_progress_lines(
             summary.protein_g,
             daily_protein_goal,
             emoji="🥩",
-            label="" if daily_protein_goal is not None else "Б ",
+            label="Б ",
             unit="г",
             include_bar=include_bars,
             bar_separator=bar_separator,
@@ -705,7 +706,13 @@ def _format_weekly_meals_body(
         carbs_estimated=total.carbs_estimated,
     )
     progress = "<br/>".join(
-        _daily_progress_lines(average, daily_kcal_goal, daily_protein_goal)
+        _daily_progress_lines(
+            average,
+            daily_kcal_goal,
+            daily_protein_goal,
+            include_bars=True,
+            bar_separator="<br/>",
+        )
     )
     heading = f"<h4>В середньому в день:</h4><p>{progress}</p>"
     if not meals:
@@ -778,14 +785,20 @@ def format_weekly_reply(
 
     aggregated = _aggregate_weekly_meals(meals, group_names)
     specs = (
-        ("kcal", "🔥", period_days),
-        ("protein_g", "🥩", macro_days),
-        ("fat_g", "🥑", macro_days),
-        ("carbs_g", "🍞", macro_days),
+        ("kcal", "🔥", "К", period_days),
+        ("protein_g", "🥩", "Б", macro_days),
+        ("fat_g", "🥑", "Ж", macro_days),
+        ("carbs_g", "🍞", "В", macro_days),
     )
-    summary_lines = _daily_progress_lines(average, daily_kcal_goal, daily_protein_goal)
+    summary_lines = _daily_progress_lines(
+        average,
+        daily_kcal_goal,
+        daily_protein_goal,
+        include_bars=True,
+        bar_separator="<br/>",
+    )
     progress_blocks: list[str] = []
-    for summary_line, (attribute, emoji, divisor) in zip(
+    for summary_line, (attribute, emoji, label, divisor) in zip(
         summary_lines, specs, strict=True
     ):
         contributions: list[tuple[int, str]] = []
@@ -796,7 +809,7 @@ def format_weekly_reply(
                     contributions.append((round_whole(value / divisor), meal_name))
         # contributions.sort(key=lambda item: item[0], reverse=True)
         rows = [
-            f"<li>{html.escape(name)}  {emoji}{value}</li>"
+            f"<li>{html.escape(name)}  {emoji} {label} {value}</li>"
             for value, name in contributions
             if value > 0
         ]
@@ -920,10 +933,10 @@ def format_day_reply(
             grouped[key] = (display_name, nutrients, 1)
 
     specs = (
-        ("kcal", "🔥"),
-        ("protein_g", "🥩"),
-        ("fat_g", "🥑"),
-        ("carbs_g", "🍞"),
+        ("kcal", "🔥", "К"),
+        ("protein_g", "🥩", "Б"),
+        ("fat_g", "🥑", "Ж"),
+        ("carbs_g", "🍞", "В"),
     )
     summary_lines = _daily_progress_lines(
         total,
@@ -933,7 +946,9 @@ def format_day_reply(
         bar_separator="<br/>",
     )
     blocks: list[str] = []
-    for summary_line, (attribute, emoji) in zip(summary_lines, specs, strict=True):
+    for summary_line, (attribute, emoji, label) in zip(
+        summary_lines, specs, strict=True
+    ):
         contributions: list[tuple[float, str, int]] = []
         for meal_name, nutrients, count in grouped.values():
             value = getattr(nutrients, attribute)
@@ -945,7 +960,7 @@ def format_day_reply(
             count_suffix = f" ×{count}" if count > 1 else ""
             details.append(
                 f"<li>{html.escape(meal_name)}{count_suffix}  "
-                f"{emoji}{format(value, 'g')}</li>"
+                f"{emoji} {label} {format(value, 'g')}</li>"
             )
         body = f"<ul>{''.join(details)}</ul>" if details else "<p>Немає внесків</p>"
         blocks.append(f"<details><summary>{summary_line}</summary>{body}</details>")
