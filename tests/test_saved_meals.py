@@ -554,7 +554,7 @@ def test_change_weight_updates_existing_single_item_and_total(tmp_path) -> None:
     assert result.daily_total_text == app.get_day_summary(
         datetime(2026, 8, 9, 12, tzinfo=TZ)
     )
-    assert "<summary>🔥 К <b><u>120 кк</u></b></summary>" in result.daily_total_text
+    assert "<summary>🔥 К <b><u>120</u></b> кк</summary>" in result.daily_total_text
 
 
 def test_change_weight_rejects_unchanged_weight_without_updating_store(

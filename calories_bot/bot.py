@@ -379,17 +379,18 @@ def _format_progress_value(
 ) -> str:
     prefix = f"{emoji} {label}" if label else f"{emoji} "
     if value is None:
-        return f"{prefix}<b><u>— {unit}</u></b>"
+        return f"{prefix}<b><u>—</u></b> {unit}"
     stored = format(value, "g")
+    highlighted = f"<b><u>{stored}</u></b>"
     if goal is None:
-        return f"{prefix}<b><u>{stored} {unit}</u></b>"
+        return f"{prefix}{highlighted} {unit}"
     difference = value - goal
     deviation = ""
     if difference > 0:
-        deviation = f" → +{format(difference, 'g')} {unit}"
+        deviation = f" → +{format(difference, 'g')}"
     elif difference < 0:
-        deviation = f" → −{format(abs(difference), 'g')} {unit}"
-    line = f"{prefix}<b><u>{stored} / {goal} {unit}{deviation}</u></b>"
+        deviation = f" → −{format(abs(difference), 'g')}"
+    line = f"{prefix}{highlighted} / {goal}{deviation} {unit}"
     if include_bar:
         line += f"{bar_separator}<code>{_format_progress_bar(value, goal)}</code>"
     return line
