@@ -64,7 +64,6 @@ from .sheets import (
     MealStore,
     PeriodMeal,
     SheetsReadError,
-    SheetState,
     SheetsWriteError,
     SheetsWriteUncertainError,
     accounting_date,
@@ -81,6 +80,8 @@ from .users import (
 LOGGER = logging.getLogger(__name__)
 SAVED_MEAL_ICON_CONFIDENCE = 0.8
 DAILY_TOTAL_DELETE_BATCH_SIZE = 100
+DAILY_GOAL_BLOCKS = 12
+DAILY_OVERAGE_BLOCKS = 3
 
 HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
 START_TEXT_FILE = Path(__file__).with_name("start.txt")
@@ -366,17 +367,6 @@ def _nutrition_for_day(summary: NutritionSummary, day: date) -> NutritionSummary
     return summary
 
 
-def _state_nutrition(state: SheetState, day: date) -> NutritionSummary:
-    nutrition = state.today_nutrition
-    if isinstance(nutrition, NutritionSummary):
-        return _nutrition_for_day(nutrition, day)
-    total = float(state.today_total)
-    fallback = (
-        NutritionSummary() if total == 0 else NutritionSummary.unknown_macros(total)
-    )
-    return _nutrition_for_day(fallback, day)
-
-
 def _format_progress_value(
     value: float | None,
     goal: int | None,
@@ -384,6 +374,8 @@ def _format_progress_value(
     emoji: str,
     label: str = "",
     unit: str,
+    include_bar: bool = False,
+    bar_separator: str = "\n",
 ) -> str:
     prefix = f"{emoji} {label}" if label else f"{emoji} "
     if value is None:
@@ -391,23 +383,61 @@ def _format_progress_value(
     stored = format(value, "g")
     if goal is None:
         return f"{prefix}{stored} {unit}"
-    difference = format(value - goal, "+g")
-    return f"{prefix}{stored} / {goal} {unit}  {difference}"
+    difference = value - goal
+    deviation = ""
+    if difference > 0:
+        deviation = f" · +{format(difference, 'g')} {unit}"
+    elif difference < 0:
+        deviation = f" · −{format(abs(difference), 'g')} {unit}"
+    line = f"{prefix}<b>{stored} / {goal} {unit}{deviation}</b>"
+    if include_bar:
+        line += f"{bar_separator}<code>{_format_progress_bar(value, goal)}</code>"
+    return line
+
+
+def _format_progress_bar(value: float, goal: int) -> str:
+    ratio = max(0.0, value / goal)
+    before_goal = min(DAILY_GOAL_BLOCKS, int(ratio * DAILY_GOAL_BLOCKS))
+    over_goal = 0
+    if ratio > 1:
+        over_goal = min(
+            DAILY_OVERAGE_BLOCKS,
+            max(1, int((ratio - 1) * DAILY_GOAL_BLOCKS)),
+        )
+    return (
+        "█" * before_goal
+        + "░" * (DAILY_GOAL_BLOCKS - before_goal)
+        + "│"
+        + "█" * over_goal
+        + "░" * (DAILY_OVERAGE_BLOCKS - over_goal)
+    )
 
 
 def _daily_progress_lines(
     summary: NutritionSummary,
     daily_kcal_goal: int | None,
     daily_protein_goal: int | None,
+    *,
+    include_bars: bool = False,
+    bar_separator: str = "\n",
 ) -> list[str]:
     return [
-        _format_progress_value(summary.kcal, daily_kcal_goal, emoji="🔥", unit="кк"),
+        _format_progress_value(
+            summary.kcal,
+            daily_kcal_goal,
+            emoji="🔥",
+            unit="ккал",
+            include_bar=include_bars,
+            bar_separator=bar_separator,
+        ),
         _format_progress_value(
             summary.protein_g,
             daily_protein_goal,
             emoji="🥩",
-            label="Б ",
+            label="" if daily_protein_goal is not None else "Б ",
             unit="г",
+            include_bar=include_bars,
+            bar_separator=bar_separator,
         ),
         _format_progress_value(summary.fat_g, None, emoji="🥑", label="Ж ", unit="г"),
         _format_progress_value(summary.carbs_g, None, emoji="🍞", label="В ", unit="г"),
@@ -421,17 +451,12 @@ def format_daily_total(
 ) -> str:
     summary = _as_summary(today_total)
     return "\n".join(
-        _daily_progress_lines(summary, daily_kcal_goal, daily_protein_goal)
-    )
-
-
-def _format_today_total(
-    today_total: float | NutritionSummary,
-    daily_kcal_goal: int | None,
-    daily_protein_goal: int | None = None,
-) -> str:
-    return "Сьогодні:\n" + format_daily_total(
-        today_total, daily_kcal_goal, daily_protein_goal
+        _daily_progress_lines(
+            summary,
+            daily_kcal_goal,
+            daily_protein_goal,
+            include_bars=True,
+        )
     )
 
 
@@ -900,7 +925,13 @@ def format_day_reply(
         ("fat_g", "🥑"),
         ("carbs_g", "🍞"),
     )
-    summary_lines = _daily_progress_lines(total, daily_kcal_goal, daily_protein_goal)
+    summary_lines = _daily_progress_lines(
+        total,
+        daily_kcal_goal,
+        daily_protein_goal,
+        include_bars=True,
+        bar_separator="<br/>",
+    )
     blocks: list[str] = []
     for summary_line, (attribute, emoji) in zip(summary_lines, specs, strict=True):
         contributions: list[tuple[float, str, int]] = []
@@ -970,6 +1001,10 @@ class CaloriesService:
 
     def get_day_summary(self, timestamp: datetime) -> str:
         day = self._accounting_day(timestamp)
+        with self._store_lock:
+            return self._format_day_summary(day)
+
+    def _format_day_summary(self, day: date) -> str:
         return format_day_reply(
             self._store.get_day_meals(day),
             self._daily_kcal_goal,
@@ -1133,9 +1168,9 @@ class CaloriesService:
         self,
         source_message_id: int,
         day: date,
-        today_nutrition: NutritionSummary,
         first: StoredMeal,
     ) -> MealReply | list[MealReply] | None:
+        daily_summary = self._format_day_summary(day)
         marker = parse_simple_meal_request(first.normalized_request)
         if (
             marker is None
@@ -1147,11 +1182,7 @@ class CaloriesService:
                 telegram_message_id=source_message_id,
                 accounting_day=day,
                 can_change_weight=len(first.meal.items) == 1,
-                daily_total_text=_format_today_total(
-                    today_nutrition,
-                    self._daily_kcal_goal,
-                    self._daily_protein_goal,
-                ),
+                daily_total_text=daily_summary,
             )
         components = self._store.get_component_meals(day, source_message_id)
         if len(components) != marker.component_count:
@@ -1164,13 +1195,7 @@ class CaloriesService:
                     telegram_message_id=message_id,
                     accounting_day=day,
                     daily_total_text=(
-                        _format_today_total(
-                            today_nutrition,
-                            self._daily_kcal_goal,
-                            self._daily_protein_goal,
-                        )
-                        if index == len(components) - 1
-                        else None
+                        daily_summary if index == len(components) - 1 else None
                     ),
                 )
             )
@@ -1187,7 +1212,6 @@ class CaloriesService:
         return self._existing_component_replies(
             telegram_message_id,
             day,
-            _state_nutrition(state, day),
             state.existing,
         )
 
@@ -1206,7 +1230,6 @@ class CaloriesService:
                 existing_reply = self._existing_component_replies(
                     telegram_message_id,
                     day,
-                    _state_nutrition(state, day),
                     state.existing,
                 )
                 if existing_reply is not None:
@@ -1232,7 +1255,6 @@ class CaloriesService:
                 existing_reply = self._existing_component_replies(
                     telegram_message_id,
                     day,
-                    _state_nutrition(state, day),
                     state.existing,
                 )
                 if existing_reply is not None:
@@ -1258,7 +1280,6 @@ class CaloriesService:
                             stored,
                         )
             stored_components: list[tuple[int, StoredMeal]] = []
-            today_nutrition = _state_nutrition(state, day)
             try:
                 for index, meal in enumerate(meals):
                     existing = existing_components.get(index)
@@ -1291,7 +1312,6 @@ class CaloriesService:
                         ),
                     )
                     stored_components.append((component_message_id, stored))
-                    today_nutrition += nutrition_summary(stored.meal)
             except SheetsWriteUncertainError:
                 raise
             except SheetsWriteError as exc:
@@ -1302,6 +1322,7 @@ class CaloriesService:
                         "Only part of the component meal was stored"
                     ) from exc
                 raise
+            daily_summary = self._format_day_summary(day)
             replies = []
             for index, (component_message_id, stored) in enumerate(stored_components):
                 replies.append(
@@ -1310,11 +1331,7 @@ class CaloriesService:
                         telegram_message_id=component_message_id,
                         accounting_day=day,
                         daily_total_text=(
-                            _format_today_total(
-                                today_nutrition,
-                                self._daily_kcal_goal,
-                                self._daily_protein_goal,
-                            )
+                            daily_summary
                             if index == len(stored_components) - 1
                             else None
                         ),
@@ -1474,19 +1491,16 @@ class CaloriesService:
                     round_meal_nutrition(meal),
                     LLMMetadata(model=metadata_model, effort="none"),
                 )
-                total = _state_nutrition(state, day) + nutrition_summary(stored.meal)
             else:
                 stored = state.existing
-                total = _state_nutrition(state, day)
+            daily_summary = self._format_day_summary(day)
         return MealReply(
             text=format_reply(stored.meal),
             telegram_message_id=event_id,
             accounting_day=day,
             can_save=can_save,
             can_change_weight=len(stored.meal.items) == 1,
-            daily_total_text=_format_today_total(
-                total, self._daily_kcal_goal, self._daily_protein_goal
-            ),
+            daily_total_text=daily_summary,
         )
 
     def add_saved_meal(
@@ -1566,21 +1580,14 @@ class CaloriesService:
                 and marker.kind != "saved"
                 and self._saved().find_by_source(message_id) is None
             )
+            daily_summary = self._format_day_summary(updated.accounting_day)
         return MealReply(
             text=format_reply(updated.meal.meal),
             telegram_message_id=message_id,
             accounting_day=updated.accounting_day,
             can_save=can_save,
             can_change_weight=True,
-            daily_total_text=_format_today_total(
-                _nutrition_for_day(
-                    updated.day_nutrition
-                    or NutritionSummary.unknown_macros(updated.day_total),
-                    updated.accounting_day,
-                ),
-                self._daily_kcal_goal,
-                self._daily_protein_goal,
-            ),
+            daily_total_text=daily_summary,
         )
 
     def delete_saved_meal(self, saved_meal_id: str) -> bool:
@@ -1887,8 +1894,15 @@ class TelegramHandlers:
                 )
             except Exception:
                 LOGGER.exception("Could not send rich %s", operation)
+        fallback = _rich_html_fallback(rich_html)
+        if reply_markup is None:
+            return await message.reply_text(
+                fallback,
+                parse_mode=ParseMode.HTML,
+                do_quote=False,
+            )
         return await message.reply_text(
-            _rich_html_fallback(rich_html),
+            fallback,
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup,
             do_quote=False,
@@ -2168,28 +2182,15 @@ class TelegramHandlers:
                 reply = READ_ERROR_TEXT
             is_rich_day = reply.startswith(("<h3>За сьогодні:</h3>", "<details>"))
             if is_rich_day:
-                try:
-                    bot = getattr(context, "bot", None)
-                    chat = update.effective_chat
-                    if bot is None or chat is None:
-                        raise RuntimeError("Rich-message bot context is unavailable")
-                    sent = await bot.do_api_request(
-                        "sendRichMessage",
-                        api_kwargs={
-                            "chat_id": chat.id,
-                            "rich_message": {"html": reply},
-                        },
-                        return_type=Message,
-                    )
-                except Exception:
-                    LOGGER.exception("Could not send rich /day summary")
-                    compact = "За сьогодні:\n" + "\n".join(
-                        re.findall(r"<summary>(.*?)</summary>", reply)
-                    )
-                    sent = await message.reply_text(compact, do_quote=False)
+                sent = await self._send_rich_html(
+                    message,
+                    context,
+                    reply,
+                    operation="/day summary",
+                )
             else:
                 sent = await message.reply_text(reply, do_quote=False)
-            if is_rich_day:
+            if is_rich_day and sent is not None:
                 await self._remember_daily_total_message(sent)
 
     async def weekly_calories(
@@ -3351,12 +3352,14 @@ class TelegramHandlers:
             None,
         )
         if daily_total_text is not None:
-            sent = await message.reply_text(
+            sent = await self._send_rich_html(
+                message,
+                context,
                 daily_total_text,
-                parse_mode=ParseMode.HTML,
-                do_quote=False,
+                operation="daily summary after meal",
             )
-            await self._remember_daily_total_message(sent)
+            if sent is not None:
+                await self._remember_daily_total_message(sent)
 
     async def _remember_daily_total_message(self, message: Message) -> None:
         if self._statistics is None:

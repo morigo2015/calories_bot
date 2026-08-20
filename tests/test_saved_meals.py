@@ -20,6 +20,7 @@ from calories_bot.models import (
     StoredMeal,
     calculate_meal,
     format_simple_meal_request,
+    nutrition_summary,
     scale_meal,
 )
 from calories_bot.saved_meals import (
@@ -29,7 +30,7 @@ from calories_bot.saved_meals import (
     GoogleSavedMealStore,
     SavedMealsSchemaError,
 )
-from calories_bot.sheets import MealDeletion, MealUpdate, SheetState
+from calories_bot.sheets import DayMeal, MealDeletion, MealUpdate, SheetState
 
 TZ = ZoneInfo("Europe/Kyiv")
 DAY = date(2026, 8, 9)
@@ -370,14 +371,36 @@ class MemoryMealStore:
         return stored
 
     def get_day_meals(self, day):
-        del day
-        return []
+        return [
+            DayMeal(
+                stored.meal.meal_name,
+                stored.meal.meal_kcal,
+                nutrition_summary(stored.meal),
+            )
+            for row_day, _, stored in self.rows
+            if row_day == day
+        ]
 
     def get_daily_totals(self, start, end):
         del start, end
         return {}
 
     def delete_meal(self, message_id, day):
+        for index, (row_day, row_id, stored) in enumerate(self.rows):
+            if row_day == day and row_id == message_id:
+                del self.rows[index]
+                total = sum(
+                    row.meal.meal_kcal
+                    for stored_day, _, row in self.rows
+                    if stored_day == day
+                )
+                return MealDeletion(
+                    day,
+                    total,
+                    None,
+                    True,
+                    stored.meal.meal_name,
+                )
         return MealDeletion(day, 0, None, False)
 
 
@@ -421,6 +444,24 @@ def test_service_save_is_idempotent_and_auto_suffixes_names(
     assert (second.display_name, second_created) == ("сир (2)", True)
     with pytest.raises(SavedMealNameError, match="вже є"):
         app.save_source_meal(3, DAY, "сир")
+
+
+def test_deleting_consumed_meal_keeps_saved_meal(monkeypatch, tmp_path) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1)
+    saved_meals = MemorySavedStore()
+    app = service(tmp_path, meals, saved_meals)
+    monkeypatch.setattr(
+        "calories_bot.bot.secrets.token_urlsafe", lambda size: "template"
+    )
+    stored, created = app.save_source_meal(1, DAY)
+
+    deletion = app.delete_message(1, DAY)
+
+    assert created is True
+    assert deletion.deleted is True
+    assert meals.get_meal(DAY, 1) is None
+    assert saved_meals.get(stored.saved_meal_id) == stored
 
 
 def test_reused_saved_meal_scales_without_llm_and_retry_is_idempotent(tmp_path) -> None:
@@ -510,9 +551,10 @@ def test_change_weight_updates_existing_single_item_and_total(tmp_path) -> None:
     assert len(meals.rows) == 1
     assert meals.rows[0][2].meal.total_weight_g == 100
     assert meals.rows[0][2].meal.meal_kcal == 120
-    assert result.daily_total_text == (
-        "Сьогодні:\n🔥 120 ккал\n🥩 Б — г\n🥑 Ж — г\n🍞 В — г"
+    assert result.daily_total_text == app.get_day_summary(
+        datetime(2026, 8, 9, 12, tzinfo=TZ)
     )
+    assert "<summary>🔥 120 ккал</summary>" in result.daily_total_text
 
 
 def test_change_weight_rejects_unchanged_weight_without_updating_store(
