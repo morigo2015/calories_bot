@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from calories_bot.analyzer import (
+    SYSTEM_PROMPT,
     AnalysisError,
     InputFormatError,
     ModelPricing,
@@ -24,6 +25,12 @@ from calories_bot.models import (
     calculate_meal,
     round_whole,
 )
+
+
+def test_system_prompt_requires_grams_for_household_portions() -> None:
+    assert "Weight is mandatory for every food item" in SYSTEM_PROMPT
+    assert '"жменя лохини"' in SYSTEM_PROMPT
+    assert "estimated numeric weight_g in grams" in SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(

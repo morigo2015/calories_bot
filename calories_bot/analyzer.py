@@ -36,8 +36,12 @@ Rules:
 - Every explicit source ID must be used exactly once.
 - A plain number without an explicit source ID is part of the description,
   for example "2 яйця" or "піца 30 см".
-- If weight is absent, estimate a typical consumed portion and set
-  weight_estimated=true, weight_origin=model_estimate and weight_source_id=null.
+- Weight is mandatory for every food item. Always return weight_g in grams.
+  Never omit it, return null, or substitute a household measure without grams.
+- If weight is absent, estimate the grams for the described consumed portion and
+  set weight_estimated=true, weight_origin=model_estimate and
+  weight_source_id=null. For example, "жменя лохини" must include both
+  portion_display="1 жменя" and an estimated numeric weight_g in grams.
 - If kcal per 100 g is absent, estimate it and set kcal_estimated=true and
   kcal_origin=model_estimate and kcal_source_id=null.
 - Always provide protein, fat, and carbohydrate grams per 100 g when food is

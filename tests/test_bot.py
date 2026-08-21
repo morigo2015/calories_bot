@@ -17,6 +17,7 @@ from calories_bot.bot import (
     LONG_OPERATION_TEXT,
     NOT_FOOD_TEXT,
     READ_ERROR_TEXT,
+    RECENT_MEALS_LIMIT,
     UNCERTAIN_WRITE_TEXT,
     VOICE_ERROR_TEXT,
     WRITE_ERROR_TEXT,
@@ -181,7 +182,12 @@ class FakeStore:
             )
         )
         self.day_meals.append(
-            DayMeal(meal.meal_name, meal.meal_kcal, nutrition_summary(meal))
+            DayMeal(
+                meal.meal_name,
+                meal.meal_kcal,
+                nutrition_summary(meal),
+                meal.total_weight_g,
+            )
         )
         return StoredMeal(
             normalized_request=normalized_request,
@@ -198,17 +204,29 @@ def build_service(analyzer, store, tmp_path):
 def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() -> None:
     reply = format_day_reply(
         [
-            DayMeal(meal_name="вівсянка з бананом", meal_kcal=320),
-            DayMeal(meal_name="  Вівсянка   з бананом ", meal_kcal=30),
-            DayMeal(meal_name="курка з рисом", meal_kcal=460),
+            DayMeal(
+                meal_name="вівсянка з бананом",
+                meal_kcal=320,
+                total_weight_g=250,
+            ),
+            DayMeal(
+                meal_name="  Вівсянка   з бананом ",
+                meal_kcal=30,
+                total_weight_g=50,
+            ),
+            DayMeal(
+                meal_name="курка з рисом",
+                meal_kcal=460,
+                total_weight_g=400,
+            ),
         ]
     )
 
     assert reply == (
         "<h3>За сьогодні:</h3>"
         "<details><summary>🔥 К <b><u>810</u></b> кк</summary>"
-        "<ul><li>курка з рисом  🔥 К 460</li>"
-        "<li>вівсянка з бананом ×2  🔥 К 350</li></ul></details>"
+        "<ul><li>курка з рисом, 400 г  🔥 К 460</li>"
+        "<li>вівсянка з бананом, 300 г ×2  🔥 К 350</li></ul></details>"
         "<details><summary>🥩 Б <b><u>—</u></b> г</summary>"
         "<p>Немає внесків</p></details>"
         "<details><summary>🥑 Ж <b><u>—</u></b> г</summary>"
@@ -2904,6 +2922,22 @@ def test_recent_command_is_separate_direct_add_list() -> None:
     button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
     assert button.text == "➕ сир · 50 г"
     assert button.callback_data == "recent-add:42:2026-08-02:50"
+
+
+def test_recent_meal_list_limit_is_doubled_to_sixteen(tmp_path) -> None:
+    class RecentStore(FakeStore):
+        requested_limit = None
+
+        def get_recent_meals(self, limit):
+            self.requested_limit = limit
+            return []
+
+    store = RecentStore(SheetState(today_total=0, existing=None))
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    assert service.list_recent_meals() == []
+    assert RECENT_MEALS_LIMIT == 16
+    assert store.requested_limit == 16
 
 
 def test_admin_help_and_user_list_are_available_without_personal_account() -> None:

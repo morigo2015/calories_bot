@@ -82,6 +82,7 @@ SAVED_MEAL_ICON_CONFIDENCE = 0.8
 DAILY_TOTAL_DELETE_BATCH_SIZE = 100
 DAILY_GOAL_BLOCKS = 12
 DAILY_OVERAGE_BLOCKS = 3
+RECENT_MEALS_LIMIT = 16
 
 HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
 START_TEXT_FILE = Path(__file__).with_name("start.txt")
@@ -923,15 +924,25 @@ def format_day_reply(
         for meal in meals
     ]
     total = sum((nutrients for _, nutrients in meal_nutrients), NutritionSummary())
-    grouped: dict[str, tuple[str, NutritionSummary, int]] = {}
+    grouped: dict[str, tuple[str, NutritionSummary, int, float | None]] = {}
     for meal, nutrients in meal_nutrients:
         display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
         key = display_name.casefold()
         if key in grouped:
-            original_name, current, count = grouped[key]
-            grouped[key] = (original_name, current + nutrients, count + 1)
+            original_name, current, count, current_weight = grouped[key]
+            total_weight = (
+                None
+                if current_weight is None or meal.total_weight_g is None
+                else current_weight + meal.total_weight_g
+            )
+            grouped[key] = (
+                original_name,
+                current + nutrients,
+                count + 1,
+                total_weight,
+            )
         else:
-            grouped[key] = (display_name, nutrients, 1)
+            grouped[key] = (display_name, nutrients, 1, meal.total_weight_g)
 
     specs = (
         ("kcal", "🔥", "К"),
@@ -951,10 +962,15 @@ def format_day_reply(
         summary_lines, specs, strict=True
     ):
         contributions: list[tuple[float, str, int]] = []
-        for meal_name, nutrients, count in grouped.values():
+        for meal_name, nutrients, count, total_weight_g in grouped.values():
             value = getattr(nutrients, attribute)
             if value is not None and value > 0:
-                contributions.append((value, meal_name, count))
+                weight_text = (
+                    ""
+                    if total_weight_g is None
+                    else f", {round_whole(total_weight_g)} г"
+                )
+                contributions.append((value, f"{meal_name}{weight_text}", count))
         contributions.sort(key=lambda item: item[0], reverse=True)
         details = []
         for value, meal_name, count in contributions:
@@ -1379,7 +1395,7 @@ class CaloriesService:
 
     def list_recent_meals(self) -> list[RecentMeal]:
         with self._store_lock:
-            return self._store.get_recent_meals(8)
+            return self._store.get_recent_meals(RECENT_MEALS_LIMIT)
 
     def get_recent_meal(self, message_id: int, day: date) -> RecentMeal | None:
         with self._store_lock:

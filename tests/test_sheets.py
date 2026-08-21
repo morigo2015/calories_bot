@@ -255,9 +255,11 @@ def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
 
     meals = build_store(rows).get_day_meals(datetime(2026, 8, 2).date())
 
-    assert [(meal.meal_name, meal.meal_kcal) for meal in meals] == [
-        ("вівсянка з бананом", 320),
-        ("курка з рисом", 460),
+    assert [
+        (meal.meal_name, meal.total_weight_g, meal.meal_kcal) for meal in meals
+    ] == [
+        ("вівсянка з бананом", 50, 320),
+        ("курка з рисом", 50, 460),
     ]
     assert all(
         meal.nutrition == NutritionSummary.unknown_macros(meal.meal_kcal)

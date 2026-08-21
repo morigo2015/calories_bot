@@ -102,6 +102,7 @@ class DayMeal:
     meal_name: str
     meal_kcal: float
     nutrition: NutritionSummary | None = None
+    total_weight_g: float | None = None
 
 
 @dataclass(frozen=True)
@@ -655,6 +656,7 @@ class GoogleSheetsStore:
                             meal_name=meal_name,
                             meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
                             nutrition=nutrition_summary(_meal_from_row(row).meal),
+                            total_weight_g=float(str(row[TOTAL_WEIGHT_COLUMN])),
                         )
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
