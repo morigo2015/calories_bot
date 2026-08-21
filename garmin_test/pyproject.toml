@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "garmin-account-probe"
+version = "0.1.0"
+description = "A privacy-conscious integration and stability probe for python-garminconnect"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "garminconnect==0.3.10",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+]
+
+[project.scripts]
+garmin-probe = "garmin_account_probe.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/garmin_account_probe"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -m 'not integration'"
+testpaths = ["tests"]
+markers = [
+  "integration: makes real requests to a configured Garmin Connect account",
+]
+

@@ -1,4 +1,0 @@
-2026-08-02 20:33:03,258 WARNING __main__: OpenAI token pricing is incomplete; llm_cost_usd will be blank
-2026-08-02 20:33:04,629 INFO telegram.ext.Application: Application started
-2026-08-02 20:50:54,856 INFO telegram.ext.Application: Application is stopping. This might take a moment.
-2026-08-02 20:50:54,857 INFO telegram.ext.Application: Application.stop() complete
