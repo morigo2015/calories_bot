@@ -1089,11 +1089,45 @@ def test_weekly_reply_combines_meals_macros_and_consumed_calories() -> None:
 
     assert reply.startswith("<h3>Попередні 7 днів (без сьогодні):</h3>")
     assert "<summary>🔥 К <b><u>100</u></b> кк</summary>" in reply
-    assert "<li>сир  🔥 К 100</li>" in reply
+    assert "<li>сир, 200 г  🔥 К 100</li>" in reply
     assert "<details><summary>КБЖВ по дням</summary>" in reply
     assert "<b>сб 08.08</b>: 🔥 К 700" in reply
     assert "Витрачено" not in reply
     assert "Баланс калорій" not in reply
+
+
+def test_weekly_service_groups_meals_and_shows_their_total_weight(tmp_path) -> None:
+    class Grouper:
+        def group(self, names):
+            assert set(names) == {"Кава", "Кава чорна"}
+            return MealGroupingResult(("Кава", "Кава"), METADATA)
+
+    first_day = date(2026, 8, 2)
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.first_meal_day = first_day
+    store.period_meals = [
+        PeriodMeal(
+            "Кава",
+            300,
+            700,
+            NutritionSummary.unknown_macros(700),
+            first_day,
+        ),
+        PeriodMeal(
+            "Кава чорна",
+            200,
+            350,
+            NutritionSummary.unknown_macros(350),
+            date(2026, 8, 3),
+        ),
+    ]
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    reply = service.get_weekly(
+        datetime(2026, 8, 9, 12, tzinfo=TZ), meal_grouper=Grouper()
+    )
+
+    assert "<li>Кава, 500 г  🔥 К 150</li>" in reply
 
 
 def test_weekly_reply_uses_actual_days_for_averages_and_garmin_details() -> None:

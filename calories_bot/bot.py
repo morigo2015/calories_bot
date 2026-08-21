@@ -803,16 +803,19 @@ def format_weekly_reply(
     for summary_line, (attribute, emoji, label, divisor) in zip(
         summary_lines, specs, strict=True
     ):
-        contributions: list[tuple[int, str]] = []
+        contributions: list[tuple[int, str, float]] = []
         if divisor:
-            for meal_name, _weight, nutrition in aggregated:
+            for meal_name, weight, nutrition in aggregated:
                 value = getattr(nutrition, attribute)
                 if value is not None and value > 0:
-                    contributions.append((round_whole(value / divisor), meal_name))
+                    contributions.append(
+                        (round_whole(value / divisor), meal_name, weight)
+                    )
         # contributions.sort(key=lambda item: item[0], reverse=True)
         rows = [
-            f"<li>{html.escape(name)}  {emoji} {label} {value}</li>"
-            for value, name in contributions
+            f"<li>{html.escape(name)}, {round_whole(weight)} г  "
+            f"{emoji} {label} {value}</li>"
+            for value, name, weight in contributions
             if value > 0
         ]
         body = f"<ul>{''.join(rows)}</ul>" if rows else "<p>Немає внесків</p>"
