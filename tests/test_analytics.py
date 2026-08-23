@@ -79,21 +79,28 @@ def test_store_sums_llm_usage_and_requires_pricing_for_every_event(tmp_path) -> 
 def test_store_tracks_daily_total_message_ids_durably_by_chat(tmp_path) -> None:
     path = tmp_path / "statistics.sqlite3"
     store = AnalyticsStore(path)
+    store.record_daily_total_message(10, 90, NOW - timedelta(days=1))
     store.record_daily_total_message(10, 100, NOW - timedelta(minutes=3))
     store.record_daily_total_message(10, 105, NOW - timedelta(minutes=2))
     store.record_daily_total_message(10, 105, NOW - timedelta(minutes=1))
     store.record_daily_total_message(20, 110, NOW)
 
     reopened = AnalyticsStore(path)
+    period_start = NOW - timedelta(hours=1)
+    period_end = NOW + timedelta(hours=1)
 
-    assert reopened.daily_total_message_ids_after(10, 100) == (105,)
-    assert reopened.daily_total_message_ids_after(10, 0) == (100, 105)
-    assert reopened.daily_total_message_ids_after(20, 0) == (110,)
+    assert reopened.daily_total_message_ids_between(10, period_start, period_end) == (
+        100,
+        105,
+    )
+    assert reopened.daily_total_message_ids_between(20, period_start, period_end) == (
+        110,
+    )
 
     reopened.forget_daily_total_messages(10, (105,))
 
-    assert store.daily_total_message_ids_after(10, 0) == (100,)
-    assert store.daily_total_message_ids_after(20, 0) == (110,)
+    assert store.daily_total_message_ids_between(10, period_start, period_end) == (100,)
+    assert store.daily_total_message_ids_between(20, period_start, period_end) == (110,)
 
 
 def test_cost_client_paginates_and_filters_by_project(monkeypatch) -> None:

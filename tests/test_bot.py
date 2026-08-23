@@ -592,6 +592,77 @@ def test_handler_remembers_the_separate_daily_total_message() -> None:
     assert statistics.recorded == [(123, 502, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
 
+def test_meal_reply_replaces_previous_summary_from_same_accounting_day() -> None:
+    period = (
+        datetime(2026, 8, 2, 4, 30, tzinfo=TZ),
+        datetime(2026, 8, 3, 4, 30, tzinfo=TZ),
+    )
+
+    class Service:
+        def accounting_day_bounds(self, day):
+            assert day == date(2026, 8, 2)
+            return period
+
+    class Statistics:
+        def __init__(self):
+            self.periods = []
+            self.forgotten = []
+            self.recorded = []
+
+        def daily_total_message_ids_between(self, *args):
+            self.periods.append(args)
+            return (480, 490)
+
+        def forget_daily_total_messages(self, *args):
+            self.forgotten.append(args)
+
+        def record_daily_total_message(self, *args):
+            self.recorded.append(args)
+
+    class Bot:
+        def __init__(self):
+            self.sent = 0
+            self.deleted = []
+
+        async def do_api_request(self, endpoint, **kwargs):
+            del endpoint, kwargs
+            self.sent += 1
+            return SimpleNamespace(
+                chat_id=123,
+                message_id=500 + self.sent,
+                date=datetime(2026, 8, 2, 9, tzinfo=UTC),
+            )
+
+        async def delete_messages(self, **kwargs):
+            self.deleted.append(kwargs)
+            return True
+
+    statistics = Statistics()
+    handlers = TelegramHandlers(999, FakeManager(), statistics=statistics)
+    _, message = make_update()
+    bot = Bot()
+    result = MealReply(
+        "Сир",
+        42,
+        date(2026, 8, 2),
+        daily_total_text="<h3>За сьогодні:</h3>",
+    )
+
+    asyncio.run(
+        handlers._send_meal_replies(
+            message,
+            result,
+            SimpleNamespace(bot=bot),
+            Service(),
+        )
+    )
+
+    assert statistics.periods == [(123, *period)]
+    assert bot.deleted == [{"chat_id": 123, "message_ids": (480, 490)}]
+    assert statistics.forgotten == [(123, (480, 490))]
+    assert statistics.recorded == [(123, 502, datetime(2026, 8, 2, 9, tzinfo=UTC))]
+
+
 def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> None:
     class BlockingAnalyzer(FakeAnalyzer):
         def __init__(self) -> None:
@@ -1443,9 +1514,7 @@ def test_service_keeps_photo_outside_storage(tmp_path) -> None:
     assert photo.exists()
 
 
-def test_service_formats_deletion_confirmation_and_updated_daily_total(
-    tmp_path,
-) -> None:
+def test_service_formats_deletion_confirmation(tmp_path) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     service = CaloriesService(
         FakeAnalyzer(food_analysis()),
@@ -1459,23 +1528,27 @@ def test_service_formats_deletion_confirmation_and_updated_daily_total(
     deleted = service.format_deletion_reply(
         MealDeletion(date(2026, 8, 2), 905, None, True, "сир <міцний>")
     )
-    daily_total = service.format_deletion_daily_total(
-        MealDeletion(date(2026, 8, 2), 905, None, True, "сир")
-    )
     repeated = service.format_deletion_reply(
         MealDeletion(date(2026, 8, 2), 905, None, False)
     )
 
     assert deleted == "Видалено Сир &lt;міцний&gt;"
-    assert daily_total == (
-        "Оновлено після видалення\n"
-        "🔥 К <b><u>905</u></b> / 1500 → −595 кк\n"
-        "<code>███████░░░░░│░░░</code>\n"
-        "🥩 Б <b><u>—</u></b> г\n"
-        "🥑 Ж <b><u>—</u></b> г\n"
-        "🍞 В <b><u>—</u></b> г"
-    )
     assert repeated == "Цей запис уже видалено"
+
+
+def test_service_uses_personal_day_start_for_summary_cleanup_bounds(tmp_path) -> None:
+    service = CaloriesService(
+        FakeAnalyzer(food_analysis()),
+        FakeStore(SheetState(today_total=0, existing=None)),
+        TZ,
+        time(4, 30),
+        tmp_path / "photos",
+    )
+
+    assert service.accounting_day_bounds(date(2026, 8, 2)) == (
+        datetime(2026, 8, 2, 4, 30, tzinfo=TZ),
+        datetime(2026, 8, 3, 4, 30, tzinfo=TZ),
+    )
 
 
 def test_google_write_failure_is_propagated_without_changing_state(tmp_path) -> None:
@@ -1885,9 +1958,29 @@ def test_day_handler_passes_telegram_message_date() -> None:
             self.timestamp = timestamp
             return rich_reply
 
+        def accounting_day(self, timestamp):
+            assert timestamp == self.timestamp
+            return date(2026, 8, 2)
+
+        def accounting_day_bounds(self, day):
+            assert day == date(2026, 8, 2)
+            return (
+                datetime(2026, 8, 2, 1, tzinfo=TZ),
+                datetime(2026, 8, 3, 1, tzinfo=TZ),
+            )
+
     class Statistics:
         def __init__(self):
             self.recorded = []
+            self.periods = []
+            self.forgotten = []
+
+        def daily_total_message_ids_between(self, *args):
+            self.periods.append(args)
+            return (590,)
+
+        def forget_daily_total_messages(self, *args):
+            self.forgotten.append(args)
 
         def record_daily_total_message(self, *args):
             self.recorded.append(args)
@@ -1917,10 +2010,15 @@ def test_day_handler_passes_telegram_message_date() -> None:
     class Bot:
         def __init__(self):
             self.calls = []
+            self.deleted = []
 
         async def do_api_request(self, endpoint, **kwargs):
             self.calls.append((endpoint, kwargs))
             return SentMessage(rich_reply)
+
+        async def delete_messages(self, **kwargs):
+            self.deleted.append(kwargs)
+            return True
 
     bot = Bot()
     asyncio.run(handlers.day(update, SimpleNamespace(bot=bot)))
@@ -1939,6 +2037,15 @@ def test_day_handler_passes_telegram_message_date() -> None:
             },
         )
     ]
+    assert statistics.periods == [
+        (
+            123,
+            datetime(2026, 8, 2, 1, tzinfo=TZ),
+            datetime(2026, 8, 3, 1, tzinfo=TZ),
+        )
+    ]
+    assert bot.deleted == [{"chat_id": 123, "message_ids": (590,)}]
+    assert statistics.forgotten == [(123, (590,))]
     assert statistics.recorded == [(123, 600, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
 
@@ -2361,6 +2468,8 @@ def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
 
 
 def test_delete_callback_cleans_stale_totals_and_sends_updated_total() -> None:
+    rich_summary = "<h3>За сьогодні:</h3><details><summary>905 кк</summary></details>"
+
     class FakeService:
         def __init__(self):
             self.args = None
@@ -2373,18 +2482,29 @@ def test_delete_callback_cleans_stale_totals_and_sends_updated_total() -> None:
             assert deletion.deleted is True
             return "Видалено Сир"
 
-        def format_deletion_daily_total(self, deletion):
-            assert deletion.day_total == 905
-            return "Оновлено після видалення\nЗа день: 905 кк"
+        def get_day_summary(self, timestamp):
+            assert timestamp.tzinfo == UTC
+            return rich_summary
+
+        def accounting_day(self, timestamp):
+            assert timestamp.tzinfo == UTC
+            return date(2026, 8, 2)
+
+        def accounting_day_bounds(self, day):
+            assert day == date(2026, 8, 2)
+            return (
+                datetime(2026, 8, 2, 1, tzinfo=TZ),
+                datetime(2026, 8, 3, 1, tzinfo=TZ),
+            )
 
     class Statistics:
         def __init__(self):
-            self.after_calls = []
+            self.period_calls = []
             self.forgotten = []
             self.recorded = []
 
-        def daily_total_message_ids_after(self, *args):
-            self.after_calls.append(args)
+        def daily_total_message_ids_between(self, *args):
+            self.period_calls.append(args)
             return (701, 705)
 
         def forget_daily_total_messages(self, *args):
@@ -2396,16 +2516,16 @@ def test_delete_callback_cleans_stale_totals_and_sends_updated_total() -> None:
     class Bot:
         def __init__(self):
             self.deleted = []
-            self.sent = []
+            self.calls = []
 
         async def delete_messages(self, **kwargs):
             self.deleted.append(kwargs)
             return True
 
-        async def send_message(self, **kwargs):
-            self.sent.append(kwargs)
+        async def do_api_request(self, endpoint, **kwargs):
+            self.calls.append((endpoint, kwargs))
             return SimpleNamespace(
-                chat_id=kwargs["chat_id"],
+                chat_id=kwargs["api_kwargs"]["chat_id"],
                 message_id=710,
                 date=datetime(2026, 8, 2, 9, tzinfo=UTC),
             )
@@ -2431,15 +2551,26 @@ def test_delete_callback_cleans_stale_totals_and_sends_updated_total() -> None:
             {"parse_mode": ParseMode.HTML, "reply_markup": None},
         )
     ]
-    assert statistics.after_calls == [(123, 700)]
+    assert statistics.period_calls == [
+        (
+            123,
+            datetime(2026, 8, 2, 1, tzinfo=TZ),
+            datetime(2026, 8, 3, 1, tzinfo=TZ),
+        )
+    ]
     assert bot.deleted == [{"chat_id": 123, "message_ids": (701, 705)}]
     assert statistics.forgotten == [(123, (701, 705))]
-    assert bot.sent == [
-        {
-            "chat_id": 123,
-            "text": "Оновлено після видалення\nЗа день: 905 кк",
-            "parse_mode": ParseMode.HTML,
-        }
+    assert bot.calls == [
+        (
+            "sendRichMessage",
+            {
+                "api_kwargs": {
+                    "chat_id": 123,
+                    "rich_message": {"html": rich_summary},
+                },
+                "return_type": bot_module.Message,
+            },
+        )
     ]
     assert statistics.recorded == [(123, 710, datetime(2026, 8, 2, 9, tzinfo=UTC))]
 
@@ -2486,6 +2617,58 @@ def test_recent_add_callback_uses_weight_printed_on_button() -> None:
     assert service.args[0:3] == (42, date(2026, 8, 2), 175)
     assert service.args[3] < 0
     assert query.answers == [("Додано", {})]
+
+
+@pytest.mark.parametrize(
+    ("callback_data", "service_method"),
+    [
+        ("saved-add:meal1:350", "add_saved_meal"),
+        ("recent-add:42:2026-08-02:175", "add_recent_meal"),
+    ],
+)
+def test_selecting_saved_or_recent_meal_deletes_the_used_menu(
+    callback_data, service_method
+) -> None:
+    class Service:
+        def add_saved_meal(self, *args):
+            return MealReply("Додано", args[2], date(2026, 8, 2))
+
+        def add_recent_meal(self, *args):
+            return MealReply("Додано", args[3], date(2026, 8, 2))
+
+    class MenuMessage:
+        chat_id = 123
+        message_id = 600
+
+        def __init__(self):
+            self.deleted = False
+            self.replies = []
+
+        async def delete(self):
+            self.deleted = True
+
+        async def reply_text(self, text, **kwargs):
+            self.replies.append((text, kwargs))
+
+    service = Service()
+    assert callable(getattr(service, service_method))
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, query = make_callback_update(callback_data)
+    menu = MenuMessage()
+    query.message = menu
+
+    asyncio.run(
+        handlers.library_callback(
+            update,
+            SimpleNamespace(user_data={}),
+            show_status=False,
+        )
+    )
+
+    assert menu.deleted is True
+    assert [reply[0] for reply in menu.replies] == ["Додано"]
+    assert query.answers == [("Додано", {})]
+    assert query.markup_edits == []
 
 
 def test_save_callback_hides_save_button_but_keeps_delete() -> None:
@@ -2996,7 +3179,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.8.2"]
+    assert admin_message.replies == ["Версія: 1.9.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -3025,7 +3208,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.8.2\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.9.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

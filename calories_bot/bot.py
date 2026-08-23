@@ -1026,6 +1026,19 @@ class CaloriesService:
             self._day_start_time,
         )
 
+    def accounting_day(self, timestamp: datetime) -> date:
+        return self._accounting_day(timestamp)
+
+    def accounting_day_bounds(self, day: date) -> tuple[datetime, datetime]:
+        return (
+            datetime.combine(day, self._day_start_time, tzinfo=self._timezone),
+            datetime.combine(
+                day + timedelta(days=1),
+                self._day_start_time,
+                tzinfo=self._timezone,
+            ),
+        )
+
     def set_daily_kcal_goal(self, goal: int | None) -> None:
         with self._store_lock:
             self._daily_kcal_goal = goal
@@ -1654,17 +1667,6 @@ class CaloriesService:
         display_name = meal_name[:1].upper() + meal_name[1:]
         return f"Видалено {html.escape(display_name)}"
 
-    def format_deletion_daily_total(self, deletion: MealDeletion) -> str:
-        nutrition = _nutrition_for_day(
-            deletion.day_nutrition
-            or NutritionSummary.unknown_macros(deletion.day_total),
-            deletion.accounting_day,
-        )
-        daily_total = format_daily_total(
-            nutrition, self._daily_kcal_goal, self._daily_protein_goal
-        )
-        return f"Оновлено після видалення\n{daily_total}"
-
     def _delete_photo(self, photo_path: str) -> None:
         try:
             candidate = Path(photo_path).resolve()
@@ -2226,7 +2228,12 @@ class TelegramHandlers:
             else:
                 sent = await message.reply_text(reply, do_quote=False)
             if is_rich_day and sent is not None:
-                await self._remember_daily_total_message(sent)
+                accounting_day = await asyncio.to_thread(
+                    service.accounting_day, message.date
+                )
+                await self._replace_daily_total_message(
+                    context.bot, sent, service, accounting_day
+                )
 
     async def weekly_calories(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2675,27 +2682,28 @@ class TelegramHandlers:
         except Exception:
             LOGGER.warning("Could not edit deletion confirmation", exc_info=True)
         message = query.message
-        source_message_id = getattr(message, "message_id", None)
         chat_id = getattr(message, "chat_id", None)
         if not isinstance(chat_id, int) and update.effective_chat is not None:
             chat_id = update.effective_chat.id
-        if isinstance(chat_id, int) and isinstance(source_message_id, int):
-            await self._delete_daily_totals_after(
-                context.bot, chat_id, source_message_id
-            )
         if not isinstance(chat_id, int):
             LOGGER.warning("Could not send updated daily total without a chat ID")
             return
         try:
-            daily_total = await asyncio.to_thread(
-                service.format_deletion_daily_total, deletion
+            summary_timestamp = datetime.now(UTC)
+            daily_total, accounting_day = await asyncio.gather(
+                asyncio.to_thread(service.get_day_summary, summary_timestamp),
+                asyncio.to_thread(service.accounting_day, summary_timestamp),
             )
-            sent = await context.bot.send_message(
-                chat_id=chat_id,
-                text=daily_total,
-                parse_mode=ParseMode.HTML,
+            sent = await self._send_rich_html(
+                cast(Message, message),
+                context,
+                daily_total,
+                operation="daily summary after deletion",
             )
-            await self._remember_daily_total_message(sent)
+            if sent is not None:
+                await self._replace_daily_total_message(
+                    context.bot, sent, service, accounting_day
+                )
         except Exception:
             LOGGER.warning(
                 "Could not send the updated daily total after deletion",
@@ -2994,8 +3002,11 @@ class TelegramHandlers:
                 if result is None:
                     raise LookupError
                 await query.answer("Додано")
-                if isinstance(query.message, Message):
-                    await self._send_meal_replies(query.message, result, context)
+                if query.message is not None:
+                    await self._delete_selected_meal_menu(query)
+                    await self._send_meal_replies(
+                        cast(Message, query.message), result, context, service
+                    )
                 return
             if data.startswith("recent-add:"):
                 message_id_raw, day_raw, weight_raw = data.removeprefix(
@@ -3014,8 +3025,11 @@ class TelegramHandlers:
                 if result is None:
                     raise LookupError
                 await query.answer("Додано")
-                if isinstance(query.message, Message):
-                    await self._send_meal_replies(query.message, result, context)
+                if query.message is not None:
+                    await self._delete_selected_meal_menu(query)
+                    await self._send_meal_replies(
+                        cast(Message, query.message), result, context, service
+                    )
                 return
             if data.startswith("manage-delete:"):
                 saved_id = data.split(":", maxsplit=1)[1]
@@ -3130,7 +3144,7 @@ class TelegramHandlers:
             )
             if result is None:
                 raise LookupError
-            await self._send_meal_replies(message, result, context)
+            await self._send_meal_replies(message, result, context, service)
             self._clear_pending_input(context)
             try:
                 await context.bot.edit_message_text(
@@ -3264,7 +3278,7 @@ class TelegramHandlers:
             await message.reply_text(READ_ERROR_TEXT, do_quote=False)
             return
         if existing is not None:
-            await self._send_meal_replies(message, existing, context)
+            await self._send_meal_replies(message, existing, context, service)
             return
         async with self._temporary_status(message, llm=True):
             try:
@@ -3303,7 +3317,7 @@ class TelegramHandlers:
             await message.reply_text(READ_ERROR_TEXT, do_quote=False)
             return
         if existing is not None:
-            await self._send_meal_replies(message, existing, context)
+            await self._send_meal_replies(message, existing, context, service)
             return
         async with self._temporary_status(message, llm=True):
             try:
@@ -3374,27 +3388,53 @@ class TelegramHandlers:
         message: Message,
         result: MealReply | list[MealReply],
         context: ContextTypes.DEFAULT_TYPE | object | None = None,
+        service: CaloriesService | None = None,
     ) -> None:
         replies = result if isinstance(result, list) else [result]
         for reply in replies:
             await self._send_meal_reply(message, reply, context)
-        daily_total_text = next(
+        daily_total_reply = next(
             (
-                reply.daily_total_text
+                reply
                 for reply in reversed(replies)
                 if reply.daily_total_text is not None
             ),
             None,
         )
-        if daily_total_text is not None:
+        if daily_total_reply is not None:
             sent = await self._send_rich_html(
                 message,
                 context,
-                daily_total_text,
+                cast(str, daily_total_reply.daily_total_text),
                 operation="daily summary after meal",
             )
             if sent is not None:
-                await self._remember_daily_total_message(sent)
+                bot = getattr(context, "bot", None)
+                if service is not None and bot is not None:
+                    await self._replace_daily_total_message(
+                        bot, sent, service, daily_total_reply.accounting_day
+                    )
+                else:
+                    await self._remember_daily_total_message(sent)
+
+    @staticmethod
+    async def _delete_selected_meal_menu(query: object) -> None:
+        message = getattr(query, "message", None)
+        delete = getattr(message, "delete", None)
+        if callable(delete):
+            try:
+                await delete()
+                return
+            except Exception:
+                LOGGER.warning("Could not delete a used meal menu", exc_info=True)
+        try:
+            await query.edit_message_reply_markup(  # type: ignore[attr-defined]
+                reply_markup=None
+            )
+        except Exception:
+            LOGGER.warning(
+                "Could not remove buttons from a used meal menu", exc_info=True
+            )
 
     async def _remember_daily_total_message(self, message: Message) -> None:
         if self._statistics is None:
@@ -3409,16 +3449,36 @@ class TelegramHandlers:
         except Exception:
             LOGGER.warning("Could not remember a daily-total message", exc_info=True)
 
-    async def _delete_daily_totals_after(
-        self, bot: Bot, chat_id: int, telegram_message_id: int
+    async def _replace_daily_total_message(
+        self,
+        bot: Bot,
+        message: Message,
+        service: CaloriesService,
+        accounting_day: date,
+    ) -> None:
+        period_start, period_end = await asyncio.to_thread(
+            service.accounting_day_bounds, accounting_day
+        )
+        await self._delete_daily_totals_between(
+            bot, message.chat_id, period_start, period_end
+        )
+        await self._remember_daily_total_message(message)
+
+    async def _delete_daily_totals_between(
+        self,
+        bot: Bot,
+        chat_id: int,
+        period_start: datetime,
+        period_end: datetime,
     ) -> None:
         if self._statistics is None:
             return
         try:
             message_ids = await asyncio.to_thread(
-                self._statistics.daily_total_message_ids_after,
+                self._statistics.daily_total_message_ids_between,
                 chat_id,
-                telegram_message_id,
+                period_start,
+                period_end,
             )
         except Exception:
             LOGGER.warning("Could not read daily-total messages", exc_info=True)
@@ -3516,7 +3576,7 @@ class TelegramHandlers:
             LOGGER.exception("Unexpected error while handling a Telegram message")
             reply = ANALYSIS_ERROR_TEXT
         else:
-            await self._send_meal_replies(message, result, context)
+            await self._send_meal_replies(message, result, context, service)
             return
         await message.reply_text(reply, do_quote=False)
 

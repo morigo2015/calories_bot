@@ -180,19 +180,24 @@ class AnalyticsStore:
                 "Could not record a Telegram daily-total message"
             ) from exc
 
-    def daily_total_message_ids_after(
-        self, chat_id: int, telegram_message_id: int
+    def daily_total_message_ids_between(
+        self,
+        chat_id: int,
+        period_start: datetime,
+        period_end: datetime,
     ) -> tuple[int, ...]:
+        if _as_utc(period_end) <= _as_utc(period_start):
+            raise ValueError("Daily-total period end must be after its start")
         try:
             with self._connect() as connection:
                 rows = connection.execute(
                     """
                     SELECT telegram_message_id
                     FROM daily_total_messages
-                    WHERE chat_id = ? AND telegram_message_id > ?
+                    WHERE chat_id = ? AND sent_at >= ? AND sent_at < ?
                     ORDER BY telegram_message_id
                     """,
-                    (chat_id, telegram_message_id),
+                    (chat_id, _utc_iso(period_start), _utc_iso(period_end)),
                 ).fetchall()
         except sqlite3.Error as exc:
             raise AnalyticsError(
@@ -403,10 +408,15 @@ class BotStatistics:
     ) -> None:
         self._store.record_daily_total_message(chat_id, telegram_message_id, sent_at)
 
-    def daily_total_message_ids_after(
-        self, chat_id: int, telegram_message_id: int
+    def daily_total_message_ids_between(
+        self,
+        chat_id: int,
+        period_start: datetime,
+        period_end: datetime,
     ) -> tuple[int, ...]:
-        return self._store.daily_total_message_ids_after(chat_id, telegram_message_id)
+        return self._store.daily_total_message_ids_between(
+            chat_id, period_start, period_end
+        )
 
     def forget_daily_total_messages(
         self, chat_id: int, telegram_message_ids: Sequence[int]
