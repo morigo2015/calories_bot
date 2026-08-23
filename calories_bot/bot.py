@@ -117,6 +117,7 @@ LLM_OPERATION_TEXT = "⏳ Хвилинку, спілкуюсь з AI. . ."
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
+DAY_VIEW_CALLBACK_PREFIX = "day-view:"
 ADMIN_DELETE_CALLBACK_PREFIX = "admin-delete:"
 ADMIN_CANCEL_CALLBACK_PREFIX = "admin-cancel:"
 GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
@@ -913,6 +914,7 @@ def format_day_reply(
     daily_protein_goal: int | None = None,
     *,
     accounting_day: date | None = None,
+    is_today: bool = True,
 ) -> str:
     meal_nutrients = [
         (
@@ -984,7 +986,13 @@ def format_day_reply(
             )
         body = f"<ul>{''.join(details)}</ul>" if details else "<p>Немає внесків</p>"
         blocks.append(f"<details><summary>{summary_line}</summary>{body}</details>")
-    return "<h3>За сьогодні:</h3>" + "".join(blocks)
+    if accounting_day is None:
+        heading = "За сьогодні"
+    elif not is_today:
+        heading = f"За день ({accounting_day:%d.%m})"
+    else:
+        heading = f"За сьогодні ({accounting_day:%d.%m})"
+    return f"<h3>{heading}:</h3>" + "".join(blocks)
 
 
 class CaloriesService:
@@ -1052,12 +1060,20 @@ class CaloriesService:
         with self._store_lock:
             return self._format_day_summary(day)
 
-    def _format_day_summary(self, day: date) -> str:
+    def get_day_summary_for(self, day: date, timestamp: datetime) -> str:
+        current_day = self._accounting_day(timestamp)
+        if day > current_day:
+            raise ValueError("Cannot show a future accounting day")
+        with self._store_lock:
+            return self._format_day_summary(day, is_today=day == current_day)
+
+    def _format_day_summary(self, day: date, *, is_today: bool = True) -> str:
         return format_day_reply(
             self._store.get_day_meals(day),
             self._daily_kcal_goal,
             self._daily_protein_goal,
             accounting_day=day,
+            is_today=is_today,
         )
 
     def get_weekly_calories(
@@ -1945,6 +1961,63 @@ class TelegramHandlers:
             do_quote=False,
         )
 
+    @staticmethod
+    async def _edit_rich_html(
+        query: object,
+        context: ContextTypes.DEFAULT_TYPE | object | None,
+        rich_html: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> None:
+        bot = getattr(context, "bot", None)
+        message = getattr(query, "message", None)
+        chat_id = getattr(message, "chat_id", None)
+        message_id = getattr(message, "message_id", None)
+        if bot is not None and isinstance(chat_id, int) and isinstance(message_id, int):
+            try:
+                await bot.do_api_request(
+                    "editMessageText",
+                    api_kwargs={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "rich_message": {"html": rich_html},
+                        "reply_markup": reply_markup.to_dict(),
+                    },
+                    return_type=Message,
+                )
+                return
+            except Exception:
+                LOGGER.exception("Could not edit rich daily summary")
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            _rich_html_fallback(rich_html),
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+
+    @staticmethod
+    def _day_navigation_markup(
+        selected_day: date, current_day: date
+    ) -> InlineKeyboardMarkup:
+        buttons = [
+            InlineKeyboardButton(
+                "⬅️ Попередній",
+                callback_data=(
+                    f"{DAY_VIEW_CALLBACK_PREFIX}"
+                    f"{(selected_day - timedelta(days=1)).isoformat()}"
+                ),
+            )
+        ]
+        if selected_day < current_day:
+            buttons.append(
+                InlineKeyboardButton(
+                    "Наступний ➡️",
+                    callback_data=(
+                        f"{DAY_VIEW_CALLBACK_PREFIX}"
+                        f"{(selected_day + timedelta(days=1)).isoformat()}"
+                    ),
+                )
+            )
+        return InlineKeyboardMarkup([buttons])
+
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2217,23 +2290,77 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Unexpected error while handling /day")
                 reply = READ_ERROR_TEXT
-            is_rich_day = reply.startswith(("<h3>За сьогодні:</h3>", "<details>"))
+            is_rich_day = reply.startswith(("<h3>", "<details>"))
             if is_rich_day:
+                accounting_day = await asyncio.to_thread(
+                    service.accounting_day, message.date
+                )
                 sent = await self._send_rich_html(
                     message,
                     context,
                     reply,
+                    reply_markup=self._day_navigation_markup(
+                        accounting_day, accounting_day
+                    ),
                     operation="/day summary",
                 )
             else:
                 sent = await message.reply_text(reply, do_quote=False)
             if is_rich_day and sent is not None:
-                accounting_day = await asyncio.to_thread(
-                    service.accounting_day, message.date
-                )
                 await self._replace_daily_total_message(
                     context.bot, sent, service, accounting_day
                 )
+
+    async def day_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        try:
+            callback_data = query.data or ""
+            if not callback_data.startswith(DAY_VIEW_CALLBACK_PREFIX):
+                raise ValueError
+            selected_day = date.fromisoformat(
+                callback_data.removeprefix(DAY_VIEW_CALLBACK_PREFIX)
+            )
+        except ValueError:
+            await query.answer("Некоректна кнопка.", show_alert=True)
+            return
+
+        now = datetime.now(UTC)
+        try:
+            current_day = await asyncio.to_thread(service.accounting_day, now)
+            reply = await asyncio.to_thread(
+                service.get_day_summary_for, selected_day, now
+            )
+        except ValueError:
+            await query.answer("Майбутній день ще недоступний.", show_alert=True)
+            return
+        except SheetsReadError:
+            LOGGER.exception("Could not read the calorie log for day navigation")
+            await query.answer(READ_ERROR_TEXT, show_alert=True)
+            return
+        except Exception:
+            LOGGER.exception("Unexpected error while navigating daily summaries")
+            await query.answer(READ_ERROR_TEXT, show_alert=True)
+            return
+
+        try:
+            await self._edit_rich_html(
+                query,
+                context,
+                reply,
+                self._day_navigation_markup(selected_day, current_day),
+            )
+        except Exception:
+            LOGGER.exception("Could not edit the daily summary")
+            await query.answer(READ_ERROR_TEXT, show_alert=True)
+            return
+        await query.answer()
 
     async def weekly_calories(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

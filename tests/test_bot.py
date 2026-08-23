@@ -219,11 +219,12 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
                 meal_kcal=460,
                 total_weight_g=400,
             ),
-        ]
+        ],
+        accounting_day=date(2026, 8, 23),
     )
 
     assert reply == (
-        "<h3>За сьогодні:</h3>"
+        "<h3>За сьогодні (23.08):</h3>"
         "<details><summary>🔥 К <b><u>810</u></b> кк</summary>"
         "<ul><li>курка з рисом, 400 г  🔥 К 460</li>"
         "<li>вівсянка з бананом, 300 г ×2  🔥 К 350</li></ul></details>"
@@ -396,6 +397,7 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 0, 30, tzinfo=TZ))
 
     assert store.day.isoformat() == "2026-08-01"
+    assert reply.startswith("<h3>За сьогодні (01.08):</h3>")
     assert "<summary>🔥 К <b><u>60</u></b> кк</summary>" in reply
     assert "<li>сир  🔥 К 60</li>" in reply
 
@@ -2032,6 +2034,16 @@ def test_day_handler_passes_telegram_message_date() -> None:
                 "api_kwargs": {
                     "chat_id": 123,
                     "rich_message": {"html": rich_reply},
+                    "reply_markup": {
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "callback_data": "day-view:2026-08-01",
+                                    "text": "⬅️ Попередній",
+                                }
+                            ]
+                        ]
+                    },
                 },
                 "return_type": bot_module.Message,
             },
@@ -2047,6 +2059,79 @@ def test_day_handler_passes_telegram_message_date() -> None:
     assert bot.deleted == [{"chat_id": 123, "message_ids": (590,)}]
     assert statistics.forgotten == [(123, (590,))]
     assert statistics.recorded == [(123, 600, datetime(2026, 8, 2, 9, tzinfo=UTC))]
+
+
+def test_service_formats_selected_historical_day(tmp_path) -> None:
+    store = FakeStore(
+        SheetState(today_total=0, existing=None),
+        [DayMeal(meal_name="сир", meal_kcal=60)],
+    )
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    reply = service.get_day_summary_for(
+        date(2026, 8, 1), datetime(2026, 8, 2, 12, tzinfo=TZ)
+    )
+
+    assert store.day == date(2026, 8, 1)
+    assert reply.startswith("<h3>За день (01.08):</h3>")
+
+
+def test_day_navigation_edits_rich_summary_and_hides_next_for_today() -> None:
+    class FakeService:
+        def accounting_day(self, timestamp):
+            assert timestamp.tzinfo == UTC
+            return date(2026, 8, 23)
+
+        def get_day_summary_for(self, selected_day, timestamp):
+            assert selected_day == date(2026, 8, 23)
+            assert timestamp.tzinfo == UTC
+            return "<h3>За сьогодні (23.08):</h3><details></details>"
+
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: FakeService()})
+    )
+    update, query = make_callback_update("day-view:2026-08-23")
+    query.message = SimpleNamespace(chat_id=123, message_id=456)
+
+    class Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def do_api_request(self, endpoint, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return SimpleNamespace()
+
+    bot = Bot()
+    asyncio.run(handlers.day_callback(update, SimpleNamespace(bot=bot)))
+
+    assert query.answers == [(None, {})]
+    assert bot.calls[0][0] == "editMessageText"
+    api_kwargs = bot.calls[0][1]["api_kwargs"]
+    assert api_kwargs["rich_message"] == {
+        "html": "<h3>За сьогодні (23.08):</h3><details></details>"
+    }
+    assert api_kwargs["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "callback_data": "day-view:2026-08-22",
+                    "text": "⬅️ Попередній",
+                }
+            ]
+        ]
+    }
+
+
+def test_day_navigation_shows_previous_and_next_for_historical_day() -> None:
+    markup = TelegramHandlers._day_navigation_markup(
+        date(2026, 8, 22), date(2026, 8, 23)
+    )
+
+    buttons = markup.inline_keyboard[0]
+    assert [(button.text, button.callback_data) for button in buttons] == [
+        ("⬅️ Попередній", "day-view:2026-08-21"),
+        ("Наступний ➡️", "day-view:2026-08-23"),
+    ]
 
 
 def test_day_handler_maps_read_error_to_user_message() -> None:

@@ -37,7 +37,7 @@ async def configure_bot_commands(
     user_commands = [
         BotCommand("meals", "⭐ збережені страви"),
         BotCommand("recent", "🕘 нещодавні страви"),
-        BotCommand("day", "📅 Сьогодні"),
+        BotCommand("day", "📅 За день"),
         BotCommand("week", "📊 За тиждень"),
         BotCommand("goal", "🎯 ціль по калоріям"),
         BotCommand("protein_goal", "🥩 ціль по білку"),
@@ -252,6 +252,11 @@ def main() -> None:
     )
     application.add_handler(
         MessageHandler(message_update & filters.COMMAND, handlers.cancel_pending_input)
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.day_callback, pattern=r"^day-view:\d{4}-\d{2}-\d{2}$"
+        )
     )
     application.add_handler(
         CallbackQueryHandler(
