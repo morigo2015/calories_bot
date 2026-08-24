@@ -103,6 +103,7 @@ class DayMeal:
     meal_kcal: float
     nutrition: NutritionSummary | None = None
     total_weight_g: float | None = None
+    recorded_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +268,20 @@ def _meal_from_row(row: list[object]) -> StoredMeal:
         meal=round_meal_nutrition(meal),
         metadata=metadata,
         photo_path=str(padded[PHOTO_PATH_COLUMN]) or None,
+    )
+
+
+def _persisted_meals_equal(left: MealResult, right: MealResult) -> bool:
+    """Compare only fields represented directly in the worksheet row."""
+
+    return (
+        left.meal_name == right.meal_name
+        and left.total_weight_g == right.total_weight_g
+        and left.meal_kcal == right.meal_kcal
+        and left.kcal_per_100g == right.kcal_per_100g
+        and left.estimated == right.estimated
+        and [item.model_dump() for item in left.items]
+        == [item.model_dump() for item in right.items]
     )
 
 
@@ -617,7 +632,7 @@ class GoogleSheetsStore:
                 raise SheetsWriteUncertainError(
                     "Could not verify whether Google Sheets updated the row"
                 ) from verify_error
-            if verified is None or verified.meal != meal:
+            if verified is None or not _persisted_meals_equal(verified.meal, meal):
                 raise SheetsWriteError(
                     "Google Sheets did not update the row"
                 ) from update_error
@@ -630,7 +645,7 @@ class GoogleSheetsStore:
                 raise SheetsWriteUncertainError(
                     "The row was updated but could not be verified"
                 ) from verify_error
-            if verified is None or verified.meal != meal:
+            if verified is None or not _persisted_meals_equal(verified.meal, meal):
                 raise SheetsWriteError("Updated meal did not match the requested meal")
         return MealUpdate(
             accounting_day=accounting_day,
@@ -657,10 +672,19 @@ class GoogleSheetsStore:
                             meal_kcal=float(str(row[MEAL_KCAL_COLUMN])),
                             nutrition=nutrition_summary(_meal_from_row(row).meal),
                             total_weight_g=float(str(row[TOTAL_WEIGHT_COLUMN])),
+                            recorded_at=_datetime_from_sheet_serial(
+                                row[TIMESTAMP_COLUMN], self._timezone
+                            ),
                         )
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     LOGGER.warning("Skipping malformed Google Sheets row: %r", row)
+            meals.sort(
+                key=lambda meal: (
+                    meal.recorded_at or datetime.min.replace(tzinfo=self._timezone)
+                ),
+                reverse=True,
+            )
             return meals
         except Exception as exc:
             raise SheetsReadError("Could not read Google Sheets") from exc

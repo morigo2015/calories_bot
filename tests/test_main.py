@@ -46,6 +46,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         timezone=ZoneInfo("Europe/Kyiv"),
         default_day_start=time(1),
         meal_weight_presets=(50, 100, 150, 200),
+        nutrition_mismatch_threshold_percent=10,
     )
     monkeypatch.setattr(main_module.Settings, "from_env", lambda: settings)
 

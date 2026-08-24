@@ -44,6 +44,8 @@ from .models import (
     SavedMeal,
     StoredMeal,
     calculate_meal,
+    calorie_macro_mismatch_percent,
+    calories_from_macros,
     format_simple_meal_request,
     item_calorie_total_estimated,
     item_nutrient_total_estimated,
@@ -299,7 +301,7 @@ def _portion_includes_weight(portion: str, weight_g: float) -> bool:
 def _format_icon_value(value: float | None) -> str:
     if value is None or value <= 0:
         return "-"
-    return format(value, "g")
+    return str(round_whole(value))
 
 
 def _format_icon_nutrition(summary: NutritionSummary) -> str:
@@ -316,7 +318,7 @@ def _format_icon_nutrition(summary: NutritionSummary) -> str:
 
 def _format_daily_icon_nutrition(summary: NutritionSummary) -> str:
     def value(amount: float | None) -> str:
-        return "—" if amount is None else format(amount, "g")
+        return "—" if amount is None else str(round_whole(amount))
 
     separator = "&nbsp;&nbsp;&nbsp;"
     return separator.join(
@@ -329,7 +331,32 @@ def _format_daily_icon_nutrition(summary: NutritionSummary) -> str:
     )
 
 
-def _format_item_calculation(item: CalculatedFoodItem, *, heading_level: int) -> str:
+def _format_calorie_warning(item: CalculatedFoodItem, threshold_percent: float) -> str:
+    mismatch = calorie_macro_mismatch_percent(item)
+    if mismatch is None or mismatch <= threshold_percent:
+        return ""
+    calculated = calories_from_macros(item)
+    if calculated is None:
+        return ""
+    mismatch_text = (
+        f"{round_whole(mismatch)}%"
+        if mismatch != float("inf")
+        else f"понад {round_whole(threshold_percent)}%"
+    )
+    return (
+        "<p>⚠️ Ккал не збігаються з БЖВ: "
+        f"вказано {round_whole(item.kcal_per_100g)} кк, "
+        f"за формулою — {round_whole(calculated)} кк "
+        f"({mismatch_text}).</p>"
+    )
+
+
+def _format_item_calculation(
+    item: CalculatedFoodItem,
+    *,
+    heading_level: int,
+    mismatch_threshold_percent: float,
+) -> str:
     display_name = item.name[:1].upper() + item.name[1:]
     weight_prefix = "≈" if item.weight_origin != "user_text" else ""
     heading = html.escape(display_name)
@@ -345,6 +372,7 @@ def _format_item_calculation(item: CalculatedFoodItem, *, heading_level: int) ->
         f"<details><summary>{_format_icon_nutrition(_summary_for_item(item))}</summary>"
         f"<p><sub>На 100 г:</sub><br/>"
         f"{_format_icon_nutrition(_per_100g_summary(item))}</p></details>"
+        f"{_format_calorie_warning(item, mismatch_threshold_percent)}"
     )
 
 
@@ -382,16 +410,17 @@ def _format_progress_value(
     prefix = f"{emoji} {label}" if label else f"{emoji} "
     if value is None:
         return f"{prefix}<b><u>—</u></b> {unit}"
-    stored = format(value, "g")
+    visible_value = round_whole(value)
+    stored = str(visible_value)
     highlighted = f"<b><u>{stored}</u></b>"
     if goal is None:
         return f"{prefix}{highlighted} {unit}"
-    difference = value - goal
+    difference = visible_value - goal
     deviation = ""
     if difference > 0:
-        deviation = f" → +{format(difference, 'g')}"
+        deviation = f" → +{difference}"
     elif difference < 0:
-        deviation = f" → −{format(abs(difference), 'g')}"
+        deviation = f" → −{abs(difference)}"
     line = f"{prefix}{highlighted} / {goal}{deviation} {unit}"
     if include_bar:
         line += f"{bar_separator}<code>{_format_progress_bar(value, goal)}</code>"
@@ -464,11 +493,16 @@ def format_daily_total(
     )
 
 
-def format_reply(meal: MealResult) -> str:
+def format_reply(meal: MealResult, mismatch_threshold_percent: float = 10.0) -> str:
     if len(meal.items) > 1:
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
         calculations = [
-            _format_item_calculation(item, heading_level=4) for item in meal.items
+            _format_item_calculation(
+                item,
+                heading_level=4,
+                mismatch_threshold_percent=mismatch_threshold_percent,
+            )
+            for item in meal.items
         ]
         body = [
             f"<h3>{meal_name} {round_whole(meal.total_weight_g)} г</h3>",
@@ -476,7 +510,13 @@ def format_reply(meal: MealResult) -> str:
             *calculations,
         ]
     else:
-        body = [_format_item_calculation(meal.items[0], heading_level=3)]
+        body = [
+            _format_item_calculation(
+                meal.items[0],
+                heading_level=3,
+                mismatch_threshold_percent=mismatch_threshold_percent,
+            )
+        ]
     return "".join(body)
 
 
@@ -929,26 +969,6 @@ def format_day_reply(
         for meal in meals
     ]
     total = sum((nutrients for _, nutrients in meal_nutrients), NutritionSummary())
-    grouped: dict[str, tuple[str, NutritionSummary, int, float | None]] = {}
-    for meal, nutrients in meal_nutrients:
-        display_name = re.sub(r"\s+", " ", meal.meal_name).strip()
-        key = display_name.casefold()
-        if key in grouped:
-            original_name, current, count, current_weight = grouped[key]
-            total_weight = (
-                None
-                if current_weight is None or meal.total_weight_g is None
-                else current_weight + meal.total_weight_g
-            )
-            grouped[key] = (
-                original_name,
-                current + nutrients,
-                count + 1,
-                total_weight,
-            )
-        else:
-            grouped[key] = (display_name, nutrients, 1, meal.total_weight_g)
-
     specs = (
         ("kcal", "🔥", "К"),
         ("protein_g", "🥩", "Б"),
@@ -966,23 +986,22 @@ def format_day_reply(
     for summary_line, (attribute, emoji, label) in zip(
         summary_lines, specs, strict=True
     ):
-        contributions: list[tuple[float, str, int]] = []
-        for meal_name, nutrients, count, total_weight_g in grouped.values():
+        contributions: list[tuple[float, str]] = []
+        for meal, nutrients in meal_nutrients:
             value = getattr(nutrients, attribute)
             if value is not None and value > 0:
+                meal_name = re.sub(r"\s+", " ", meal.meal_name).strip()
                 weight_text = (
                     ""
-                    if total_weight_g is None
-                    else f", {round_whole(total_weight_g)} г"
+                    if meal.total_weight_g is None
+                    else f", {round_whole(meal.total_weight_g)} г"
                 )
-                contributions.append((value, f"{meal_name}{weight_text}", count))
-        contributions.sort(key=lambda item: item[0], reverse=True)
+                contributions.append((value, f"{meal_name}{weight_text}"))
         details = []
-        for value, meal_name, count in contributions:
-            count_suffix = f" ×{count}" if count > 1 else ""
+        for value, meal_name in contributions:
             details.append(
-                f"<li>{html.escape(meal_name)}{count_suffix}  "
-                f"{emoji} {label} {format(value, 'g')}</li>"
+                f"<li>{html.escape(meal_name)}  "
+                f"{emoji} {label} {round_whole(value)}</li>"
             )
         body = f"<ul>{''.join(details)}</ul>" if details else "<p>Немає внесків</p>"
         blocks.append(f"<details><summary>{summary_line}</summary>{body}</details>")
@@ -1006,6 +1025,7 @@ class CaloriesService:
         daily_kcal_goal: int | None = None,
         saved_store: SavedMealStore | None = None,
         daily_protein_goal: int | None = None,
+        nutrition_mismatch_threshold_percent: float = 10.0,
     ) -> None:
         self._analyzer = analyzer
         self._store = store
@@ -1015,6 +1035,9 @@ class CaloriesService:
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
         self._daily_kcal_goal = daily_kcal_goal
         self._daily_protein_goal = daily_protein_goal
+        self._nutrition_mismatch_threshold_percent = (
+            nutrition_mismatch_threshold_percent
+        )
         self._saved_store = saved_store
         # A message analysis can take long enough for a deletion callback to be
         # handled in between its first read and the eventual append.  Keep the
@@ -1242,7 +1265,9 @@ class CaloriesService:
             or marker.source_message_id != source_message_id
         ):
             return MealReply(
-                text=format_reply(first.meal),
+                text=format_reply(
+                    first.meal, self._nutrition_mismatch_threshold_percent
+                ),
                 telegram_message_id=source_message_id,
                 accounting_day=day,
                 can_change_weight=len(first.meal.items) == 1,
@@ -1255,7 +1280,9 @@ class CaloriesService:
         for index, (message_id, stored) in enumerate(components):
             replies.append(
                 MealReply(
-                    text=format_reply(stored.meal),
+                    text=format_reply(
+                        stored.meal, self._nutrition_mismatch_threshold_percent
+                    ),
                     telegram_message_id=message_id,
                     accounting_day=day,
                     daily_total_text=(
@@ -1391,7 +1418,9 @@ class CaloriesService:
             for index, (component_message_id, stored) in enumerate(stored_components):
                 replies.append(
                     MealReply(
-                        text=format_reply(stored.meal),
+                        text=format_reply(
+                            stored.meal, self._nutrition_mismatch_threshold_percent
+                        ),
                         telegram_message_id=component_message_id,
                         accounting_day=day,
                         daily_total_text=(
@@ -1559,7 +1588,7 @@ class CaloriesService:
                 stored = state.existing
             daily_summary = self._format_day_summary(day)
         return MealReply(
-            text=format_reply(stored.meal),
+            text=format_reply(stored.meal, self._nutrition_mismatch_threshold_percent),
             telegram_message_id=event_id,
             accounting_day=day,
             can_save=can_save,
@@ -1646,7 +1675,9 @@ class CaloriesService:
             )
             daily_summary = self._format_day_summary(updated.accounting_day)
         return MealReply(
-            text=format_reply(updated.meal.meal),
+            text=format_reply(
+                updated.meal.meal, self._nutrition_mismatch_threshold_percent
+            ),
             telegram_message_id=message_id,
             accounting_day=updated.accounting_day,
             can_save=can_save,
@@ -1719,6 +1750,7 @@ class UserManager:
         timezone: ZoneInfo,
         default_day_start: time,
         photo_storage_dir: Path,
+        nutrition_mismatch_threshold_percent: float = 10.0,
     ) -> None:
         self._analyzer = analyzer
         self._registry = registry
@@ -1726,6 +1758,9 @@ class UserManager:
         self._timezone = timezone
         self._default_day_start = default_day_start
         self._photo_storage_dir = photo_storage_dir.resolve()
+        self._nutrition_mismatch_threshold_percent = (
+            nutrition_mismatch_threshold_percent
+        )
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
         self._services: dict[tuple[int, str, time], CaloriesService] = {}
         self._lock = threading.RLock()
@@ -1775,6 +1810,7 @@ class UserManager:
                     user.daily_kcal_goal,
                     saved_store,
                     user.daily_protein_goal,
+                    self._nutrition_mismatch_threshold_percent,
                 )
                 self._services[key] = service
             else:

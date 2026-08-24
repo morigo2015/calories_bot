@@ -240,7 +240,7 @@ def test_daily_total_uses_numeric_timestamp_and_shifted_kyiv_date() -> None:
     assert state.today_total == 500
 
 
-def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
+def test_day_meals_use_accounting_day_and_return_latest_first() -> None:
     first = stored_row(datetime(2026, 8, 2, 1, 0, tzinfo=TZ), 1, 320)
     first[2] = "вівсянка з бананом"
     second = stored_row(datetime(2026, 8, 2, 23, 30, tzinfo=TZ), 2, 460)
@@ -258,8 +258,12 @@ def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
     assert [
         (meal.meal_name, meal.total_weight_g, meal.meal_kcal) for meal in meals
     ] == [
-        ("вівсянка з бананом", 50, 320),
         ("курка з рисом", 50, 460),
+        ("вівсянка з бананом", 50, 320),
+    ]
+    assert [meal.recorded_at for meal in meals] == [
+        datetime(2026, 8, 2, 23, 30, tzinfo=TZ),
+        datetime(2026, 8, 2, 1, 0, tzinfo=TZ),
     ]
     assert all(
         meal.nutrition == NutritionSummary.unknown_macros(meal.meal_kcal)
@@ -267,7 +271,7 @@ def test_day_meals_use_accounting_day_and_preserve_sheet_order() -> None:
     )
 
 
-def test_daily_totals_read_once_and_sum_whole_stored_values() -> None:
+def test_daily_totals_read_once_and_sum_decimal_stored_values() -> None:
     first = stored_row(datetime(2026, 8, 2, 12, tzinfo=TZ), 1, 100)
     first[4] = 100.4
     second = stored_row(datetime(2026, 8, 2, 13, tzinfo=TZ), 2, 200)
@@ -281,7 +285,7 @@ def test_daily_totals_read_once_and_sum_whole_stored_values() -> None:
 
     assert set(totals) == {datetime(2026, 8, 2).date()}
     total = totals[datetime(2026, 8, 2).date()]
-    assert total.kcal == 300
+    assert total.kcal == 300.8
     assert total.protein_g is None
     assert store._worksheet.read_count == 1
 
@@ -476,7 +480,7 @@ def test_append_stores_new_schema_native_timestamp_and_photo_path() -> None:
     assert row[16] == 0.00123457
 
 
-def test_append_rounds_all_nutrition_before_storing() -> None:
+def test_append_keeps_tenths_for_all_nutrition() -> None:
     meal = calculate_meal(
         FoodAnalysis(
             is_food=True,
@@ -507,19 +511,19 @@ def test_append_rounds_all_nutrition_before_storing() -> None:
         METADATA,
     )
 
-    assert saved.meal.meal_kcal == 41
-    assert saved.meal.protein_g == 0
-    assert saved.meal.fat_g == 0
-    assert saved.meal.carbs_g == 3
+    assert saved.meal.meal_kcal == 40.7
+    assert saved.meal.protein_g == 0.4
+    assert saved.meal.fat_g == 0.4
+    assert saved.meal.carbs_g == 3.4
     stored_item = json.loads(store._worksheet.rows[1][10])[0]
-    assert stored_item["kcal_per_100g"] == 123
-    assert stored_item["protein_per_100g"] == 1
-    assert stored_item["fat_per_100g"] == 1
-    assert stored_item["carbs_per_100g"] == 10
-    assert stored_item["calories"] == 41
-    assert stored_item["protein_g"] == 0
-    assert stored_item["fat_g"] == 0
-    assert stored_item["carbs_g"] == 3
+    assert stored_item["kcal_per_100g"] == 123.4
+    assert stored_item["protein_per_100g"] == 1.2
+    assert stored_item["fat_per_100g"] == 1.2
+    assert stored_item["carbs_per_100g"] == 10.4
+    assert stored_item["calories"] == 40.7
+    assert stored_item["protein_g"] == 0.4
+    assert stored_item["fat_g"] == 0.4
+    assert stored_item["carbs_g"] == 3.4
 
 
 def test_append_allows_blank_photo_usage_and_cost() -> None:
@@ -554,6 +558,49 @@ def test_update_meal_replaces_nutrition_and_recalculates_day_total() -> None:
     assert result.meal.meal.fat_g == 10
     assert result.meal.meal.carbs_g == 0
     assert store._worksheet.rows[1][7] == "сир 50 гр 120 ккал/100г"
+
+
+def test_update_verification_ignores_reconstructed_aggregate_density() -> None:
+    source = calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name="напій",
+            items=[
+                FoodItem(
+                    name="напій",
+                    weight_g=50,
+                    weight_estimated=False,
+                    kcal_per_100g=10,
+                    kcal_estimated=False,
+                    protein_per_100g=0.1,
+                    fat_per_100g=0,
+                    carbs_per_100g=0,
+                )
+            ],
+        )
+    )
+    store = build_store([HEADERS])
+    store.append_meal(
+        datetime(2026, 8, 2, 12, tzinfo=TZ),
+        42,
+        "напій",
+        "напій",
+        None,
+        source,
+        METADATA,
+    )
+    stored = store.get_meal(datetime(2026, 8, 2).date(), 42)
+    assert stored is not None
+
+    result = store.update_meal(
+        datetime(2026, 8, 2).date(),
+        42,
+        scale_meal(stored.meal, 60),
+    )
+
+    assert result is not None
+    assert result.meal.meal.total_weight_g == 60
+    assert result.meal.meal.items[0].protein_g == 0.1
 
 
 def test_empty_sheet_gets_headers_and_date_time_format() -> None:

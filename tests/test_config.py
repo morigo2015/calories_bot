@@ -52,6 +52,7 @@ def set_valid_env(monkeypatch, tmp_path) -> None:
         "GARMIN_TOKENSTORE",
         "GARMIN_CALORIE_CACHE_PATH",
         "MEAL_WEIGHT_PRESETS",
+        "NUTRITION_MISMATCH_THRESHOLD_PERCENT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -83,6 +84,27 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
         == (Path.cwd() / "data" / "garmin_calories.json").resolve()
     )
     assert settings.meal_weight_presets == (50, 100, 150, 200)
+    assert settings.nutrition_mismatch_threshold_percent == 10
+
+
+def test_nutrition_mismatch_threshold_is_configurable(monkeypatch, tmp_path) -> None:
+    set_valid_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NUTRITION_MISMATCH_THRESHOLD_PERCENT", "12.5")
+
+    settings = Settings.from_env()
+
+    assert settings.nutrition_mismatch_threshold_percent == 12.5
+
+
+@pytest.mark.parametrize("value", ["invalid", "-1", "101"])
+def test_invalid_nutrition_mismatch_threshold_is_rejected(
+    monkeypatch, tmp_path, value
+) -> None:
+    set_valid_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NUTRITION_MISMATCH_THRESHOLD_PERCENT", value)
+
+    with pytest.raises(ConfigError, match="NUTRITION_MISMATCH_THRESHOLD_PERCENT"):
+        Settings.from_env()
 
 
 def test_photo_storage_dir_is_resolved(monkeypatch, tmp_path) -> None:

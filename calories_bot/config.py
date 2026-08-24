@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import time
 from decimal import Decimal, InvalidOperation
+from math import isfinite
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -46,6 +47,7 @@ class Settings:
     timezone: ZoneInfo
     default_day_start: time
     meal_weight_presets: tuple[int, ...]
+    nutrition_mismatch_threshold_percent: float
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -170,6 +172,20 @@ class Settings:
                 f"{MAX_MEAL_WEIGHT_PRESETS} unique values from 1 to 10000"
             )
 
+        mismatch_raw = os.getenv("NUTRITION_MISMATCH_THRESHOLD_PERCENT", "10").strip()
+        try:
+            nutrition_mismatch_threshold_percent = float(mismatch_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                "NUTRITION_MISMATCH_THRESHOLD_PERCENT must be a number"
+            ) from exc
+        if not isfinite(nutrition_mismatch_threshold_percent) or not (
+            0 <= nutrition_mismatch_threshold_percent <= 100
+        ):
+            raise ConfigError(
+                "NUTRITION_MISMATCH_THRESHOLD_PERCENT must be from 0 to 100"
+            )
+
         credentials_path = Path(
             required["GOOGLE_SERVICE_ACCOUNT_FILE"] or ""
         ).expanduser()
@@ -218,4 +234,5 @@ class Settings:
             timezone=timezone,
             default_day_start=default_day_start,
             meal_weight_presets=meal_weight_presets,
+            nutrition_mismatch_threshold_percent=(nutrition_mismatch_threshold_percent),
         )

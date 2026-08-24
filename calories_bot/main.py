@@ -165,6 +165,7 @@ def main() -> None:
         settings.timezone,
         settings.default_day_start,
         settings.photo_storage_dir,
+        settings.nutrition_mismatch_threshold_percent,
     )
     manager.prepare_release_storage()
     garmin_calories = GarminCalorieStore(

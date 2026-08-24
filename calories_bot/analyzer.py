@@ -5,7 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Any, Literal, Protocol, cast
 
 from openai import OpenAI
@@ -47,6 +47,7 @@ Rules:
 - Always provide protein, fat, and carbohydrate grams per 100 g when food is
   present. Estimate every missing nutrient separately. Set its estimated flag,
   origin, and source ID by the same rules as kcal.
+- Preserve decimal nutrition values from text and labels; do not round them.
 - Compact К/Б/Ж/В source values and natural values "на 100 г" are per 100 g.
   Values explicitly described as being for a portion or package apply to that
   consumed portion; the application converts them to per-100-g density.
@@ -115,7 +116,7 @@ class UsageRecorder(Protocol):
 class ExplicitValue:
     source_id: str
     kind: Literal["weight", "kcal", "protein", "fat", "carbs"]
-    value: int
+    value: float
     start: int
     end: int
     basis: Literal["per_100g", "portion"] | None = None
@@ -187,8 +188,10 @@ class OpenAITranscriber:
         return text
 
 
-_DECIMAL = re.compile(r"\d+[.,]\d+")
-_HASH_MARKER = re.compile(r"(?<![\w#])(?:#(?P<prefix>\d+)|(?P<suffix>\d+)#)(?![\w#])")
+_NUMBER = r"\d+(?:[.,]\d+)?"
+_HASH_MARKER = re.compile(
+    rf"(?<![\w#])(?:#(?P<prefix>{_NUMBER})|(?P<suffix>{_NUMBER})#)(?![\w#])"
+)
 _COMPACT_NUTRIENT = re.compile(
     r"(?<!\w)(?P<marker>[кkбжвb])\s*(?:[:_·-]\s*)?"
     r"(?P<value>\d+(?:[.,]\d+)?)(?!\w)",
@@ -206,15 +209,17 @@ _WEIGHT_UNIT = (
     r"грамів|грамами|грамом|грами|грама|граму|грам|гр|г|grams|gram|gr|g)"
 )
 _TEXT_KCAL = re.compile(
-    rf"(?<!\w)(?P<value>\d+)\s*{_KCAL_UNIT}\s*"
+    rf"(?<!\w)(?P<value>{_NUMBER})\s*{_KCAL_UNIT}\s*"
     rf"(?:/\s*(?:100|сто)|(?:на|за)\s*(?:100|сто))\s*"
     rf"{_WEIGHT_UNIT}?(?!\w)",
     re.IGNORECASE,
 )
-_CANONICAL_KCAL = re.compile(r"(?<!\w)(?P<value>\d+) ккал/100г(?!\w)")
-_CANONICAL_PORTION_KCAL = re.compile(r"(?<!\w)(?P<value>\d+) ккал/порцію(?!\w)")
+_CANONICAL_KCAL = re.compile(r"(?<!\w)(?P<value>\d+(?:\.\d+)?) ккал/100г(?!\w)")
+_CANONICAL_PORTION_KCAL = re.compile(
+    r"(?<!\w)(?P<value>\d+(?:\.\d+)?) ккал/порцію(?!\w)"
+)
 _PLAIN_KCAL = re.compile(
-    rf"(?<!\w)(?P<value>\d+)\s*{_KCAL_UNIT}(?!\w)"
+    rf"(?<!\w)(?P<value>{_NUMBER})\s*{_KCAL_UNIT}(?!\w)"
     rf"(?!\s*(?:/|на|за)\s*(?:100|сто))",
     re.IGNORECASE,
 )
@@ -224,23 +229,26 @@ _MACRO_LABELS = {
     "carbs": "вуглеводів",
 }
 _CANONICAL_MACROS = {
-    kind: re.compile(rf"(?<!\w)(?P<value>\d+) г {label}/(?P<basis>100г|порцію)(?!\w)")
+    kind: re.compile(
+        rf"(?<!\w)(?P<value>\d+(?:\.\d+)?) "
+        rf"г {label}/(?P<basis>100г|порцію)(?!\w)"
+    )
     for kind, label in _MACRO_LABELS.items()
 }
 _NATURAL_MACROS = {
     "protein": re.compile(
         rf"(?<!\w)(?:білк\w*|белк\w*|protein)\s*[:=_-]?\s*"
-        rf"(?P<value>\d+)(?:\s*{_WEIGHT_UNIT})?",
+        rf"(?P<value>{_NUMBER})(?:\s*{_WEIGHT_UNIT})?",
         re.IGNORECASE,
     ),
     "fat": re.compile(
         rf"(?<!\w)(?:жир\w*|fat)\s*[:=_-]?\s*"
-        rf"(?P<value>\d+)(?:\s*{_WEIGHT_UNIT})?",
+        rf"(?P<value>{_NUMBER})(?:\s*{_WEIGHT_UNIT})?",
         re.IGNORECASE,
     ),
     "carbs": re.compile(
         rf"(?<!\w)(?:вуглевод\w*|углевод\w*|carb\w*)\s*[:=_-]?\s*"
-        rf"(?P<value>\d+)(?:\s*{_WEIGHT_UNIT})?",
+        rf"(?P<value>{_NUMBER})(?:\s*{_WEIGHT_UNIT})?",
         re.IGNORECASE,
     ),
 }
@@ -260,11 +268,11 @@ def _nearby_basis_context(text: str, start: int) -> str:
 
 
 _EXPLICIT_WEIGHT = re.compile(
-    rf"(?<!\w)(?P<value>\d+)\s*{_WEIGHT_UNIT}(?!\w)", re.IGNORECASE
+    rf"(?<!\w)(?P<value>{_NUMBER})\s*{_WEIGHT_UNIT}(?!\w)", re.IGNORECASE
 )
 _CANONICAL_WEIGHT = re.compile(r"(?<!\w)(?P<value>\d+) гр(?!\w)")
 _BARE_AT_BOUNDARY = re.compile(
-    r"(?<!\w)(?P<value>\d+)(?=[ \t]*(?:[,;]|\r?\n|[.!?]*[ \t]*$))",
+    rf"(?<!\w)(?P<value>{_NUMBER})(?=[ \t]*(?:[,;]|\r?\n|[.!?]*[ \t]*$))",
     re.MULTILINE,
 )
 _EGG_PORTION = re.compile(
@@ -393,18 +401,26 @@ def _replace_spoken_number(match: re.Match[str]) -> str:
     return str(total + current)
 
 
-def _nonnegative_integer(value: str, label: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise InputFormatError(f"{label} must be a non-negative integer")
+def _nonnegative_number(value: str, label: str) -> Decimal:
+    parsed = Decimal(value.replace(",", "."))
+    if not parsed.is_finite() or parsed < 0:
+        raise InputFormatError(f"{label} must be a non-negative number")
     return parsed
 
 
-def _positive_integer(value: str, label: str) -> int:
-    parsed = _nonnegative_integer(value, label)
-    if parsed == 0:
+def _plain_decimal(value: Decimal) -> str:
+    rendered = format(value.normalize(), "f")
+    return "0" if rendered == "-0" else rendered
+
+
+def _positive_whole_number(value: str, label: str) -> int:
+    parsed = _nonnegative_number(value, label)
+    if parsed != parsed.to_integral_value():
+        raise InputFormatError(f"{label} must use whole grams")
+    integer = int(parsed)
+    if integer == 0:
         raise InputFormatError(f"{label} must be a positive integer")
-    return parsed
+    return integer
 
 
 def _placeholder(index: int) -> str:
@@ -428,10 +444,10 @@ def normalize_input(text: str) -> NormalizedInput:
     normalized = _SPOKEN_NUMBER.sub(_replace_spoken_number, normalized)
 
     def replace_hash(match: re.Match[str]) -> str:
-        value = _nonnegative_integer(
+        value = _nonnegative_number(
             match.group("prefix") or match.group("suffix"), "Calories"
         )
-        return f"{value} ккал/100г"
+        return f"{_plain_decimal(value)} ккал/100г"
 
     normalized = _HASH_MARKER.sub(replace_hash, normalized)
     if "#" in normalized:
@@ -451,17 +467,14 @@ def normalize_input(text: str) -> NormalizedInput:
     def replace_compact(match: re.Match[str]) -> str:
         marker = match.group("marker").casefold()
         _kind, label = compact_labels[marker]
-        raw_value = match.group("value").replace(",", ".")
-        value = int(Decimal(raw_value).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-        return f"{value} {label}/100г"
+        value = _nonnegative_number(match.group("value"), label)
+        return f"{_plain_decimal(value)} {label}/100г"
 
     normalized = _COMPACT_NUTRIENT.sub(replace_compact, normalized)
-    if _DECIMAL.search(normalized):
-        raise InputFormatError("Decimal values are not supported; use whole numbers")
 
     def replace_text_kcal(match: re.Match[str]) -> str:
-        value = _nonnegative_integer(match.group("value"), "Calories")
-        return f"{value} ккал/100г"
+        value = _nonnegative_number(match.group("value"), "Calories")
+        return f"{_plain_decimal(value)} ккал/100г"
 
     normalized = _TEXT_KCAL.sub(replace_text_kcal, normalized)
 
@@ -469,8 +482,8 @@ def normalize_input(text: str) -> NormalizedInput:
         context = _nearby_basis_context(normalized, match.start())
         if not _PORTION_CONTEXT.search(context):
             return match.group(0)
-        value = _nonnegative_integer(match.group("value"), "Calories")
-        return f"{value} ккал/порцію"
+        value = _nonnegative_number(match.group("value"), "Calories")
+        return f"{_plain_decimal(value)} ккал/порцію"
 
     normalized = _PLAIN_KCAL.sub(replace_portion_kcal, normalized)
 
@@ -491,10 +504,10 @@ def normalize_input(text: str) -> NormalizedInput:
             nutrient_label: str = label,
             source_text: str = normalized,
         ) -> str:
-            value = _nonnegative_integer(match.group("value"), nutrient_label)
+            value = _nonnegative_number(match.group("value"), nutrient_label)
             context = _nearby_basis_context(source_text, match.start())
             basis = "порцію" if _PORTION_CONTEXT.search(context) else "100г"
-            return f"{value} г {nutrient_label}/{basis}"
+            return f"{_plain_decimal(value)} г {nutrient_label}/{basis}"
 
         normalized = pattern.sub(replace_natural_macro, normalized)
 
@@ -510,7 +523,7 @@ def normalize_input(text: str) -> NormalizedInput:
         normalized = pattern.sub(protect_calories, normalized)
 
     def replace_weight(match: re.Match[str]) -> str:
-        value = _positive_integer(match.group("value"), "Weight")
+        value = _positive_whole_number(match.group("value"), "Weight")
         return f"{value} гр"
 
     normalized = _EXPLICIT_WEIGHT.sub(replace_weight, normalized)
@@ -530,21 +543,33 @@ def normalize_input(text: str) -> NormalizedInput:
             int,
             int,
             Literal["weight", "kcal", "protein", "fat", "carbs"],
-            int,
+            float,
             Literal["per_100g", "portion"] | None,
         ]
     ] = []
     for match in _CANONICAL_WEIGHT.finditer(normalized):
         matches.append(
-            (match.start(), match.end(), "weight", int(match.group("value")), None)
+            (match.start(), match.end(), "weight", float(match.group("value")), None)
         )
     for match in _CANONICAL_KCAL.finditer(normalized):
         matches.append(
-            (match.start(), match.end(), "kcal", int(match.group("value")), "per_100g")
+            (
+                match.start(),
+                match.end(),
+                "kcal",
+                float(match.group("value")),
+                "per_100g",
+            )
         )
     for match in _CANONICAL_PORTION_KCAL.finditer(normalized):
         matches.append(
-            (match.start(), match.end(), "kcal", int(match.group("value")), "portion")
+            (
+                match.start(),
+                match.end(),
+                "kcal",
+                float(match.group("value")),
+                "portion",
+            )
         )
     for kind, pattern in _CANONICAL_MACROS.items():
         for match in pattern.finditer(normalized):
@@ -553,7 +578,7 @@ def normalize_input(text: str) -> NormalizedInput:
                     match.start(),
                     match.end(),
                     cast(Literal["protein", "fat", "carbs"], kind),
-                    int(match.group("value")),
+                    float(match.group("value")),
                     "per_100g" if match.group("basis") == "100г" else "portion",
                 )
             )

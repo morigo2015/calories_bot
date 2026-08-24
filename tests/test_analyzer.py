@@ -288,18 +288,34 @@ def test_compact_kbjv_values_are_normalized_as_per_100g(source: str) -> None:
     ]
 
 
-def test_compact_kbjv_accepts_spaces_middle_dot_and_rounded_decimals() -> None:
+def test_compact_kbjv_accepts_spaces_middle_dot_and_keeps_decimals() -> None:
     normalized = normalize_input("К 250 Б 100 Ж 7,9 В · 8.1")
 
     assert normalized.text == (
-        "250 ккал/100г 100 г білків/100г 8 г жирів/100г 8 г вуглеводів/100г"
+        "250 ккал/100г 100 г білків/100г 7.9 г жирів/100г 8.1 г вуглеводів/100г"
     )
     assert [(value.kind, value.value) for value in normalized.explicit_values] == [
         ("kcal", 250),
         ("protein", 100),
-        ("fat", 8),
-        ("carbs", 8),
+        ("fat", 7.9),
+        ("carbs", 8.1),
     ]
+
+
+def test_decimal_kbjv_accepts_comma_and_dot_but_weight_stays_whole() -> None:
+    normalized = normalize_input(
+        "йогурт 150 г, 72,5 ккал/100 г, білки 4,2, жири 2.5, вуглеводи 8,1"
+    )
+
+    assert [(value.kind, value.value) for value in normalized.explicit_values] == [
+        ("weight", 150),
+        ("kcal", 72.5),
+        ("protein", 4.2),
+        ("fat", 2.5),
+        ("carbs", 8.1),
+    ]
+    with pytest.raises(InputFormatError, match="whole grams"):
+        normalize_input("йогурт 150,5 г")
 
 
 def test_natural_macros_support_per_100g_and_portion_basis() -> None:

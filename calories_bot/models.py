@@ -362,22 +362,49 @@ def round_whole(value: float) -> int:
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def round_tenth(value: float) -> float:
+    return float(Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def calories_from_macros(item: FoodItem) -> float | None:
+    macros = (
+        item.protein_per_100g,
+        item.fat_per_100g,
+        item.carbs_per_100g,
+    )
+    if any(value is None for value in macros):
+        return None
+    protein, fat, carbs = (float(value) for value in macros if value is not None)
+    return protein * 4 + fat * 9 + carbs * 4
+
+
+def calorie_macro_mismatch_percent(item: FoodItem) -> float | None:
+    """Return the kcal-vs-macros difference relative to declared kcal."""
+
+    calculated_kcal = calories_from_macros(item)
+    if calculated_kcal is None:
+        return None
+    if item.kcal_per_100g == 0:
+        return 0.0 if calculated_kcal == 0 else float("inf")
+    return abs(calculated_kcal - item.kcal_per_100g) / item.kcal_per_100g * 100
+
+
 def round_meal_nutrition(meal: MealResult) -> MealResult:
-    """Return a storage-safe meal whose nutritional values are whole numbers."""
+    """Return a storage-safe meal whose nutritional values keep tenths."""
 
     nutrient_fields = ("protein", "fat", "carbs")
 
-    def rounded_optional(value: float | None) -> int | None:
-        return None if value is None else round_whole(value)
+    def rounded_optional(value: float | None) -> float | None:
+        return None if value is None else round_tenth(value)
 
     items = [
         item.model_copy(
             update={
-                "kcal_per_100g": round_whole(item.kcal_per_100g),
+                "kcal_per_100g": round_tenth(item.kcal_per_100g),
                 "protein_per_100g": rounded_optional(item.protein_per_100g),
                 "fat_per_100g": rounded_optional(item.fat_per_100g),
                 "carbs_per_100g": rounded_optional(item.carbs_per_100g),
-                "calories": round_whole(item.calories),
+                "calories": round_tenth(item.calories),
                 "protein_g": rounded_optional(item.protein_g),
                 "fat_g": rounded_optional(item.fat_g),
                 "carbs_g": rounded_optional(item.carbs_g),
@@ -386,20 +413,20 @@ def round_meal_nutrition(meal: MealResult) -> MealResult:
         for item in meal.items
     ]
 
-    def item_total(nutrient: str) -> int | None:
+    def item_total(nutrient: str) -> float | None:
         values = [getattr(item, f"{nutrient}_g") for item in items]
         if any(value is None for value in values):
             return None
-        return sum(int(value) for value in values if value is not None)
+        return round_tenth(sum(float(value) for value in values if value is not None))
 
     return meal.model_copy(
         update={
             "items": items,
-            "kcal_per_100g": round_whole(meal.kcal_per_100g),
+            "kcal_per_100g": round_tenth(meal.kcal_per_100g),
             "protein_per_100g": rounded_optional(meal.protein_per_100g),
             "fat_per_100g": rounded_optional(meal.fat_per_100g),
             "carbs_per_100g": rounded_optional(meal.carbs_per_100g),
-            "meal_kcal": round_whole(meal.meal_kcal),
+            "meal_kcal": round_tenth(meal.meal_kcal),
             **{f"{nutrient}_g": item_total(nutrient) for nutrient in nutrient_fields},
         }
     )
