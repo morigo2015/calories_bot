@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time as time_module
 from dataclasses import dataclass
 from datetime import time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -9,6 +10,10 @@ from typing import Protocol
 
 import gspread
 from gspread.utils import ValueInputOption, ValueRenderOption
+
+GOOGLE_READ_ATTEMPTS = 3
+GOOGLE_READ_RETRY_DELAYS_SECONDS = (0.25, 0.75)
+RETRYABLE_GOOGLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 LEGACY_USER_HEADERS = [
     "telegram_user_id",
@@ -172,10 +177,24 @@ class GoogleUserRegistry:
             )
         self._ensure_headers()
 
+    def _get_all_values(self) -> list[list[object]]:
+        for attempt in range(GOOGLE_READ_ATTEMPTS):
+            try:
+                return self._worksheet.get_all_values(
+                    value_render_option=ValueRenderOption.unformatted
+                )
+            except gspread.exceptions.APIError as exc:
+                status_code = getattr(exc.response, "status_code", None)
+                if (
+                    status_code not in RETRYABLE_GOOGLE_STATUS_CODES
+                    or attempt == GOOGLE_READ_ATTEMPTS - 1
+                ):
+                    raise
+                time_module.sleep(GOOGLE_READ_RETRY_DELAYS_SECONDS[attempt])
+        raise AssertionError("Google Sheets read retry loop exhausted")
+
     def _ensure_headers(self) -> None:
-        rows = self._worksheet.get_all_values(
-            value_render_option=ValueRenderOption.unformatted
-        )
+        rows = self._get_all_values()
         if not rows or not any(str(cell).strip() for row in rows for cell in row):
             self._worksheet.append_row(
                 USER_HEADERS, value_input_option=ValueInputOption.raw
@@ -192,9 +211,7 @@ class GoogleUserRegistry:
                 raise UserRegistryError(
                     "Could not migrate the user registry headers"
                 ) from exc
-            rows = self._worksheet.get_all_values(
-                value_render_option=ValueRenderOption.unformatted
-            )
+            rows = self._get_all_values()
         if rows[0] == KCAL_GOAL_USER_HEADERS:
             try:
                 self._worksheet.update(
@@ -206,9 +223,7 @@ class GoogleUserRegistry:
                 raise UserRegistryError(
                     "Could not migrate the user registry headers"
                 ) from exc
-            rows = self._worksheet.get_all_values(
-                value_render_option=ValueRenderOption.unformatted
-            )
+            rows = self._get_all_values()
         if rows[0] != USER_HEADERS:
             raise UserRegistryError(
                 "User registry headers are incompatible. Expected: "
@@ -217,9 +232,7 @@ class GoogleUserRegistry:
 
     def _rows(self) -> list[list[object]]:
         try:
-            rows = self._worksheet.get_all_values(
-                value_render_option=ValueRenderOption.unformatted
-            )
+            rows = self._get_all_values()
         except Exception as exc:
             raise UserRegistryError("Could not read the user registry") from exc
         if not rows or rows[0] != USER_HEADERS:

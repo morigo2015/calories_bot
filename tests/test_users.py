@@ -1,6 +1,8 @@
 from datetime import time
+from unittest.mock import Mock
 
 import pytest
+from gspread.exceptions import APIError
 
 from calories_bot.users import (
     KCAL_GOAL_USER_HEADERS,
@@ -49,6 +51,15 @@ def build_registry(rows=None):
     return registry
 
 
+def google_api_error(status_code: int) -> APIError:
+    response = Mock()
+    response.status_code = status_code
+    response.json.return_value = {
+        "error": {"code": status_code, "message": "temporary error"}
+    }
+    return APIError(response)
+
+
 def test_empty_registry_gets_exact_headers() -> None:
     registry = build_registry([])
     registry._ensure_headers()
@@ -59,6 +70,34 @@ def test_incompatible_registry_headers_fail() -> None:
     registry = build_registry([["telegram_user_id", "status"]])
     with pytest.raises(UserRegistryError, match="headers"):
         registry._ensure_headers()
+
+
+def test_transient_google_read_error_is_retried(monkeypatch) -> None:
+    registry = build_registry([USER_HEADERS])
+    original_get_all_values = registry._worksheet.get_all_values
+    registry._worksheet.get_all_values = Mock(
+        side_effect=[google_api_error(503), [USER_HEADERS]]
+    )
+    sleep = Mock()
+    monkeypatch.setattr("calories_bot.users.time_module.sleep", sleep)
+
+    assert registry.list_users() == []
+    assert registry._worksheet.get_all_values.call_count == 2
+    sleep.assert_called_once_with(0.25)
+
+    registry._worksheet.get_all_values = original_get_all_values
+
+
+def test_non_transient_google_read_error_is_not_retried(monkeypatch) -> None:
+    registry = build_registry([USER_HEADERS])
+    registry._worksheet.get_all_values = Mock(side_effect=google_api_error(403))
+    sleep = Mock()
+    monkeypatch.setattr("calories_bot.users.time_module.sleep", sleep)
+
+    with pytest.raises(UserRegistryError, match="Could not read"):
+        registry.list_users()
+    assert registry._worksheet.get_all_values.call_count == 1
+    sleep.assert_not_called()
 
 
 def test_known_legacy_registry_header_is_migrated_without_changing_rows() -> None:
