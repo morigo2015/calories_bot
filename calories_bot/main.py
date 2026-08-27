@@ -62,9 +62,10 @@ async def configure_bot_commands(
     if garmin_calories is not None:
         if application.job_queue is None or garmin_refresh_time is None:
             raise RuntimeError("Garmin refresh requires JobQueue and a refresh time")
-        application.job_queue.run_daily(
+        application.job_queue.run_repeating(
             refresh_garmin_calories,
-            time=garmin_refresh_time,
+            interval=60 * 60,
+            first=garmin_refresh_time,
             data=garmin_calories,
             name="garmin-calorie-refresh",
         )

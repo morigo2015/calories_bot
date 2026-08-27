@@ -142,6 +142,8 @@ UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
 
 class GarminCalories(Protocol):
+    def refresh_if_due(self) -> bool: ...
+
     def format_weekly_report(self) -> str: ...
 
     def get_daily_calories(self) -> dict[date, int]: ...
@@ -2095,6 +2097,19 @@ class TelegramHandlers:
             and update.effective_user.id == self._admin_user_id
         )
 
+    async def _get_current_garmin_calories(self) -> dict[date, int] | None:
+        if self._garmin_calories is None:
+            return None
+        try:
+            await asyncio.to_thread(self._garmin_calories.refresh_if_due)
+        except Exception:
+            LOGGER.exception("Could not refresh Garmin calories for /week")
+        try:
+            return await asyncio.to_thread(self._garmin_calories.get_daily_calories)
+        except Exception:
+            LOGGER.exception("Garmin calories are unavailable for /week")
+            return None
+
     @staticmethod
     def _user_state(
         context: ContextTypes.DEFAULT_TYPE | object | None,
@@ -2412,15 +2427,7 @@ class TelegramHandlers:
             try:
                 burned_totals = None
                 if self._is_admin(update):
-                    if self._garmin_calories is not None:
-                        try:
-                            burned_totals = await asyncio.to_thread(
-                                self._garmin_calories.get_daily_calories
-                            )
-                        except Exception:
-                            LOGGER.exception(
-                                "Garmin calories are unavailable for /week"
-                            )
+                    burned_totals = await self._get_current_garmin_calories()
                 reply = await asyncio.to_thread(
                     service.get_weekly_calories,
                     message.date,
@@ -2451,15 +2458,7 @@ class TelegramHandlers:
             try:
                 burned_totals = None
                 if self._is_admin(update):
-                    if self._garmin_calories is not None:
-                        try:
-                            burned_totals = await asyncio.to_thread(
-                                self._garmin_calories.get_daily_calories
-                            )
-                        except Exception:
-                            LOGGER.exception(
-                                "Garmin calories are unavailable for /week"
-                            )
+                    burned_totals = await self._get_current_garmin_calories()
                 reply = await asyncio.to_thread(
                     service.get_weekly,
                     message.date,

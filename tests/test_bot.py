@@ -2239,7 +2239,11 @@ def test_admin_weekly_calories_includes_garmin_balance(tmp_path) -> None:
     store.daily_totals = {date(2026, 8, 1): 2300}
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
     burned = {date(2026, 7, 26) + timedelta(days=offset): 2500 for offset in range(7)}
-    garmin = SimpleNamespace(get_daily_calories=lambda: burned)
+    refreshes = []
+    garmin = SimpleNamespace(
+        refresh_if_due=lambda: refreshes.append(True) or False,
+        get_daily_calories=lambda: burned,
+    )
     handlers = TelegramHandlers(
         999,
         FakeManager({999: user_record(999)}, {999: service}),
@@ -2251,6 +2255,7 @@ def test_admin_weekly_calories_includes_garmin_balance(tmp_path) -> None:
 
     assert "<b>сб 01.08</b>: + 2300" in message.replies[0]
     assert "= <b><u>-200</u></b>" in message.replies[0]
+    assert refreshes == [True]
 
 
 def test_weekly_admin_falls_back_to_consumed_when_garmin_is_unavailable() -> None:
@@ -2270,7 +2275,10 @@ def test_weekly_admin_falls_back_to_consumed_when_garmin_is_unavailable() -> Non
     handlers = TelegramHandlers(
         999,
         FakeManager({999: user_record(999)}, {999: service}),
-        garmin_calories=SimpleNamespace(get_daily_calories=fail_garmin),
+        garmin_calories=SimpleNamespace(
+            refresh_if_due=lambda: False,
+            get_daily_calories=fail_garmin,
+        ),
     )
     update, message = make_update(user_id=999)
 
@@ -2279,6 +2287,36 @@ def test_weekly_admin_falls_back_to_consumed_when_garmin_is_unavailable() -> Non
     assert service.burned_totals is None
     assert message.replies[0].startswith("<b>Статистика за тиждень</b>")
     assert "Спожито: 700 ккал" in message.replies[0]
+
+
+def test_weekly_admin_uses_preserved_cache_when_garmin_refresh_fails() -> None:
+    class Service:
+        burned_totals = None
+
+        def get_weekly(self, timestamp, burned_totals, meal_grouper):
+            del timestamp, meal_grouper
+            self.burned_totals = burned_totals
+            return "<h3>Статистика за тиждень</h3>"
+
+    service = Service()
+    burned = {date(2026, 7, 26) + timedelta(days=offset): 2500 for offset in range(7)}
+
+    def fail_refresh():
+        raise RuntimeError("Garmin unavailable")
+
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({999: user_record(999)}, {999: service}),
+        garmin_calories=SimpleNamespace(
+            refresh_if_due=fail_refresh,
+            get_daily_calories=lambda: burned,
+        ),
+    )
+    update, _message = make_update(user_id=999)
+
+    asyncio.run(handlers.weekly(update, SimpleNamespace(user_data={})))
+
+    assert service.burned_totals == burned
 
 
 def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:

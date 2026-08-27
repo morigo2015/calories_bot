@@ -277,7 +277,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     assert bot.calls[1][1]["scope"].chat_id == 999
 
 
-def test_configure_bot_commands_schedules_daily_garmin_refresh(
+def test_configure_bot_commands_retries_garmin_refresh_hourly(
     monkeypatch, tmp_path
 ) -> None:
     class FakeBot:
@@ -288,7 +288,7 @@ def test_configure_bot_commands_schedules_daily_garmin_refresh(
         def __init__(self):
             self.calls = []
 
-        def run_daily(self, callback, **kwargs):
+        def run_repeating(self, callback, **kwargs):
             self.calls.append((callback, kwargs))
 
     store = GarminCalorieStore(
@@ -321,7 +321,8 @@ def test_configure_bot_commands_schedules_daily_garmin_refresh(
         (
             main_module.refresh_garmin_calories,
             {
-                "time": refresh_time,
+                "interval": 60 * 60,
+                "first": refresh_time,
                 "data": store,
                 "name": "garmin-calorie-refresh",
             },
