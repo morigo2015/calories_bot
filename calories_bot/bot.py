@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -30,6 +30,13 @@ from .analyzer import (
     Transcriber,
     TranscriptionError,
     normalize_input,
+)
+from .burned import (
+    BodyProfile,
+    BurnedCaloriesEntry,
+    BurnedCalorieStore,
+    build_burned_entry,
+    calculate_resting_kcal,
 )
 from .meal_grouping import MAX_WEEKLY_MEAL_GROUPS, MealGrouper, MealGroupingError
 from .models import (
@@ -127,6 +134,8 @@ PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX = "protein-goal-disable:"
 GOAL_WAITING_KEY = "awaiting_daily_kcal_goal"
 MEAL_WEIGHT_WAITING_KEY = "awaiting_meal_weight"
 INVITE_WAITING_KEY = "awaiting_invite_name"
+BURN_WAITING_KEY = "awaiting_burned_calories"
+SETTINGS_WAITING_KEY = "awaiting_settings_value"
 INVITE_ONLY_TEXT = "Доступ лише за запрошенням."
 BLOCKED_TEXT = "Доступ до бота вимкнено."
 ACCESS_ERROR_TEXT = "Не вдалося перевірити доступ. Спробуй ще раз."
@@ -878,12 +887,16 @@ def format_weekly_reply(
 
     balance_details = ""
     if burned_totals is not None:
-        missing = [day for day in days if day not in burned_totals]
-        if missing:
-            raise ValueError("Burned-calorie data does not cover the report period")
+        covered_days = [day for day in days if day in burned_totals]
         balance_rows = []
         for day in days:
             consumed_kcal = round_whole(consumed[day].kcal)
+            if day not in burned_totals:
+                balance_rows.append(
+                    f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
+                    f"+ {consumed_kcal}&nbsp;&nbsp;- —&nbsp;&nbsp;= —</li>"
+                )
+                continue
             burned = burned_totals[day]
             balance = consumed_kcal - burned
             balance_rows.append(
@@ -891,28 +904,41 @@ def format_weekly_reply(
                 f"+ {consumed_kcal}&nbsp;&nbsp;- {burned}&nbsp;&nbsp;"
                 f"= <b><u>{balance:+d}</u></b></li>"
             )
-        average_consumed = round_whole(
-            sum(consumed[day].kcal for day in days) / period_days
-        )
-        average_burned = round_whole(
-            sum(burned_totals[day] for day in days) / period_days
-        )
-        average_balance = average_consumed - average_burned
-        if average_balance > 0:
-            balance_label = f"Профіцит {average_balance} ккал"
-        elif average_balance < 0:
-            balance_label = f"Дефіцит {abs(average_balance)} ккал"
-        else:
-            balance_label = " 0 ккал"
-        balance_details = (
-            f"<details><summary>"
-            f"Баланс калорій за добу: <br/>"
-            f"<b><u>{balance_label}</u></b><br/>"
-            f"+ {average_consumed}  - {average_burned}<br/>"
-            f"</summary>"
-            "<p>+ спожито ккал, - витрачено, = різниця</p>"
-            f"<ul>{''.join(balance_rows)}</ul></details>"
-        )
+        if covered_days:
+            average_consumed = round_whole(
+                sum(consumed[day].kcal for day in covered_days) / len(covered_days)
+            )
+            average_burned = round_whole(
+                sum(burned_totals[day] for day in covered_days) / len(covered_days)
+            )
+            average_balance = round_whole(
+                sum(consumed[day].kcal - burned_totals[day] for day in covered_days)
+                / len(covered_days)
+            )
+            if average_balance > 0:
+                balance_label = f"Профіцит {average_balance} ккал"
+            elif average_balance < 0:
+                balance_label = f"Дефіцит {abs(average_balance)} ккал"
+            else:
+                balance_label = "0 ккал"
+            coverage_note = (
+                ""
+                if len(covered_days) == period_days
+                else (
+                    f"<br/><sub>середнє за {len(covered_days)} із {period_days} днів; "
+                    "для решти витрату не внесено</sub>"
+                )
+            )
+            balance_details = (
+                f"<details><summary>"
+                f"Баланс калорій за добу: <br/>"
+                f"<b><u>{balance_label}</u></b><br/>"
+                f"+ {average_consumed}  - {average_burned}"
+                f"{coverage_note}<br/>"
+                f"</summary>"
+                "<p>+ спожито ккал, - витрачено, = різниця</p>"
+                f"<ul>{''.join(balance_rows)}</ul></details>"
+            )
 
     day_word = "день" if period_days == 1 else "дні" if period_days <= 4 else "днів"
     history_note = (
@@ -957,6 +983,8 @@ def format_day_reply(
     *,
     accounting_day: date | None = None,
     is_today: bool = True,
+    burned_total: int | None = None,
+    burned_source: str | None = None,
 ) -> str:
     meal_nutrients = [
         (
@@ -1013,7 +1041,23 @@ def format_day_reply(
         heading = f"За день ({accounting_day:%d.%m})"
     else:
         heading = f"За сьогодні ({accounting_day:%d.%m})"
-    return f"<h3>{heading}:</h3>" + "".join(blocks)
+    balance_block = ""
+    if burned_total is not None:
+        consumed = round_whole(total.kcal)
+        balance = consumed - burned_total
+        if balance > 0:
+            label = f"Профіцит {balance} кк"
+        elif balance < 0:
+            label = f"Дефіцит {abs(balance)} кк"
+        else:
+            label = "Баланс 0 кк"
+        source = f" · {html.escape(burned_source)}" if burned_source else ""
+        balance_block = (
+            f"<details><summary>⚖️ <b><u>{label}</u></b></summary>"
+            f"<p>Спожито {consumed} кк<br/>"
+            f"Витрачено {burned_total} кк{source}</p></details>"
+        )
+    return f"<h3>{heading}:</h3>" + "".join(blocks) + balance_block
 
 
 class CaloriesService:
@@ -1028,6 +1072,7 @@ class CaloriesService:
         saved_store: SavedMealStore | None = None,
         daily_protein_goal: int | None = None,
         nutrition_mismatch_threshold_percent: float = 10.0,
+        burned_store: BurnedCalorieStore | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._store = store
@@ -1041,6 +1086,7 @@ class CaloriesService:
             nutrition_mismatch_threshold_percent
         )
         self._saved_store = saved_store
+        self._burned_store = burned_store
         # A message analysis can take long enough for a deletion callback to be
         # handled in between its first read and the eventual append.  Keep the
         # read/append and deletion operations mutually exclusive, while doing
@@ -1085,21 +1131,89 @@ class CaloriesService:
         with self._store_lock:
             return self._format_day_summary(day)
 
-    def get_day_summary_for(self, day: date, timestamp: datetime) -> str:
+    def get_day_summary_for(
+        self,
+        day: date,
+        timestamp: datetime,
+        fallback_burned_total: int | None = None,
+    ) -> str:
         current_day = self._accounting_day(timestamp)
         if day > current_day:
             raise ValueError("Cannot show a future accounting day")
         with self._store_lock:
-            return self._format_day_summary(day, is_today=day == current_day)
+            return self._format_day_summary(
+                day,
+                is_today=day == current_day,
+                fallback_burned_total=fallback_burned_total,
+            )
 
-    def _format_day_summary(self, day: date, *, is_today: bool = True) -> str:
+    def _format_day_summary(
+        self,
+        day: date,
+        *,
+        is_today: bool = True,
+        fallback_burned_total: int | None = None,
+    ) -> str:
+        manual = self._burned_store.get(day) if self._burned_store is not None else None
+        burned_total = (
+            manual.effective_total_kcal if manual is not None else fallback_burned_total
+        )
+        source = None
+        if manual is not None:
+            source = (
+                "введено вручну"
+                if manual.input_type == "total"
+                else (f"{manual.input_kcal} активних + {manual.resting_kcal} пасивних")
+            )
+        elif fallback_burned_total is not None:
+            source = "Garmin"
         return format_day_reply(
             self._store.get_day_meals(day),
             self._daily_kcal_goal,
             self._daily_protein_goal,
             accounting_day=day,
             is_today=is_today,
+            burned_total=burned_total,
+            burned_source=source,
         )
+
+    def last_completed_day(self, timestamp: datetime) -> date:
+        return self._accounting_day(timestamp) - timedelta(days=1)
+
+    def get_burned_entry(self, day: date) -> BurnedCaloriesEntry | None:
+        return self._burned_store.get(day) if self._burned_store is not None else None
+
+    def save_burned_entry(self, entry: BurnedCaloriesEntry) -> BurnedCaloriesEntry:
+        if self._burned_store is None:
+            raise RuntimeError("Burned-calorie storage is unavailable")
+        return self._burned_store.upsert(entry)
+
+    def delete_burned_entry(self, day: date) -> bool:
+        if self._burned_store is None:
+            raise RuntimeError("Burned-calorie storage is unavailable")
+        return self._burned_store.delete(day)
+
+    def _merged_burned_totals(
+        self,
+        start_day: date,
+        end_day: date,
+        fallback: dict[date, int] | None,
+    ) -> dict[date, int] | None:
+        merged = {
+            day: value
+            for day, value in (fallback or {}).items()
+            if start_day <= day <= end_day
+        }
+        if self._burned_store is not None:
+            merged.update(
+                {
+                    day: entry.effective_total_kcal
+                    for day, entry in self._burned_store.get_range(
+                        start_day, end_day
+                    ).items()
+                }
+            )
+        return merged or None
 
     def get_weekly_calories(
         self,
@@ -1109,7 +1223,11 @@ class CaloriesService:
         end_day = self._accounting_day(timestamp) - timedelta(days=1)
         start_day = end_day - timedelta(days=WEEK_DAYS - 1)
         totals = self._store.get_daily_totals(start_day, end_day)
-        return format_weekly_calories_reply(end_day, totals, burned_totals)
+        return format_weekly_calories_reply(
+            end_day,
+            totals,
+            self._merged_burned_totals(start_day, end_day, burned_totals),
+        )
 
     def get_weekly_meals(
         self, timestamp: datetime, meal_grouper: MealGrouper | None = None
@@ -1193,14 +1311,7 @@ class CaloriesService:
             except MealGroupingError:
                 LOGGER.exception("Could not semantically group weekly meals")
 
-        if burned_totals is not None and any(
-            start_day + timedelta(days=offset) not in burned_totals
-            for offset in range(period_days)
-        ):
-            LOGGER.warning(
-                "Garmin calorie data does not cover the weekly report period"
-            )
-            burned_totals = None
+        burned_totals = self._merged_burned_totals(start_day, end_day, burned_totals)
 
         return format_weekly_reply(
             end_day,
@@ -1736,6 +1847,8 @@ class Workspace(Protocol):
 
     def open_saved_meal_store(self, spreadsheet_id: str) -> SavedMealStore: ...
 
+    def open_burned_calorie_store(self, spreadsheet_id: str) -> BurnedCalorieStore: ...
+
     def create_personal_spreadsheet(
         self, title: str, day_start: time, telegram_user_id: int
     ) -> str: ...
@@ -1774,6 +1887,7 @@ class UserManager:
                 continue
             try:
                 self._workspace.open_saved_meal_store(user.spreadsheet_id)
+                self._workspace.open_burned_calorie_store(user.spreadsheet_id)
             except Exception:
                 LOGGER.exception(
                     "Could not prepare saved-meal storage for user %s",
@@ -1782,6 +1896,11 @@ class UserManager:
 
     def get_user(self, telegram_user_id: int) -> UserRecord | None:
         return self._registry.get_user(telegram_user_id)
+
+    def local_date(self, timestamp: datetime) -> date:
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=self._timezone)
+        return timestamp.astimezone(self._timezone).date()
 
     def list_users(self) -> list[UserRecord]:
         return self._registry.list_users()
@@ -1813,6 +1932,7 @@ class UserManager:
                     saved_store,
                     user.daily_protein_goal,
                     self._nutrition_mismatch_threshold_percent,
+                    self._workspace.open_burned_calorie_store(user.spreadsheet_id),
                 )
                 self._services[key] = service
             else:
@@ -1878,6 +1998,26 @@ class UserManager:
                 if key[0] == telegram_user_id:
                     service.set_daily_protein_goal(goal)
         return updated
+
+    def set_day_start(self, telegram_user_id: int, value: time) -> UserRecord:
+        updated = self._registry.set_day_start(telegram_user_id, value)
+        with self._lock:
+            for key in list(self._services):
+                if key[0] == telegram_user_id:
+                    del self._services[key]
+        return updated
+
+    def set_body_profile(
+        self,
+        telegram_user_id: int,
+        sex: str | None,
+        birth_date: date | None,
+        height_cm: int | None,
+        weight_kg: float | None,
+    ) -> UserRecord:
+        return self._registry.set_body_profile(
+            telegram_user_id, sex, birth_date, height_cm, weight_kg
+        )
 
     def delete_user(self, telegram_user_id: int) -> None:
         with self._lock:
@@ -2125,6 +2265,8 @@ class TelegramHandlers:
         state.pop(GOAL_WAITING_KEY, None)
         state.pop(MEAL_WEIGHT_WAITING_KEY, None)
         state.pop(INVITE_WAITING_KEY, None)
+        state.pop(BURN_WAITING_KEY, None)
+        state.pop(SETTINGS_WAITING_KEY, None)
 
     @classmethod
     def _start_waiting(
@@ -2385,9 +2527,18 @@ class TelegramHandlers:
         now = datetime.now(UTC)
         try:
             current_day = await asyncio.to_thread(service.accounting_day, now)
-            reply = await asyncio.to_thread(
-                service.get_day_summary_for, selected_day, now
-            )
+            fallback_burned = None
+            if self._is_admin(update) and selected_day < current_day:
+                garmin = await self._get_current_garmin_calories()
+                fallback_burned = (garmin or {}).get(selected_day)
+            if fallback_burned is None:
+                reply = await asyncio.to_thread(
+                    service.get_day_summary_for, selected_day, now
+                )
+            else:
+                reply = await asyncio.to_thread(
+                    service.get_day_summary_for, selected_day, now, fallback_burned
+                )
         except ValueError:
             await query.answer("Майбутній день ще недоступний.", show_alert=True)
             return
@@ -2640,6 +2791,395 @@ class TelegramHandlers:
             else:
                 reply = f"Ця страва вже збережена: {saved.display_name}."
             await message.reply_text(reply, do_quote=False)
+
+    @staticmethod
+    def _parse_user_date(raw: str) -> date:
+        text = raw.strip()
+        for pattern in ("%d.%m.%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, pattern).date()
+            except ValueError:
+                continue
+        raise ValueError
+
+    @staticmethod
+    def _body_profile(user: UserRecord) -> BodyProfile | None:
+        if (
+            user.bmr_sex not in {"male", "female"}
+            or user.birth_date is None
+            or user.height_cm is None
+            or user.weight_kg is None
+        ):
+            return None
+        return BodyProfile(
+            sex=cast(Literal["male", "female"], user.bmr_sex),
+            birth_date=user.birth_date,
+            height_cm=user.height_cm,
+            weight_kg=user.weight_kg,
+        )
+
+    @staticmethod
+    def _settings_text(user: UserRecord, current_day: date | None = None) -> str:
+        sex = {"male": "чоловіча", "female": "жіноча"}.get(
+            user.bmr_sex or "", "не вказано"
+        )
+        birth = (
+            user.birth_date.strftime("%d.%m.%Y") if user.birth_date else "не вказано"
+        )
+        height = f"{user.height_cm} см" if user.height_cm else "не вказано"
+        weight = (
+            f"{user.weight_kg:g} кг" if user.weight_kg is not None else "не вказано"
+        )
+        profile = TelegramHandlers._body_profile(user)
+        resting = ""
+        if profile is not None:
+            try:
+                value = calculate_resting_kcal(profile, current_day or date.today())
+                resting = f"\nРозрахункова пасивна витрата: {value} кк/добу"
+            except ValueError:
+                resting = "\nРозрахункова пасивна витрата: недоступна"
+        return (
+            "⚙️ Налаштування\n\n"
+            f"Межа доби: {user.day_start:%H:%M}\n"
+            f"Стать для формули: {sex}\n"
+            f"Дата народження: {birth}\n"
+            f"Зріст: {height}\n"
+            f"Вага: {weight}{resting}"
+        )
+
+    @staticmethod
+    def _settings_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🕐 Межа доби", callback_data="settings-field:day_start"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "👤 Стать для формули", callback_data="settings-field:sex"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🎂 Дата народження", callback_data="settings-field:birth_date"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📏 Зріст", callback_data="settings-field:height_cm"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⚖️ Вага", callback_data="settings-field:weight_kg"
+                    )
+                ],
+            ]
+        )
+
+    async def settings(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        user = await self._active_user(update)
+        if message is None or user is None:
+            return
+        await message.reply_text(
+            self._settings_text(user, self._manager.local_date(message.date)),
+            reply_markup=self._settings_markup(),
+            do_quote=False,
+        )
+
+    async def burn(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        service = await self._active_service(update)
+        if message is None or service is None:
+            return
+        last_day = await asyncio.to_thread(service.last_completed_day, message.date)
+        args = list(getattr(context, "args", None) or [])
+        if args:
+            if len(args) != 1:
+                await message.reply_text(
+                    "Вкажи одну дату у форматі ДД.ММ.РРРР, наприклад: /burn 27.08.2026",
+                    do_quote=False,
+                )
+                return
+            try:
+                selected = self._parse_user_date(args[0])
+                self._validate_burn_day(selected, last_day)
+            except ValueError:
+                await message.reply_text(
+                    f"Вкажи завершену добу не пізніше {last_day:%d.%m.%Y}.",
+                    do_quote=False,
+                )
+                return
+            await self._send_burn_mode(message, service, selected)
+            return
+        await message.reply_text(
+            "За яку завершену добу внести або змінити витрату?",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"Остання · {last_day:%d.%m}",
+                            callback_data=f"burn-day:{last_day.isoformat()}",
+                        )
+                    ],
+                    [InlineKeyboardButton("📅 Інша дата", callback_data="burn-other")],
+                    [InlineKeyboardButton("❌ Скасувати", callback_data="wait-cancel")],
+                ]
+            ),
+            do_quote=False,
+        )
+
+    @staticmethod
+    def _validate_burn_day(selected: date, last_completed: date) -> None:
+        if selected > last_completed:
+            raise ValueError("Accounting day is not complete")
+
+    async def _send_burn_mode(
+        self, message: Message, service: CaloriesService, selected: date
+    ) -> None:
+        existing = await asyncio.to_thread(service.get_burned_entry, selected)
+        rows = [
+            [
+                InlineKeyboardButton(
+                    "🔥 Повна витрата",
+                    callback_data=f"burn-mode:total:{selected.isoformat()}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏃 Тільки активні",
+                    callback_data=f"burn-mode:active:{selected.isoformat()}",
+                )
+            ],
+        ]
+        if existing is not None:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🗑 Видалити ручне значення",
+                        callback_data=f"burn-delete:{selected.isoformat()}",
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton("❌ Скасувати", callback_data="wait-cancel")])
+        current = ""
+        if existing is not None:
+            current = f"\nПоточне ручне значення: {existing.effective_total_kcal} кк."
+        await message.reply_text(
+            f"Витрата за {selected:%d.%m.%Y}.{current}\n\nЩо вводимо?",
+            reply_markup=InlineKeyboardMarkup(rows),
+            do_quote=False,
+        )
+
+    async def burn_settings_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        current = await self._active_user(update, callback=True)
+        if service is None or current is None:
+            return
+        data = query.data or ""
+        try:
+            if data == "burn-other":
+                state = {"kind": "burn_date"}
+                self._start_waiting(context, BURN_WAITING_KEY, state)
+                await query.answer()
+                await query.edit_message_text(
+                    "Введи дату завершеної доби у форматі ДД.ММ.РРРР.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "❌ Скасувати", callback_data="wait-cancel"
+                                )
+                            ]
+                        ]
+                    ),
+                )
+                return
+            if data.startswith("burn-day:"):
+                selected = date.fromisoformat(data.removeprefix("burn-day:"))
+                last_day = service.last_completed_day(datetime.now(UTC))
+                self._validate_burn_day(selected, last_day)
+                await query.answer()
+                if query.message is not None:
+                    await self._send_burn_mode(
+                        cast(Message, query.message), service, selected
+                    )
+                return
+            if data.startswith("burn-mode:"):
+                _, mode, raw_day = data.split(":", 2)
+                if mode not in {"total", "active"}:
+                    raise ValueError
+                selected = date.fromisoformat(raw_day)
+                self._validate_burn_day(
+                    selected, service.last_completed_day(datetime.now(UTC))
+                )
+                if mode == "active" and self._body_profile(current) is None:
+                    await query.answer()
+                    await query.edit_message_text(
+                        "Для розрахунку пасивних калорій спочатку "
+                        "заповни параметри тіла.",
+                        reply_markup=self._settings_markup(),
+                    )
+                    return
+                state = {"kind": "burn_kcal", "mode": mode, "day": selected.isoformat()}
+                self._start_waiting(context, BURN_WAITING_KEY, state)
+                await query.answer()
+                await query.edit_message_text(
+                    (
+                        "Введи повну витрату"
+                        if mode == "total"
+                        else "Введи активні калорії"
+                    )
+                    + f" за {selected:%d.%m.%Y}, цілим числом.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "❌ Скасувати", callback_data="wait-cancel"
+                                )
+                            ]
+                        ]
+                    ),
+                )
+                return
+            if data == "burn-confirm":
+                confirm_state = self._user_state(context).get(BURN_WAITING_KEY)
+                if (
+                    not isinstance(confirm_state, dict)
+                    or confirm_state.get("kind") != "burn_confirm"
+                ):
+                    raise ValueError
+                selected_day = date.fromisoformat(str(confirm_state["day"]))
+                self._validate_burn_day(
+                    selected_day, service.last_completed_day(datetime.now(UTC))
+                )
+                entry = build_burned_entry(
+                    selected_day,
+                    cast(Literal["total", "active"], str(confirm_state["mode"])),
+                    int(confirm_state["kcal"]),
+                    datetime.now(UTC),
+                    self._body_profile(current),
+                )
+                await asyncio.to_thread(service.save_burned_entry, entry)
+                self._clear_pending_input(context)
+                await query.answer("Збережено")
+                await query.edit_message_text(
+                    f"Витрату за {entry.day:%d.%m.%Y} збережено: "
+                    f"{entry.effective_total_kcal} кк ✓",
+                    reply_markup=None,
+                )
+                return
+            if data.startswith("burn-delete:"):
+                selected = date.fromisoformat(data.removeprefix("burn-delete:"))
+                deleted = await asyncio.to_thread(service.delete_burned_entry, selected)
+                self._clear_pending_input(context)
+                await query.answer("Видалено" if deleted else "Запису вже немає")
+                await query.edit_message_text(
+                    f"Ручне значення за {selected:%d.%m.%Y} видалено."
+                    + (
+                        " Використовуватиметься Garmin."
+                        if self._is_admin(update)
+                        else ""
+                    ),
+                    reply_markup=None,
+                )
+                return
+            if data.startswith("settings-field:"):
+                field = data.removeprefix("settings-field:")
+                if field == "sex":
+                    await query.answer()
+                    await query.edit_message_text(
+                        "Оберіть варіант формули Mifflin–St Jeor:",
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "Чоловіча", callback_data="settings-sex:male"
+                                    ),
+                                    InlineKeyboardButton(
+                                        "Жіноча", callback_data="settings-sex:female"
+                                    ),
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        "❌ Скасувати", callback_data="wait-cancel"
+                                    )
+                                ],
+                            ]
+                        ),
+                    )
+                    return
+                prompts = {
+                    "day_start": (
+                        "Введи межу доби у форматі ГГ:ХХ, наприклад 01:00. "
+                        "Історичні записи не переміщуватимуться."
+                    ),
+                    "birth_date": "Введи дату народження у форматі ДД.ММ.РРРР.",
+                    "height_cm": "Введи зріст у сантиметрах, від 100 до 250.",
+                    "weight_kg": (
+                        "Введи вагу в кілограмах, від 20 до 500. "
+                        "Можна з десятковою частиною."
+                    ),
+                }
+                if field not in prompts:
+                    raise ValueError
+                self._start_waiting(context, SETTINGS_WAITING_KEY, {"kind": field})
+                await query.answer()
+                await query.edit_message_text(
+                    prompts[field],
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "❌ Скасувати", callback_data="wait-cancel"
+                                )
+                            ]
+                        ]
+                    ),
+                )
+                return
+            if data.startswith("settings-sex:"):
+                sex = data.removeprefix("settings-sex:")
+                if sex not in {"male", "female"}:
+                    raise ValueError
+                if current.telegram_user_id is None:
+                    raise ValueError
+                updated = await asyncio.to_thread(
+                    self._manager.set_body_profile,
+                    current.telegram_user_id,
+                    sex,
+                    current.birth_date,
+                    current.height_cm,
+                    current.weight_kg,
+                )
+                await query.answer("Збережено")
+                await query.edit_message_text(
+                    self._settings_text(
+                        updated, self._manager.local_date(datetime.now(UTC))
+                    ),
+                    reply_markup=self._settings_markup(),
+                )
+                return
+            raise ValueError
+        except (TypeError, ValueError):
+            await query.answer("Некоректні або застарілі дані.", show_alert=True)
+        except Exception:
+            LOGGER.exception("Could not handle burned-calorie/settings callback")
+            await query.answer(
+                "Не вдалося зберегти дані. Спробуй ще раз.", show_alert=True
+            )
 
     async def goal(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -3226,6 +3766,18 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
+        settings_state = self._user_state(context).get(SETTINGS_WAITING_KEY)
+        if isinstance(settings_state, dict):
+            await self._handle_settings_text(
+                update, context, settings_state, message.text
+            )
+            return
+        burn_state = self._user_state(context).get(BURN_WAITING_KEY)
+        if isinstance(burn_state, dict):
+            await self._handle_burn_text(
+                update, context, service, burn_state, message.text
+            )
+            return
         goal_waiting = self._user_state(context).get(GOAL_WAITING_KEY)
         if goal_waiting:
             goal_kind = (
@@ -3245,6 +3797,165 @@ class TelegramHandlers:
             )
             return
         await self._process(service, message, message.text, context=context)
+
+    async def _handle_burn_text(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        service: CaloriesService,
+        state: dict[str, object],
+        text: str,
+    ) -> None:
+        message = update.effective_message
+        current = await self._active_user(update)
+        if message is None or current is None:
+            return
+        if state.get("kind") == "burn_date":
+            try:
+                selected = self._parse_user_date(text)
+                self._validate_burn_day(
+                    selected, service.last_completed_day(message.date)
+                )
+            except ValueError:
+                await message.reply_text(
+                    f"Введи завершену дату не пізніше "
+                    f"{service.last_completed_day(message.date):%d.%m.%Y}.",
+                    do_quote=False,
+                )
+                return
+            self._clear_pending_input(context)
+            await self._send_burn_mode(message, service, selected)
+            return
+        if state.get("kind") != "burn_kcal":
+            self._clear_pending_input(context)
+            return
+        raw = text.strip()
+        if not raw.isascii() or not raw.isdecimal():
+            await message.reply_text(
+                "Введи ціле число калорій від 1 до 20000.", do_quote=False
+            )
+            return
+        kcal = int(raw)
+        try:
+            entry = build_burned_entry(
+                date.fromisoformat(str(state["day"])),
+                cast(Literal["total", "active"], str(state["mode"])),
+                kcal,
+                datetime.now(UTC),
+                self._body_profile(current),
+            )
+        except ValueError:
+            await message.reply_text(
+                "Значення або підсумкова витрата мають бути від 1 до 20000 кк.",
+                do_quote=False,
+            )
+            return
+        state.update({"kind": "burn_confirm", "kcal": kcal})
+        if entry.input_type == "active":
+            profile = entry.profile_snapshot
+            assert profile is not None
+            details = (
+                f"Активні: {entry.input_kcal} кк\n"
+                f"Пасивні: {entry.resting_kcal} кк\n"
+                f"Використана вага: {profile.weight_kg:g} кг\n"
+                f"Повна витрата: {entry.effective_total_kcal} кк"
+            )
+        else:
+            details = f"Повна витрата: {entry.effective_total_kcal} кк"
+        await message.reply_text(
+            f"Запис за {entry.day:%d.%m.%Y}\n\n{details}\n\nЗберегти?",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("✅ Зберегти", callback_data="burn-confirm")],
+                    [InlineKeyboardButton("❌ Скасувати", callback_data="wait-cancel")],
+                ]
+            ),
+            do_quote=False,
+        )
+
+    async def _handle_settings_text(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        state: dict[str, object],
+        text: str,
+    ) -> None:
+        message = update.effective_message
+        current = await self._active_user(update)
+        if message is None or current is None or current.telegram_user_id is None:
+            return
+        kind = str(state.get("kind", ""))
+        try:
+            if kind == "day_start":
+                if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text.strip()):
+                    raise ValueError
+                value = time.fromisoformat(text.strip())
+                updated = await asyncio.to_thread(
+                    self._manager.set_day_start, current.telegram_user_id, value
+                )
+            else:
+                sex = current.bmr_sex
+                birth_date = current.birth_date
+                height_cm = current.height_cm
+                weight_kg = current.weight_kg
+                if kind == "birth_date":
+                    birth_date = self._parse_user_date(text)
+                    today = self._manager.local_date(message.date)
+                    age = (
+                        today.year
+                        - birth_date.year
+                        - (
+                            (today.month, today.day)
+                            < (birth_date.month, birth_date.day)
+                        )
+                    )
+                    if not 13 <= age <= 120:
+                        raise ValueError
+                elif kind == "height_cm":
+                    if not text.strip().isascii() or not text.strip().isdecimal():
+                        raise ValueError
+                    height_cm = int(text.strip())
+                    if not 100 <= height_cm <= 250:
+                        raise ValueError
+                elif kind == "weight_kg":
+                    weight_kg = float(text.strip().replace(",", "."))
+                    if not 20 <= weight_kg <= 500:
+                        raise ValueError
+                else:
+                    raise ValueError
+                updated = await asyncio.to_thread(
+                    self._manager.set_body_profile,
+                    current.telegram_user_id,
+                    sex,
+                    birth_date,
+                    height_cm,
+                    weight_kg,
+                )
+        except ValueError:
+            validation = {
+                "day_start": "Введи час у форматі ГГ:ХХ, наприклад 01:00.",
+                "birth_date": (
+                    "Введи коректну дату ДД.ММ.РРРР. Підтримуваний вік: 13–120 років."
+                ),
+                "height_cm": "Введи цілий зріст від 100 до 250 см.",
+                "weight_kg": "Введи вагу від 20 до 500 кг, наприклад 82,5.",
+            }
+            await message.reply_text(
+                validation.get(kind, "Некоректне значення."), do_quote=False
+            )
+            return
+        except Exception:
+            LOGGER.exception("Could not save user settings")
+            await message.reply_text(
+                "Не вдалося зберегти налаштування.", do_quote=False
+            )
+            return
+        self._clear_pending_input(context)
+        await message.reply_text(
+            self._settings_text(updated, self._manager.local_date(message.date)),
+            reply_markup=self._settings_markup(),
+            do_quote=False,
+        )
 
     async def _handle_meal_weight_input(
         self,

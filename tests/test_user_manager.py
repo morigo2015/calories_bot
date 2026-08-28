@@ -129,6 +129,7 @@ class Workspace:
         self.fail_delete = False
         self.opened = []
         self.saved_opened = []
+        self.burned_opened = []
 
     def create_personal_spreadsheet(self, title, cutoff, user_id):
         self.created.append((title, cutoff, user_id))
@@ -141,6 +142,13 @@ class Workspace:
     def open_saved_meal_store(self, sheet):
         self.saved_opened.append(sheet)
         return SimpleNamespace(sheet=sheet)
+
+    def open_burned_calorie_store(self, sheet):
+        self.burned_opened.append(sheet)
+        return SimpleNamespace(
+            get=lambda day: None,
+            get_range=lambda start, end: {},
+        )
 
     def delete_personal_spreadsheet(self, sheet):
         if self.fail_delete:
@@ -178,6 +186,7 @@ def test_prepare_release_storage_opens_active_saved_meal_sheet(tmp_path) -> None
     manager(tmp_path, registry, workspace).prepare_release_storage()
 
     assert workspace.saved_opened == ["sheet-123"]
+    assert workspace.burned_opened == ["sheet-123"]
 
 
 def test_activation_reuses_spreadsheet_saved_by_partial_attempt(tmp_path) -> None:

@@ -106,6 +106,9 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         weekly_meals=lambda: None,
         goal=lambda: None,
         protein_goal=lambda: None,
+        burn=lambda: None,
+        settings=lambda: None,
+        burn_settings_callback=lambda: None,
         meals=lambda: None,
         recent=lambda: None,
         save=lambda: None,
@@ -172,7 +175,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 31
+    assert len(app.handlers) == 34
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
@@ -254,6 +257,8 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("week", "📊 За тиждень"),
         ("goal", "🎯 ціль по калоріям"),
         ("protein_goal", "🥩 ціль по білку"),
+        ("burn", "🔥 внести витрату калорій"),
+        ("settings", "⚙️ налаштування"),
         ("help", "❓ як користуватися ботом"),
         ("tips", "💡 додаткові можливості"),
     ]
@@ -264,6 +269,8 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "week",
         "goal",
         "protein_goal",
+        "burn",
+        "settings",
         "help",
         "tips",
         "burned",

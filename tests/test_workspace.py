@@ -91,6 +91,12 @@ def test_create_sheet_places_it_in_folder_and_initializes_meal_schema(
         "open_saved_meal_store",
         lambda *args: saved_opened.append(args) or SimpleNamespace(),
     )
+    burned_opened = []
+    monkeypatch.setattr(
+        google,
+        "open_burned_calorie_store",
+        lambda *args: burned_opened.append(args) or SimpleNamespace(),
+    )
 
     spreadsheet_id = google.create_personal_spreadsheet("Вася — 123", time(1), 123)
 
@@ -98,6 +104,7 @@ def test_create_sheet_places_it_in_folder_and_initializes_meal_schema(
     assert client.created == [("Вася — 123", "folder")]
     assert opened == [("sheet-123", time(1), 123)]
     assert saved_opened == [("sheet-123",)]
+    assert burned_opened == [("sheet-123",)]
 
 
 def test_workspace_wraps_create_and_open_errors(monkeypatch, tmp_path) -> None:

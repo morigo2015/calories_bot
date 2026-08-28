@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import gspread
 
+from .burned import GoogleBurnedCalorieStore
 from .saved_meals import GoogleSavedMealStore
 from .sheets import GoogleSheetsStore
 
@@ -66,6 +67,16 @@ class GoogleWorkspace:
         except Exception as exc:
             raise GoogleWorkspaceError("Could not open saved-meals worksheet") from exc
 
+    def open_burned_calorie_store(
+        self, spreadsheet_id: str
+    ) -> GoogleBurnedCalorieStore:
+        try:
+            return GoogleBurnedCalorieStore(spreadsheet_id, client=self._client)
+        except Exception as exc:
+            raise GoogleWorkspaceError(
+                "Could not open burned-calorie worksheet"
+            ) from exc
+
     def create_personal_spreadsheet(
         self, title: str, day_start: time, telegram_user_id: int
     ) -> str:
@@ -75,6 +86,7 @@ class GoogleWorkspace:
             # the registry is allowed to mark the user active.
             self.open_meal_store(spreadsheet.id, day_start, telegram_user_id)
             self.open_saved_meal_store(spreadsheet.id)
+            self.open_burned_calorie_store(spreadsheet.id)
             return spreadsheet.id
         except Exception as exc:
             raise GoogleWorkspaceError("Could not create personal spreadsheet") from exc

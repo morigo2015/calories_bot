@@ -41,12 +41,14 @@ async def configure_bot_commands(
         BotCommand("week", "📊 За тиждень"),
         BotCommand("goal", "🎯 ціль по калоріям"),
         BotCommand("protein_goal", "🥩 ціль по білку"),
+        BotCommand("burn", "🔥 внести витрату калорій"),
+        BotCommand("settings", "⚙️ налаштування"),
         BotCommand("help", "❓ як користуватися ботом"),
         BotCommand("tips", "💡 додаткові можливості"),
     ]
     admin_commands = [
         *user_commands,
-        BotCommand("burned", "🔥 витрата калорій"),
+        BotCommand("burned", "⌚ дані Garmin"),
         BotCommand("invite", "➕ додати користувача"),
         BotCommand("info", "ℹ️ інформація про реліз"),
         BotCommand("users", "👥 показати перелік користувачів"),
@@ -223,6 +225,12 @@ def main() -> None:
         CommandHandler("protein_goal", handlers.protein_goal, filters=message_update)
     )
     application.add_handler(
+        CommandHandler("burn", handlers.burn, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("settings", handlers.settings, filters=message_update)
+    )
+    application.add_handler(
         CommandHandler("meals", handlers.meals, filters=message_update)
     )
     application.add_handler(
@@ -254,6 +262,12 @@ def main() -> None:
     )
     application.add_handler(
         MessageHandler(message_update & filters.COMMAND, handlers.cancel_pending_input)
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.burn_settings_callback,
+            pattern=r"^(?:burn-|settings-)",
+        )
     )
     application.add_handler(
         CallbackQueryHandler(

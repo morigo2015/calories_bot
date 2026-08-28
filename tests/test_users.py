@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import date, time
 from unittest.mock import Mock
 
 import pytest
@@ -32,8 +32,8 @@ class FakeWorksheet:
 
     def update(self, values, range_name=None, **kwargs):
         del kwargs
-        if range_name in {"H1:H1", "I1:I1"}:
-            self.rows[0].append(values[0][0])
+        if range_name in {"H1:H1", "I1:I1", "J1:M1"}:
+            self.rows[0].extend(values[0])
             return
         row_number = int(range_name.split(":", maxsplit=1)[0][1:])
         self.rows[row_number - 1] = list(values[0])
@@ -185,6 +185,23 @@ def test_daily_protein_goal_is_read_written_disabled_and_verified() -> None:
 
     assert enabled.daily_protein_goal == 100
     assert disabled.daily_protein_goal is None
+
+
+def test_day_start_and_body_profile_are_updated_without_changing_goals() -> None:
+    registry = build_registry(
+        [USER_HEADERS, [123, "A", "", "active", "", "sheet", "01:00", 2000, 100]]
+    )
+
+    cutoff = registry.set_day_start(123, time(3, 30))
+    updated = registry.set_body_profile(123, "female", date(1990, 5, 15), 170, 65.5)
+
+    assert cutoff.day_start == time(3, 30)
+    assert updated.bmr_sex == "female"
+    assert updated.birth_date == date(1990, 5, 15)
+    assert updated.height_cm == 170
+    assert updated.weight_kg == 65.5
+    assert updated.daily_kcal_goal == 2000
+    assert updated.daily_protein_goal == 100
 
 
 def test_invite_activation_is_one_time_and_retains_personal_context() -> None:

@@ -4,7 +4,7 @@ import re
 import threading
 import time as time_module
 from dataclasses import dataclass
-from datetime import time
+from datetime import date, time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Protocol
 
@@ -25,7 +25,14 @@ LEGACY_USER_HEADERS = [
     "day_start",
 ]
 KCAL_GOAL_USER_HEADERS = [*LEGACY_USER_HEADERS, "daily_kcal_goal"]
-USER_HEADERS = [*KCAL_GOAL_USER_HEADERS, "daily_protein_goal"]
+PROTEIN_GOAL_USER_HEADERS = [*KCAL_GOAL_USER_HEADERS, "daily_protein_goal"]
+USER_HEADERS = [
+    *PROTEIN_GOAL_USER_HEADERS,
+    "bmr_sex",
+    "birth_date",
+    "height_cm",
+    "weight_kg",
+]
 
 USER_ID_COLUMN = 0
 DISPLAY_NAME_COLUMN = 1
@@ -36,6 +43,10 @@ SPREADSHEET_ID_COLUMN = 5
 DAY_START_COLUMN = 6
 DAILY_KCAL_GOAL_COLUMN = 7
 DAILY_PROTEIN_GOAL_COLUMN = 8
+BMR_SEX_COLUMN = 9
+BIRTH_DATE_COLUMN = 10
+HEIGHT_CM_COLUMN = 11
+WEIGHT_KG_COLUMN = 12
 
 MIN_DAILY_KCAL_GOAL = 1
 MAX_DAILY_KCAL_GOAL = 20_000
@@ -71,6 +82,10 @@ class UserRecord:
     day_start: time
     daily_kcal_goal: int | None = None
     daily_protein_goal: int | None = None
+    bmr_sex: str | None = None
+    birth_date: date | None = None
+    height_cm: int | None = None
+    weight_kg: float | None = None
 
 
 class UserRegistry(Protocol):
@@ -102,6 +117,17 @@ class UserRegistry(Protocol):
 
     def set_daily_protein_goal(
         self, telegram_user_id: int, goal: int | None
+    ) -> UserRecord: ...
+
+    def set_day_start(self, telegram_user_id: int, value: time) -> UserRecord: ...
+
+    def set_body_profile(
+        self,
+        telegram_user_id: int,
+        sex: str | None,
+        birth_date: date | None,
+        height_cm: int | None,
+        weight_kg: float | None,
     ) -> UserRecord: ...
 
     def delete_user(self, telegram_user_id: int) -> None: ...
@@ -158,6 +184,60 @@ def parse_daily_protein_goal(value: object) -> int | None:
             f"Invalid daily_protein_goal in user registry: {text!r}"
         )
     return goal
+
+
+def _parse_optional_int(
+    value: object, name: str, minimum: int, maximum: int
+) -> int | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    if not text.isascii() or not text.isdecimal():
+        raise UserRegistryError(f"Invalid {name} in user registry: {text!r}")
+    result = int(text)
+    if not minimum <= result <= maximum:
+        raise UserRegistryError(f"Invalid {name} in user registry: {text!r}")
+    return result
+
+
+def parse_bmr_sex(value: object) -> str | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    if text not in {"male", "female"}:
+        raise UserRegistryError(f"Invalid bmr_sex in user registry: {text!r}")
+    return text
+
+
+def parse_birth_date(value: object) -> date | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise UserRegistryError(
+            f"Invalid birth_date in user registry: {text!r}"
+        ) from exc
+
+
+def parse_height_cm(value: object) -> int | None:
+    return _parse_optional_int(value, "height_cm", 100, 250)
+
+
+def parse_weight_kg(value: object) -> float | None:
+    text = str(value).strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        result = float(text)
+    except ValueError as exc:
+        raise UserRegistryError(
+            f"Invalid weight_kg in user registry: {text!r}"
+        ) from exc
+    if not 20 <= result <= 500:
+        raise UserRegistryError(f"Invalid weight_kg in user registry: {text!r}")
+    return result
 
 
 class GoogleUserRegistry:
@@ -224,6 +304,18 @@ class GoogleUserRegistry:
                     "Could not migrate the user registry headers"
                 ) from exc
             rows = self._get_all_values()
+        if rows[0] == PROTEIN_GOAL_USER_HEADERS:
+            try:
+                self._worksheet.update(
+                    values=[["bmr_sex", "birth_date", "height_cm", "weight_kg"]],
+                    range_name="J1:M1",
+                    raw=True,
+                )
+            except Exception as exc:
+                raise UserRegistryError(
+                    "Could not migrate the user registry body-profile headers"
+                ) from exc
+            rows = self._get_all_values()
         if rows[0] != USER_HEADERS:
             raise UserRegistryError(
                 "User registry headers are incompatible. Expected: "
@@ -267,6 +359,10 @@ class GoogleUserRegistry:
             daily_protein_goal=parse_daily_protein_goal(
                 padded[DAILY_PROTEIN_GOAL_COLUMN]
             ),
+            bmr_sex=parse_bmr_sex(padded[BMR_SEX_COLUMN]),
+            birth_date=parse_birth_date(padded[BIRTH_DATE_COLUMN]),
+            height_cm=parse_height_cm(padded[HEIGHT_CM_COLUMN]),
+            weight_kg=parse_weight_kg(padded[WEIGHT_KG_COLUMN]),
         )
 
     def _records(self) -> list[UserRecord]:
@@ -325,6 +421,10 @@ class GoogleUserRegistry:
                 day_start.isoformat(timespec="minutes"),
                 "",
                 "",
+                "",
+                "",
+                "",
+                "",
             ]
             try:
                 self._worksheet.append_row(row, value_input_option=ValueInputOption.raw)
@@ -339,7 +439,7 @@ class GoogleUserRegistry:
         try:
             self._worksheet.update(
                 values=[values],
-                range_name=f"A{row_number}:I{row_number}",
+                range_name=f"A{row_number}:M{row_number}",
                 raw=True,
             )
         except Exception as exc:
@@ -382,6 +482,10 @@ class GoogleUserRegistry:
                     current.day_start.isoformat(timespec="minutes"),
                     current.daily_kcal_goal or "",
                     current.daily_protein_goal or "",
+                    current.bmr_sex or "",
+                    current.birth_date.isoformat() if current.birth_date else "",
+                    current.height_cm or "",
+                    current.weight_kg or "",
                 ],
             )
 
@@ -411,6 +515,10 @@ class GoogleUserRegistry:
                     current.day_start.isoformat(timespec="minutes"),
                     current.daily_kcal_goal or "",
                     current.daily_protein_goal or "",
+                    current.bmr_sex or "",
+                    current.birth_date.isoformat() if current.birth_date else "",
+                    current.height_cm or "",
+                    current.weight_kg or "",
                 ],
             )
 
@@ -433,6 +541,10 @@ class GoogleUserRegistry:
                     current.day_start.isoformat(timespec="minutes"),
                     current.daily_kcal_goal or "",
                     current.daily_protein_goal or "",
+                    current.bmr_sex or "",
+                    current.birth_date.isoformat() if current.birth_date else "",
+                    current.height_cm or "",
+                    current.weight_kg or "",
                 ],
             )
 
@@ -460,6 +572,10 @@ class GoogleUserRegistry:
                     current.day_start.isoformat(timespec="minutes"),
                     goal or "",
                     current.daily_protein_goal or "",
+                    current.bmr_sex or "",
+                    current.birth_date.isoformat() if current.birth_date else "",
+                    current.height_cm or "",
+                    current.weight_kg or "",
                 ],
             )
             if updated.daily_kcal_goal != goal:
@@ -493,10 +609,86 @@ class GoogleUserRegistry:
                     current.day_start.isoformat(timespec="minutes"),
                     current.daily_kcal_goal or "",
                     goal or "",
+                    current.bmr_sex or "",
+                    current.birth_date.isoformat() if current.birth_date else "",
+                    current.height_cm or "",
+                    current.weight_kg or "",
                 ],
             )
             if updated.daily_protein_goal != goal:
                 raise UserRegistryError("Could not verify daily protein goal update")
+            return updated
+
+    def set_day_start(self, telegram_user_id: int, value: time) -> UserRecord:
+        with self._lock:
+            current = self.get_user(telegram_user_id)
+            if current is None or current.status != "active":
+                raise UserRegistryError("Active user not found")
+            updated = self._update_row(
+                current.row_number,
+                [
+                    current.telegram_user_id,
+                    current.display_name,
+                    current.telegram_username,
+                    current.status,
+                    current.invite_token,
+                    current.spreadsheet_id,
+                    value.isoformat(timespec="minutes"),
+                    current.daily_kcal_goal or "",
+                    current.daily_protein_goal or "",
+                    current.bmr_sex or "",
+                    current.birth_date.isoformat() if current.birth_date else "",
+                    current.height_cm or "",
+                    current.weight_kg or "",
+                ],
+            )
+            if updated.day_start != value:
+                raise UserRegistryError("Could not verify day-start update")
+            return updated
+
+    def set_body_profile(
+        self,
+        telegram_user_id: int,
+        sex: str | None,
+        birth_date: date | None,
+        height_cm: int | None,
+        weight_kg: float | None,
+    ) -> UserRecord:
+        if sex not in {None, "male", "female"}:
+            raise ValueError("Unsupported sex for BMR formula")
+        if height_cm is not None and not 100 <= height_cm <= 250:
+            raise ValueError("Height must be between 100 and 250 cm")
+        if weight_kg is not None and not 20 <= weight_kg <= 500:
+            raise ValueError("Weight must be between 20 and 500 kg")
+        with self._lock:
+            current = self.get_user(telegram_user_id)
+            if current is None or current.status != "active":
+                raise UserRegistryError("Active user not found")
+            updated = self._update_row(
+                current.row_number,
+                [
+                    current.telegram_user_id,
+                    current.display_name,
+                    current.telegram_username,
+                    current.status,
+                    current.invite_token,
+                    current.spreadsheet_id,
+                    current.day_start.isoformat(timespec="minutes"),
+                    current.daily_kcal_goal or "",
+                    current.daily_protein_goal or "",
+                    sex or "",
+                    birth_date.isoformat() if birth_date else "",
+                    height_cm or "",
+                    weight_kg or "",
+                ],
+            )
+            if (
+                updated.bmr_sex,
+                updated.birth_date,
+                updated.height_cm,
+                updated.weight_kg,
+            ) != (sex, birth_date, height_cm, weight_kg):
+                raise UserRegistryError("Could not verify body-profile update")
             return updated
 
     def delete_user(self, telegram_user_id: int) -> None:

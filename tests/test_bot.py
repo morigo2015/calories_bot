@@ -36,6 +36,7 @@ from calories_bot.bot import (
     load_help_text,
     load_start_text,
 )
+from calories_bot.burned import build_burned_entry
 from calories_bot.meal_grouping import MealGroupingError, MealGroupingResult
 from calories_bot.models import (
     FoodAnalysis,
@@ -1224,6 +1225,95 @@ def test_weekly_reply_combines_meals_macros_and_consumed_calories() -> None:
     assert "Баланс калорій" not in reply
 
 
+def test_weekly_reply_averages_balance_only_over_days_with_burned_data() -> None:
+    end_day = date(2026, 8, 8)
+    covered = [date(2026, 8, 7), date(2026, 8, 8)]
+    reply = format_weekly_reply(
+        end_day,
+        {
+            covered[0]: NutritionSummary(kcal=2000),
+            covered[1]: NutritionSummary(kcal=1800),
+        },
+        [],
+        {covered[0]: 2400, covered[1]: 2200},
+    )
+
+    assert "Дефіцит 400 ккал" in reply
+    assert "середнє за 2 із 7 днів" in reply
+    assert "для решти витрату не внесено" in reply
+    assert "- —&nbsp;&nbsp;= —" in reply
+
+
+def test_day_reply_shows_burned_source_and_deficit() -> None:
+    reply = format_day_reply(
+        [DayMeal("їжа", 1800)],
+        accounting_day=date(2026, 8, 27),
+        is_today=False,
+        burned_total=2400,
+        burned_source="680 активних + 1720 пасивних",
+    )
+
+    assert "Дефіцит 600 кк" in reply
+    assert "Витрачено 2400 кк · 680 активних + 1720 пасивних" in reply
+
+
+def test_service_manual_burned_value_overrides_garmin_and_can_be_deleted(
+    tmp_path,
+) -> None:
+    class BurnedStore:
+        def __init__(self, entry):
+            self.entries = {entry.day: entry}
+
+        def get(self, day):
+            return self.entries.get(day)
+
+        def get_range(self, start, end):
+            return {
+                day: entry for day, entry in self.entries.items() if start <= day <= end
+            }
+
+        def upsert(self, entry):
+            self.entries[entry.day] = entry
+            return entry
+
+        def delete(self, day):
+            return self.entries.pop(day, None) is not None
+
+    target = date(2026, 8, 8)
+    manual = build_burned_entry(target, "total", 2100, datetime(2026, 8, 9, tzinfo=UTC))
+    burned_store = BurnedStore(manual)
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.first_meal_day = date(2026, 8, 2)
+    store.period_meals = [
+        PeriodMeal(
+            "їжа",
+            100,
+            1800,
+            NutritionSummary(kcal=1800),
+            target,
+        )
+    ]
+    service = CaloriesService(
+        FakeAnalyzer(food_analysis()),
+        store,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        burned_store=burned_store,
+    )
+    garmin = {date(2026, 8, 2) + timedelta(days=offset): 2500 for offset in range(7)}
+
+    reply = service.get_weekly(datetime(2026, 8, 9, 12, tzinfo=TZ), garmin)
+
+    assert "<b>сб 08.08</b>: + 1800&nbsp;&nbsp;- 2100" in reply
+    assert service.get_burned_entry(target) == manual
+    assert service.last_completed_day(datetime(2026, 8, 9, 0, 30, tzinfo=TZ)) == date(
+        2026, 8, 7
+    )
+    assert service.delete_burned_entry(target) is True
+    assert service.get_burned_entry(target) is None
+
+
 def test_weekly_service_groups_meals_and_shows_their_total_weight(tmp_path) -> None:
     class Grouper:
         def group(self, names):
@@ -1692,6 +1782,10 @@ def user_record(
     cutoff=time(1),
     goal=None,
     protein_goal=None,
+    bmr_sex=None,
+    birth_date=None,
+    height_cm=None,
+    weight_kg=None,
 ):
     from calories_bot.users import UserRecord
 
@@ -1706,6 +1800,10 @@ def user_record(
         day_start=cutoff,
         daily_kcal_goal=goal,
         daily_protein_goal=protein_goal,
+        bmr_sex=bmr_sex,
+        birth_date=birth_date,
+        height_cm=height_cm,
+        weight_kg=weight_kg,
     )
 
 
@@ -1720,6 +1818,10 @@ class FakeManager:
 
     def get_user(self, user_id):
         return self.users.get(user_id)
+
+    @staticmethod
+    def local_date(timestamp):
+        return timestamp.astimezone(TZ).date()
 
     def service_for(self, user):
         return self.services[user.telegram_user_id]
@@ -1840,6 +1942,60 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
         ),
         message,
     )
+
+
+def test_settings_shows_optional_body_profile_and_resting_estimate() -> None:
+    current = user_record(
+        bmr_sex="male",
+        birth_date=date(1990, 5, 15),
+        height_cm=180,
+        weight_kg=80,
+    )
+    handlers = TelegramHandlers(999, FakeManager({123: current}, {123: object()}))
+    update, message = make_update()
+
+    asyncio.run(handlers.settings(update, SimpleNamespace(user_data={})))
+
+    assert "Межа доби: 01:00" in message.replies[0]
+    assert "Стать для формули: чоловіча" in message.replies[0]
+    assert "Розрахункова пасивна витрата:" in message.replies[0]
+    buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard
+    assert [row[0].text for row in buttons] == [
+        "🕐 Межа доби",
+        "👤 Стать для формули",
+        "🎂 Дата народження",
+        "📏 Зріст",
+        "⚖️ Вага",
+    ]
+
+
+def test_burn_accepts_any_completed_date_and_rejects_current_day() -> None:
+    class Service:
+        def last_completed_day(self, timestamp):
+            del timestamp
+            return date(2026, 8, 1)
+
+        def get_burned_entry(self, day):
+            assert day == date(2026, 7, 15)
+            return None
+
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: Service()})
+    )
+    update, message = make_update()
+    context = SimpleNamespace(user_data={}, args=["15.07.2026"])
+
+    asyncio.run(handlers.burn(update, context))
+
+    assert message.replies == ["Витрата за 15.07.2026.\n\nЩо вводимо?"]
+    assert message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0].text == (
+        "🔥 Повна витрата"
+    )
+
+    update, message = make_update()
+    context = SimpleNamespace(user_data={}, args=["02.08.2026"])
+    asyncio.run(handlers.burn(update, context))
+    assert "не пізніше 01.08.2026" in message.replies[0]
 
 
 @pytest.mark.parametrize(
@@ -3357,7 +3513,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.10.0"]
+    assert admin_message.replies == ["Версія: 1.11.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -3386,7 +3542,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.10.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.11.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
