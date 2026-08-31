@@ -241,6 +241,8 @@ class SavedMeal(BaseModel):
     default_total_weight_g: int = Field(ge=1, le=MAX_WEIGHT_G)
     base_meal: MealResult
     icon: str | None = None
+    is_pinned: bool = False
+    sort_order: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_display_name(self) -> SavedMeal:

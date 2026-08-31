@@ -3433,7 +3433,9 @@ def test_saved_meal_management_offers_rename_weight_and_deletion() -> None:
     ]
     assert item_keyboard[0][0].callback_data == "manage-rename:cheese"
     assert item_keyboard[0][1].callback_data == "manage-weight:cheese"
-    assert item_keyboard[1][0].callback_data == "manage-delete:cheese"
+    assert item_keyboard[1][0].callback_data == "manage-pin:cheese"
+    assert item_keyboard[1][1].callback_data == "manage-order:cheese"
+    assert item_keyboard[2][0].callback_data == "manage-delete:cheese"
 
     delete_update, delete_query = make_callback_update("manage-delete:cheese")
     asyncio.run(handlers.library_callback(delete_update, context))
@@ -3446,6 +3448,90 @@ def test_saved_meal_management_offers_rename_weight_and_deletion() -> None:
     ]
     assert delete_keyboard[0][0].callback_data == "manage-delete-do:cheese"
     assert delete_keyboard[0][1].callback_data == "meals-manage"
+
+
+def test_saved_meal_can_be_pinned_and_moved_from_management() -> None:
+    class Service:
+        def __init__(self):
+            value = calculate_meal(food_analysis())
+            self.meals = [
+                SavedMeal(
+                    saved_meal_id="cheese",
+                    source_message_id=1,
+                    display_name="Сир",
+                    default_total_weight_g=50,
+                    base_meal=value,
+                    sort_order=2,
+                ),
+                SavedMeal(
+                    saved_meal_id="apple",
+                    source_message_id=2,
+                    display_name="Яблуко",
+                    default_total_weight_g=100,
+                    base_meal=value,
+                    sort_order=1,
+                ),
+            ]
+
+        def list_saved_meals(self):
+            return sorted(
+                self.meals,
+                key=lambda meal: (meal.is_pinned, meal.sort_order),
+                reverse=True,
+            )
+
+        def get_saved_meal(self, saved_id):
+            return next(
+                (meal for meal in self.meals if meal.saved_meal_id == saved_id),
+                None,
+            )
+
+        def toggle_saved_meal_pin(self, saved_id):
+            current = self.get_saved_meal(saved_id)
+            if current is None:
+                return None
+            updated = current.model_copy(update={"is_pinned": not current.is_pinned})
+            self.meals[self.meals.index(current)] = updated
+            return updated
+
+        def move_saved_meal(self, saved_id, direction):
+            assert direction == "down"
+            current = self.get_saved_meal(saved_id)
+            if current is None:
+                return None
+            other = next(meal for meal in self.meals if meal.saved_meal_id == "apple")
+            self.meals[self.meals.index(current)] = current.model_copy(
+                update={"sort_order": 1}
+            )
+            self.meals[self.meals.index(other)] = other.model_copy(
+                update={"sort_order": 2}
+            )
+            return self.get_saved_meal(saved_id)
+
+    service = Service()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    context = SimpleNamespace(user_data={})
+
+    order_update, order_query = make_callback_update("manage-order:cheese")
+    asyncio.run(handlers.library_callback(order_update, context))
+
+    assert "Позиція 1 з 2 серед інших страв" in order_query.edits[0][0]
+
+    move_update, move_query = make_callback_update("manage-move:down:cheese")
+    asyncio.run(handlers.library_callback(move_update, context))
+
+    assert move_query.answers == [("Позицію оновлено", {})]
+    assert "Позиція 2 з 2 серед інших страв" in move_query.edits[0][0]
+
+    pin_update, pin_query = make_callback_update("manage-pin:cheese")
+    asyncio.run(handlers.library_callback(pin_update, context))
+
+    assert pin_query.answers == [("Закріплено", {})]
+    assert pin_query.edits[0][0].startswith("⭐ Сир")
+    assert (
+        pin_query.edits[0][1]["reply_markup"].inline_keyboard[1][0].text
+        == "☆ Відкріпити"
+    )
 
 
 def test_saved_meal_name_and_weight_are_updated_from_text_input() -> None:
@@ -3510,7 +3596,7 @@ def test_saved_meal_name_and_weight_are_updated_from_text_input() -> None:
     assert context.user_data == {}
 
 
-def test_saved_meal_button_uses_confident_semantic_icon() -> None:
+def test_saved_meal_button_shows_pin_and_confident_semantic_icon() -> None:
     value = calculate_meal(food_analysis())
     service = SimpleNamespace(
         list_saved_meals=lambda: [
@@ -3521,6 +3607,7 @@ def test_saved_meal_button_uses_confident_semantic_icon() -> None:
                 default_total_weight_g=50,
                 base_meal=value,
                 icon="🧀",
+                is_pinned=True,
             )
         ]
     )
@@ -3530,7 +3617,7 @@ def test_saved_meal_button_uses_confident_semantic_icon() -> None:
     asyncio.run(handlers.meals(update, SimpleNamespace(user_data={})))
 
     button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
-    assert button.text == "➕ 🧀 Сир · 50 г"
+    assert button.text == "➕ ⭐ 🧀 Сир · 50 г"
 
 
 def test_recent_command_is_separate_direct_add_list() -> None:

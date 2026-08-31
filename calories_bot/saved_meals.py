@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import gspread
 from gspread.utils import ValueInputOption, ValueRenderOption
@@ -16,13 +16,18 @@ LEGACY_SAVED_MEALS_HEADERS = [
     "meal_json",
 ]
 PREVIOUS_SAVED_MEALS_HEADERS = [*LEGACY_SAVED_MEALS_HEADERS, "icon"]
-SAVED_MEALS_HEADERS = [
+UNORDERED_SAVED_MEALS_HEADERS = [
     "saved_meal_id",
     "source_message_id",
     "display_name",
     "default_total_weight_g",
     "simple_meal_json",
     "icon",
+]
+SAVED_MEALS_HEADERS = [
+    *UNORDERED_SAVED_MEALS_HEADERS,
+    "is_pinned",
+    "sort_order",
 ]
 
 
@@ -61,13 +66,22 @@ class SavedMealStore(Protocol):
         *,
         display_name: str | None = None,
         default_total_weight_g: int | None = None,
+        is_pinned: bool | None = None,
+    ) -> SavedMeal | None: ...
+
+    def reorder(
+        self,
+        saved_meal_id: str,
+        direction: Literal["top", "up", "down", "bottom"],
     ) -> SavedMeal | None: ...
 
     def delete(self, saved_meal_id: str) -> bool: ...
 
 
-def _saved_meal_from_row(row: list[object]) -> SavedMeal:
+def _saved_meal_from_row(row: list[object], *, fallback_sort_order: int) -> SavedMeal:
     padded = row + [""] * (len(SAVED_MEALS_HEADERS) - len(row))
+    pinned_raw = str(padded[6]).strip().casefold()
+    sort_order_raw = str(padded[7]).strip()
     return SavedMeal(
         saved_meal_id=str(padded[0]),
         source_message_id=int(str(padded[1])),
@@ -75,6 +89,8 @@ def _saved_meal_from_row(row: list[object]) -> SavedMeal:
         default_total_weight_g=int(str(padded[3])),
         base_meal=round_meal_nutrition(MealResult.model_validate_json(str(padded[4]))),
         icon=str(padded[5]).strip() or None,
+        is_pinned=pinned_raw in {"true", "1", "yes"},
+        sort_order=int(sort_order_raw) if sort_order_raw else fallback_sort_order,
     )
 
 
@@ -121,6 +137,14 @@ class GoogleSavedMealStore:
                 SAVED_MEALS_HEADERS, value_input_option=ValueInputOption.raw
             )
             rows = [SAVED_MEALS_HEADERS]
+        if rows[0] == UNORDERED_SAVED_MEALS_HEADERS:
+            self._worksheet.add_cols(2)
+            self._worksheet.update(
+                [["is_pinned", "sort_order"]],
+                range_name="G1:H1",
+                raw=True,
+            )
+            rows[0] = SAVED_MEALS_HEADERS
         if rows[0] != SAVED_MEALS_HEADERS:
             raise SavedMealsSchemaError(
                 "Saved-meals worksheet headers are incompatible"
@@ -139,7 +163,10 @@ class GoogleSavedMealStore:
     def _read_all(self) -> list[tuple[int, SavedMeal]]:
         try:
             return [
-                (row_number, _saved_meal_from_row(row))
+                (
+                    row_number,
+                    _saved_meal_from_row(row, fallback_sort_order=row_number),
+                )
                 for row_number, row in enumerate(self._rows(), start=2)
             ]
         except Exception as exc:
@@ -148,7 +175,11 @@ class GoogleSavedMealStore:
             raise SavedMealsReadError("Could not read saved meals") from exc
 
     def list_meals(self) -> list[SavedMeal]:
-        return [meal for _, meal in reversed(self._read_all())]
+        return sorted(
+            (meal for _, meal in self._read_all()),
+            key=lambda meal: (meal.is_pinned, meal.sort_order),
+            reverse=True,
+        )
 
     def get(self, saved_meal_id: str) -> SavedMeal | None:
         return next(
@@ -171,8 +202,15 @@ class GoogleSavedMealStore:
         )
 
     def append(self, saved_meal: SavedMeal) -> SavedMeal:
+        existing_meals = self._read_all()
+        next_sort_order = (
+            max((meal.sort_order for _, meal in existing_meals), default=0) + 1
+        )
         saved_meal = saved_meal.model_copy(
-            update={"base_meal": round_meal_nutrition(saved_meal.base_meal)}
+            update={
+                "base_meal": round_meal_nutrition(saved_meal.base_meal),
+                "sort_order": next_sort_order,
+            }
         )
         existing = self.get(saved_meal.saved_meal_id)
         if existing is not None:
@@ -184,6 +222,8 @@ class GoogleSavedMealStore:
             saved_meal.default_total_weight_g,
             saved_meal.base_meal.model_dump_json(),
             saved_meal.icon or "",
+            "TRUE" if saved_meal.is_pinned else "FALSE",
+            saved_meal.sort_order,
         ]
         try:
             self._worksheet.append_row(row, value_input_option=ValueInputOption.raw)
@@ -213,6 +253,7 @@ class GoogleSavedMealStore:
         *,
         display_name: str | None = None,
         default_total_weight_g: int | None = None,
+        is_pinned: bool | None = None,
     ) -> SavedMeal | None:
         target = next(
             (
@@ -236,6 +277,7 @@ class GoogleSavedMealStore:
                     if default_total_weight_g is None
                     else default_total_weight_g
                 ),
+                "is_pinned": current.is_pinned if is_pinned is None else is_pinned,
             }
         )
         updates = []
@@ -248,6 +290,13 @@ class GoogleSavedMealStore:
                 {
                     "range": f"D{row_number}",
                     "values": [[str(updated.default_total_weight_g)]],
+                }
+            )
+        if updated.is_pinned != current.is_pinned:
+            updates.append(
+                {
+                    "range": f"G{row_number}",
+                    "values": [["TRUE" if updated.is_pinned else "FALSE"]],
                 }
             )
         if not updates:
@@ -272,6 +321,78 @@ class GoogleSavedMealStore:
             ) from verify_error
         if stored != updated:
             raise SavedMealsWriteError("Saved meal did not match the requested update")
+        return stored
+
+    def reorder(
+        self,
+        saved_meal_id: str,
+        direction: Literal["top", "up", "down", "bottom"],
+    ) -> SavedMeal | None:
+        rows = self._read_all()
+        current = next(
+            (meal for _, meal in rows if meal.saved_meal_id == saved_meal_id), None
+        )
+        if current is None:
+            return None
+        siblings = sorted(
+            (meal for _, meal in rows if meal.is_pinned == current.is_pinned),
+            key=lambda meal: meal.sort_order,
+            reverse=True,
+        )
+        current_index = next(
+            index
+            for index, meal in enumerate(siblings)
+            if meal.saved_meal_id == saved_meal_id
+        )
+        target_index = {
+            "top": 0,
+            "up": max(0, current_index - 1),
+            "down": min(len(siblings) - 1, current_index + 1),
+            "bottom": len(siblings) - 1,
+        }[direction]
+        if target_index == current_index:
+            return current
+        moved = siblings.pop(current_index)
+        siblings.insert(target_index, moved)
+        row_numbers = {meal.saved_meal_id: row_number for row_number, meal in rows}
+        updates = [
+            {
+                "range": f"H{row_numbers[meal.saved_meal_id]}",
+                "values": [[str(len(siblings) - index)]],
+            }
+            for index, meal in enumerate(siblings)
+        ]
+        expected_ids = [meal.saved_meal_id for meal in siblings]
+        try:
+            self._worksheet.batch_update(updates, raw=True)
+        except Exception as update_error:
+            try:
+                verified = [
+                    meal.saved_meal_id
+                    for meal in self.list_meals()
+                    if meal.is_pinned == current.is_pinned
+                ]
+            except Exception as verify_error:
+                raise SavedMealsWriteUncertainError(
+                    "Could not verify whether saved meals were reordered"
+                ) from verify_error
+            if verified != expected_ids:
+                raise SavedMealsWriteError(
+                    "Could not reorder saved meals"
+                ) from update_error
+        try:
+            verified = [
+                meal.saved_meal_id
+                for meal in self.list_meals()
+                if meal.is_pinned == current.is_pinned
+            ]
+            stored = self.get(saved_meal_id)
+        except Exception as verify_error:
+            raise SavedMealsWriteUncertainError(
+                "Saved meals were reordered but could not be verified"
+            ) from verify_error
+        if verified != expected_ids or stored is None:
+            raise SavedMealsWriteError("Saved meals do not match the requested order")
         return stored
 
     def delete(self, saved_meal_id: str) -> bool:

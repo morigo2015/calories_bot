@@ -1830,6 +1830,25 @@ class CaloriesService:
         with self._store_lock:
             return self._saved().update(saved_meal_id, default_total_weight_g=weight_g)
 
+    def toggle_saved_meal_pin(self, saved_meal_id: str) -> SavedMeal | None:
+        with self._store_lock:
+            saved_store = self._saved()
+            current = saved_store.get(saved_meal_id)
+            if current is None:
+                return None
+            updated = saved_store.update(saved_meal_id, is_pinned=not current.is_pinned)
+            if updated is None:
+                return None
+            return saved_store.reorder(saved_meal_id, "top")
+
+    def move_saved_meal(
+        self,
+        saved_meal_id: str,
+        direction: Literal["top", "up", "down", "bottom"],
+    ) -> SavedMeal | None:
+        with self._store_lock:
+            return self._saved().reorder(saved_meal_id, direction)
+
     def delete_message(
         self, telegram_message_id: int, fallback_day: date
     ) -> MealDeletion:
@@ -2695,7 +2714,8 @@ class TelegramHandlers:
         rows = [
             [
                 InlineKeyboardButton(
-                    f"➕ {f'{meal.icon} ' if meal.icon else ''}"
+                    f"➕ {'⭐ ' if meal.is_pinned else ''}"
+                    f"{f'{meal.icon} ' if meal.icon else ''}"
                     f"{cls._short_button_name(meal.display_name)} · "
                     f"{meal.default_total_weight_g} г",
                     callback_data=(
@@ -3648,6 +3668,7 @@ class TelegramHandlers:
         rows = [
             [
                 InlineKeyboardButton(
+                    f"{'⭐ ' if meal.is_pinned else ''}"
                     f"{f'{meal.icon} ' if meal.icon else ''}"
                     f"{self._short_button_name(meal.display_name)}",
                     callback_data=f"manage-item:{meal.saved_meal_id}",
@@ -3668,6 +3689,7 @@ class TelegramHandlers:
         if meal is None:
             return False
         await query.edit_message_text(  # type: ignore[attr-defined]
+            f"{'⭐ ' if meal.is_pinned else ''}"
             f"{meal.icon + ' ' if meal.icon else ''}{meal.display_name}\n"
             f"Стандартна вага: {meal.default_total_weight_g} г",
             reply_markup=InlineKeyboardMarkup(
@@ -3684,11 +3706,72 @@ class TelegramHandlers:
                     ],
                     [
                         InlineKeyboardButton(
+                            "☆ Відкріпити" if meal.is_pinned else "⭐ Закріпити",
+                            callback_data=f"manage-pin:{saved_meal_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "↕️ Змінити позицію",
+                            callback_data=f"manage-order:{saved_meal_id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
                             "🗑 Видалити",
                             callback_data=f"manage-delete:{saved_meal_id}",
                         )
                     ],
                     [InlineKeyboardButton("↩️ Назад", callback_data="meals-manage")],
+                ]
+            ),
+        )
+        return True
+
+    async def _edit_saved_meal_order(
+        self, query: object, service: CaloriesService, saved_meal_id: str
+    ) -> bool:
+        meals = await asyncio.to_thread(service.list_saved_meals)
+        meal = next(
+            (item for item in meals if item.saved_meal_id == saved_meal_id), None
+        )
+        if meal is None:
+            return False
+        siblings = [item for item in meals if item.is_pinned == meal.is_pinned]
+        position = next(
+            index
+            for index, item in enumerate(siblings, start=1)
+            if item.saved_meal_id == saved_meal_id
+        )
+        group_name = "закріплених" if meal.is_pinned else "інших"
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            f"↕️ {meal.display_name}\n"
+            f"Позиція {position} з {len(siblings)} серед {group_name} страв.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⏫ На початок",
+                            callback_data=f"manage-move:top:{saved_meal_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "⬆️ Вище",
+                            callback_data=f"manage-move:up:{saved_meal_id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬇️ Нижче",
+                            callback_data=f"manage-move:down:{saved_meal_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "⏬ У кінець",
+                            callback_data=f"manage-move:bottom:{saved_meal_id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "↩️ Назад", callback_data=f"manage-item:{saved_meal_id}"
+                        )
+                    ],
                 ]
             ),
         )
@@ -3798,6 +3881,39 @@ class TelegramHandlers:
                 saved_id = data.removeprefix("manage-item:")
                 await query.answer()
                 if not await self._edit_saved_meal_actions(query, service, saved_id):
+                    raise LookupError
+                return
+            if data.startswith("manage-pin:"):
+                saved_id = data.removeprefix("manage-pin:")
+                updated = await asyncio.to_thread(
+                    service.toggle_saved_meal_pin, saved_id
+                )
+                if updated is None:
+                    raise LookupError
+                await query.answer("Закріплено" if updated.is_pinned else "Відкріплено")
+                if not await self._edit_saved_meal_actions(query, service, saved_id):
+                    raise LookupError
+                return
+            if data.startswith("manage-order:"):
+                saved_id = data.removeprefix("manage-order:")
+                await query.answer()
+                if not await self._edit_saved_meal_order(query, service, saved_id):
+                    raise LookupError
+                return
+            if data.startswith("manage-move:"):
+                direction_raw, saved_id = data.removeprefix("manage-move:").split(
+                    ":", maxsplit=1
+                )
+                if direction_raw not in {"top", "up", "down", "bottom"}:
+                    raise ValueError
+                direction = cast(Literal["top", "up", "down", "bottom"], direction_raw)
+                updated = await asyncio.to_thread(
+                    service.move_saved_meal, saved_id, direction
+                )
+                if updated is None:
+                    raise LookupError
+                await query.answer("Позицію оновлено")
+                if not await self._edit_saved_meal_order(query, service, saved_id):
                     raise LookupError
                 return
             if data.startswith(("manage-rename:", "manage-weight:")):

@@ -27,6 +27,7 @@ from calories_bot.saved_meals import (
     LEGACY_SAVED_MEALS_HEADERS,
     PREVIOUS_SAVED_MEALS_HEADERS,
     SAVED_MEALS_HEADERS,
+    UNORDERED_SAVED_MEALS_HEADERS,
     GoogleSavedMealStore,
     SavedMealsSchemaError,
 )
@@ -116,7 +117,7 @@ class Worksheet:
     def batch_update(self, updates, **kwargs):
         del kwargs
         for update in updates:
-            column = 2 if update["range"].startswith("C") else 3
+            column = {"C": 2, "D": 3, "G": 6, "H": 7}[update["range"][0]]
             row = int(update["range"][1:]) - 1
             self.rows[row][column] = update["values"][0][0]
 
@@ -126,8 +127,11 @@ class Worksheet:
 
     def update(self, values, range_name, **kwargs):
         del kwargs
-        assert range_name == "F1:F1"
-        self.rows[0][5] = values[0][0]
+        if range_name == "F1:F1":
+            self.rows[0][5] = values[0][0]
+        else:
+            assert range_name == "G1:H1"
+            self.rows[0][6:8] = values[0]
 
     def delete_rows(self, row):
         self.rows.pop(row - 1)
@@ -158,7 +162,7 @@ def test_saved_meal_store_persists_icon() -> None:
     stored = store.append(saved("one", 1, icon="🧀"))
 
     assert stored.icon == "🧀"
-    assert store._worksheet.rows[1][-1] == "🧀"
+    assert store._worksheet.rows[1][5] == "🧀"
 
 
 def test_saved_meal_store_updates_name_and_default_weight() -> None:
@@ -176,6 +180,55 @@ def test_saved_meal_store_updates_name_and_default_weight() -> None:
     assert updated.default_total_weight_g == 125
     assert updated.base_meal == original_base_meal
     assert store.update("missing", display_name="Нова") is None
+
+
+def test_saved_meal_store_migrates_existing_rows_without_clearing_them() -> None:
+    existing = saved("one", 1, "Сир", icon="🧀")
+    store = sheet_store(
+        [
+            list(UNORDERED_SAVED_MEALS_HEADERS),
+            [
+                existing.saved_meal_id,
+                existing.source_message_id,
+                existing.display_name,
+                existing.default_total_weight_g,
+                existing.base_meal.model_dump_json(),
+                existing.icon,
+            ],
+        ]
+    )
+
+    store._ensure_headers()
+
+    assert store._worksheet.rows[0] == SAVED_MEALS_HEADERS
+    assert store.get("one").display_name == "Сир"
+
+
+def test_saved_meal_store_pins_and_reorders_within_each_section() -> None:
+    store = sheet_store([SAVED_MEALS_HEADERS])
+    store.append(saved("one", 1, "Перша"))
+    store.append(saved("two", 2, "Друга"))
+    store.append(saved("three", 3, "Третя"))
+
+    pinned = store.update("one", is_pinned=True)
+    moved = store.reorder("two", "top")
+
+    assert pinned is not None and pinned.is_pinned is True
+    assert moved is not None
+    assert [item.saved_meal_id for item in store.list_meals()] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+    store.update("three", is_pinned=True)
+    store.reorder("three", "top")
+
+    assert [item.saved_meal_id for item in store.list_meals()] == [
+        "three",
+        "one",
+        "two",
+    ]
 
 
 def test_saved_meal_store_rejects_unknown_schema() -> None:
@@ -276,7 +329,11 @@ class MemorySavedStore:
         self.items: list[SavedMeal] = []
 
     def list_meals(self):
-        return list(reversed(self.items))
+        return sorted(
+            self.items,
+            key=lambda item: (item.is_pinned, item.sort_order),
+            reverse=True,
+        )
 
     def get(self, saved_id):
         return next(
@@ -289,6 +346,14 @@ class MemorySavedStore:
         )
 
     def append(self, item):
+        item = item.model_copy(
+            update={
+                "sort_order": max(
+                    (existing.sort_order for existing in self.items), default=0
+                )
+                + 1
+            }
+        )
         self.items.append(item)
         return item
 
@@ -299,6 +364,26 @@ class MemorySavedStore:
         updated = SavedMeal.model_validate({**current.model_dump(), **changes})
         self.items[self.items.index(current)] = updated
         return updated
+
+    def reorder(self, saved_id, direction):
+        current = self.get(saved_id)
+        if current is None:
+            return None
+        siblings = [
+            item for item in self.list_meals() if item.is_pinned == current.is_pinned
+        ]
+        current_index = siblings.index(current)
+        target_index = {
+            "top": 0,
+            "up": max(0, current_index - 1),
+            "down": min(len(siblings) - 1, current_index + 1),
+            "bottom": len(siblings) - 1,
+        }[direction]
+        siblings.pop(current_index)
+        siblings.insert(target_index, current)
+        for index, item in enumerate(siblings):
+            self.update(item.saved_meal_id, sort_order=len(siblings) - index)
+        return self.get(saved_id)
 
     def delete(self, saved_id):
         current = self.get(saved_id)
@@ -528,6 +613,28 @@ def test_service_renames_saved_meal_and_changes_its_default_weight(tmp_path) -> 
     assert app.change_saved_meal_weight("missing", 100) is None
     with pytest.raises(SavedMealNameError, match="вже є"):
         app.rename_saved_meal("first", "яблуко")
+
+
+def test_service_toggles_pin_and_moves_saved_meals(tmp_path) -> None:
+    meals = MemoryMealStore()
+    saved_meals = MemorySavedStore()
+    saved_meals.append(saved("first", 1, "Сир"))
+    saved_meals.append(saved("second", 2, "Яблуко"))
+    app = service(tmp_path, meals, saved_meals)
+
+    pinned = app.toggle_saved_meal_pin("first")
+    unpinned = app.toggle_saved_meal_pin("first")
+    moved = app.move_saved_meal("first", "top")
+
+    assert pinned is not None and pinned.is_pinned is True
+    assert unpinned is not None and unpinned.is_pinned is False
+    assert moved is not None
+    assert [meal.saved_meal_id for meal in app.list_saved_meals()] == [
+        "first",
+        "second",
+    ]
+    assert app.toggle_saved_meal_pin("missing") is None
+    assert app.move_saved_meal("missing", "up") is None
 
 
 @pytest.mark.parametrize(("confidence", "expected"), [(0.8, "🧀"), (0.79, None)])
