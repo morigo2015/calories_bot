@@ -3742,9 +3742,22 @@ class TelegramHandlers:
             if item.saved_meal_id == saved_meal_id
         )
         group_name = "закріплених" if meal.is_pinned else "інших"
+        order_lines: list[str] = []
+        for is_pinned, heading in ((True, "⭐ Закріплені"), (False, "Інші")):
+            section = [item for item in meals if item.is_pinned == is_pinned]
+            if not section:
+                continue
+            order_lines.append(heading)
+            order_lines.extend(
+                f"{'➡️' if item.saved_meal_id == saved_meal_id else '•'} "
+                f"{index}. {f'{item.icon} ' if item.icon else ''}"
+                f"{self._short_button_name(item.display_name, 22)}"
+                for index, item in enumerate(section, start=1)
+            )
         await query.edit_message_text(  # type: ignore[attr-defined]
-            f"↕️ {meal.display_name}\n"
-            f"Позиція {position} з {len(siblings)} серед {group_name} страв.",
+            f"↕️ Переміщуємо: {meal.display_name}\n"
+            f"Позиція {position} з {len(siblings)} серед {group_name} страв.\n\n"
+            f"Поточний порядок:\n" + "\n".join(order_lines),
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -3891,7 +3904,7 @@ class TelegramHandlers:
                 if updated is None:
                     raise LookupError
                 await query.answer("Закріплено" if updated.is_pinned else "Відкріплено")
-                if not await self._edit_saved_meal_actions(query, service, saved_id):
+                if not await self._edit_saved_meal_order(query, service, saved_id):
                     raise LookupError
                 return
             if data.startswith("manage-order:"):

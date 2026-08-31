@@ -3516,21 +3516,22 @@ def test_saved_meal_can_be_pinned_and_moved_from_management() -> None:
     asyncio.run(handlers.library_callback(order_update, context))
 
     assert "Позиція 1 з 2 серед інших страв" in order_query.edits[0][0]
+    assert "Поточний порядок:\nІнші\n➡️ 1. Сир\n• 2. Яблуко" in (order_query.edits[0][0])
 
     move_update, move_query = make_callback_update("manage-move:down:cheese")
     asyncio.run(handlers.library_callback(move_update, context))
 
     assert move_query.answers == [("Позицію оновлено", {})]
     assert "Позиція 2 з 2 серед інших страв" in move_query.edits[0][0]
+    assert "Поточний порядок:\nІнші\n• 1. Яблуко\n➡️ 2. Сир" in (move_query.edits[0][0])
 
     pin_update, pin_query = make_callback_update("manage-pin:cheese")
     asyncio.run(handlers.library_callback(pin_update, context))
 
     assert pin_query.answers == [("Закріплено", {})]
-    assert pin_query.edits[0][0].startswith("⭐ Сир")
     assert (
-        pin_query.edits[0][1]["reply_markup"].inline_keyboard[1][0].text
-        == "☆ Відкріпити"
+        "Поточний порядок:\n⭐ Закріплені\n➡️ 1. Сир\nІнші\n• 1. Яблуко"
+        in (pin_query.edits[0][0])
     )
 
 
