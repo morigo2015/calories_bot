@@ -251,7 +251,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     )
 
     assert [(command.command, command.description) for command in bot.calls[0][0]] == [
-        ("meals", "⭐ збережені страви"),
+        ("saved", "⭐ збережені страви"),
         ("recent", "🕘 нещодавні страви"),
         ("day", "📅 За день"),
         ("week", "📊 За тиждень"),
@@ -263,7 +263,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("tips", "💡 додаткові можливості"),
     ]
     assert [command.command for command in bot.calls[1][0]] == [
-        "meals",
+        "saved",
         "recent",
         "day",
         "week",

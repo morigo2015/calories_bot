@@ -55,6 +55,14 @@ class SavedMealStore(Protocol):
 
     def append(self, saved_meal: SavedMeal) -> SavedMeal: ...
 
+    def update(
+        self,
+        saved_meal_id: str,
+        *,
+        display_name: str | None = None,
+        default_total_weight_g: int | None = None,
+    ) -> SavedMeal | None: ...
+
     def delete(self, saved_meal_id: str) -> bool: ...
 
 
@@ -197,6 +205,73 @@ class GoogleSavedMealStore:
             ) from verify_error
         if stored is None:
             raise SavedMealsWriteError("Saved meal was not found after append")
+        return stored
+
+    def update(
+        self,
+        saved_meal_id: str,
+        *,
+        display_name: str | None = None,
+        default_total_weight_g: int | None = None,
+    ) -> SavedMeal | None:
+        target = next(
+            (
+                (row_number, meal)
+                for row_number, meal in self._read_all()
+                if meal.saved_meal_id == saved_meal_id
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        row_number, current = target
+        updated = SavedMeal.model_validate(
+            {
+                **current.model_dump(),
+                "display_name": (
+                    current.display_name if display_name is None else display_name
+                ),
+                "default_total_weight_g": (
+                    current.default_total_weight_g
+                    if default_total_weight_g is None
+                    else default_total_weight_g
+                ),
+            }
+        )
+        updates = []
+        if updated.display_name != current.display_name:
+            updates.append(
+                {"range": f"C{row_number}", "values": [[updated.display_name]]}
+            )
+        if updated.default_total_weight_g != current.default_total_weight_g:
+            updates.append(
+                {
+                    "range": f"D{row_number}",
+                    "values": [[str(updated.default_total_weight_g)]],
+                }
+            )
+        if not updates:
+            return current
+        try:
+            self._worksheet.batch_update(updates, raw=True)
+        except Exception as update_error:
+            try:
+                stored = self.get(saved_meal_id)
+            except Exception as verify_error:
+                raise SavedMealsWriteUncertainError(
+                    "Could not verify whether the saved meal was updated"
+                ) from verify_error
+            if stored == updated:
+                return stored
+            raise SavedMealsWriteError("Could not update saved meal") from update_error
+        try:
+            stored = self.get(saved_meal_id)
+        except Exception as verify_error:
+            raise SavedMealsWriteUncertainError(
+                "The saved meal was updated but could not be verified"
+            ) from verify_error
+        if stored != updated:
+            raise SavedMealsWriteError("Saved meal did not match the requested update")
         return stored
 
     def delete(self, saved_meal_id: str) -> bool:

@@ -85,13 +85,14 @@ def saved(
     name: str = "сир",
     *,
     value=None,
+    weight: int = 50,
     icon: str | None = None,
 ) -> SavedMeal:
     return SavedMeal(
         saved_meal_id=saved_id,
         source_message_id=source_id,
         display_name=name,
-        default_total_weight_g=50,
+        default_total_weight_g=weight,
         base_meal=value or meal(name),
         icon=icon,
     )
@@ -158,6 +159,23 @@ def test_saved_meal_store_persists_icon() -> None:
 
     assert stored.icon == "🧀"
     assert store._worksheet.rows[1][-1] == "🧀"
+
+
+def test_saved_meal_store_updates_name_and_default_weight() -> None:
+    store = sheet_store([SAVED_MEALS_HEADERS])
+    store.append(saved("one", 1, "Сир", weight=50, icon="🧀"))
+    original_base_meal = store.get("one").base_meal
+
+    renamed = store.update("one", display_name="Домашній сир")
+    updated = store.update("one", default_total_weight_g=125)
+
+    assert renamed is not None
+    assert renamed.display_name == "Домашній сир"
+    assert updated is not None
+    assert updated.display_name == "Домашній сир"
+    assert updated.default_total_weight_g == 125
+    assert updated.base_meal == original_base_meal
+    assert store.update("missing", display_name="Нова") is None
 
 
 def test_saved_meal_store_rejects_unknown_schema() -> None:
@@ -273,6 +291,14 @@ class MemorySavedStore:
     def append(self, item):
         self.items.append(item)
         return item
+
+    def update(self, saved_id, **changes):
+        current = self.get(saved_id)
+        if current is None:
+            return None
+        updated = SavedMeal.model_validate({**current.model_dump(), **changes})
+        self.items[self.items.index(current)] = updated
+        return updated
 
     def delete(self, saved_id):
         current = self.get(saved_id)
@@ -482,6 +508,26 @@ def test_reused_saved_meal_scales_without_llm_and_retry_is_idempotent(tmp_path) 
     assert meals.rows[0][2].meal.total_weight_g == 100
     assert meals.rows[0][2].meal.meal_kcal == 120
     assert meals.rows[0][2].metadata.model == "saved_meal"
+
+
+def test_service_renames_saved_meal_and_changes_its_default_weight(tmp_path) -> None:
+    meals = MemoryMealStore()
+    saved_meals = MemorySavedStore()
+    saved_meals.append(saved("first", 1, "Сир"))
+    saved_meals.append(saved("second", 2, "Яблуко"))
+    app = service(tmp_path, meals, saved_meals)
+
+    renamed = app.rename_saved_meal("first", "  Домашній   сир ")
+    reweighted = app.change_saved_meal_weight("first", 125)
+
+    assert renamed is not None
+    assert renamed.display_name == "Домашній сир"
+    assert reweighted is not None
+    assert reweighted.default_total_weight_g == 125
+    assert app.rename_saved_meal("missing", "Нова") is None
+    assert app.change_saved_meal_weight("missing", 100) is None
+    with pytest.raises(SavedMealNameError, match="вже є"):
+        app.rename_saved_meal("first", "яблуко")
 
 
 @pytest.mark.parametrize(("confidence", "expected"), [(0.8, "🧀"), (0.79, None)])

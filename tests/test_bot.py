@@ -3376,7 +3376,7 @@ def test_meals_command_shows_all_saved_meals_without_pagination() -> None:
     keyboard = message.reply_kwargs[0]["reply_markup"].inline_keyboard
     assert len(keyboard) == 26
     assert keyboard[0][0].text == "➕ Страва 0 · 50 г"
-    assert [button.text for button in keyboard[-1]] == ["🗑 Видалити із збережених"]
+    assert [button.text for button in keyboard[-1]] == ["⚙️ Керувати збереженими"]
     assert keyboard[-1][0].callback_data == "meals-manage"
     assert not any(
         "наступ" in button.text.casefold() for row in keyboard for button in row
@@ -3397,7 +3397,7 @@ def test_empty_saved_meals_explains_how_to_save_without_delete_button() -> None:
     assert message.reply_kwargs[0]["reply_markup"] is None
 
 
-def test_saved_meal_management_only_offers_deletion() -> None:
+def test_saved_meal_management_offers_rename_weight_and_deletion() -> None:
     saved = SavedMeal(
         saved_meal_id="cheese",
         source_message_id=1,
@@ -3406,20 +3406,37 @@ def test_saved_meal_management_only_offers_deletion() -> None:
         base_meal=calculate_meal(food_analysis()),
         icon="🧀",
     )
-    service = SimpleNamespace(list_saved_meals=lambda: [saved])
+    service = SimpleNamespace(
+        list_saved_meals=lambda: [saved],
+        get_saved_meal=lambda saved_id: saved if saved_id == "cheese" else None,
+    )
     handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    context = SimpleNamespace(user_data={})
 
     menu_update, menu_query = make_callback_update("meals-manage")
-    asyncio.run(handlers.library_callback(menu_update, SimpleNamespace(user_data={})))
+    asyncio.run(handlers.library_callback(menu_update, context))
 
-    assert menu_query.edits[0][0] == "Яку страву видалити?"
+    assert menu_query.edits[0][0] == "Яку страву змінити?"
     menu_keyboard = menu_query.edits[0][1]["reply_markup"].inline_keyboard
     assert menu_keyboard[0][0].text == "🧀 Сир"
-    assert menu_keyboard[0][0].callback_data == "manage-delete:cheese"
+    assert menu_keyboard[0][0].callback_data == "manage-item:cheese"
     assert menu_keyboard[-1][0].callback_data == "meals-back"
 
+    item_update, item_query = make_callback_update("manage-item:cheese")
+    asyncio.run(handlers.library_callback(item_update, context))
+
+    assert item_query.edits[0][0] == "🧀 Сир\nСтандартна вага: 50 г"
+    item_keyboard = item_query.edits[0][1]["reply_markup"].inline_keyboard
+    assert [button.text for button in item_keyboard[0]] == [
+        "✏️ Змінити назву",
+        "⚖️ Змінити вагу",
+    ]
+    assert item_keyboard[0][0].callback_data == "manage-rename:cheese"
+    assert item_keyboard[0][1].callback_data == "manage-weight:cheese"
+    assert item_keyboard[1][0].callback_data == "manage-delete:cheese"
+
     delete_update, delete_query = make_callback_update("manage-delete:cheese")
-    asyncio.run(handlers.library_callback(delete_update, SimpleNamespace(user_data={})))
+    asyncio.run(handlers.library_callback(delete_update, context))
 
     assert delete_query.edits[0][0] == "Видалити «Сир» із збережених?"
     delete_keyboard = delete_query.edits[0][1]["reply_markup"].inline_keyboard
@@ -3429,6 +3446,68 @@ def test_saved_meal_management_only_offers_deletion() -> None:
     ]
     assert delete_keyboard[0][0].callback_data == "manage-delete-do:cheese"
     assert delete_keyboard[0][1].callback_data == "meals-manage"
+
+
+def test_saved_meal_name_and_weight_are_updated_from_text_input() -> None:
+    class Service:
+        def __init__(self):
+            self.saved = SavedMeal(
+                saved_meal_id="cheese",
+                source_message_id=1,
+                display_name="Сир",
+                default_total_weight_g=50,
+                base_meal=calculate_meal(food_analysis()),
+            )
+
+        def get_saved_meal(self, saved_id):
+            return self.saved if saved_id == self.saved.saved_meal_id else None
+
+        def rename_saved_meal(self, saved_id, name):
+            assert saved_id == "cheese"
+            self.saved = SavedMeal.model_validate(
+                {**self.saved.model_dump(), "display_name": " ".join(name.split())}
+            )
+            return self.saved
+
+        def change_saved_meal_weight(self, saved_id, weight):
+            assert saved_id == "cheese"
+            self.saved = SavedMeal.model_validate(
+                {**self.saved.model_dump(), "default_total_weight_g": weight}
+            )
+            return self.saved
+
+    service = Service()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    context = SimpleNamespace(user_data={})
+
+    rename_update, rename_query = make_callback_update("manage-rename:cheese")
+    asyncio.run(handlers.library_callback(rename_update, context))
+
+    assert "Введи нову назву" in rename_query.edits[0][0]
+    assert context.user_data["awaiting_saved_meal_edit"] == {
+        "kind": "name",
+        "saved_meal_id": "cheese",
+    }
+
+    text_update, message = make_update()
+    message.text = "  Домашній   сир "
+    asyncio.run(handlers.text(text_update, context))
+
+    assert service.saved.display_name == "Домашній сир"
+    assert message.replies == ["✅ Назву змінено на «Домашній сир»."]
+    assert context.user_data == {}
+
+    weight_update, weight_query = make_callback_update("manage-weight:cheese")
+    asyncio.run(handlers.library_callback(weight_update, context))
+    assert "Введи нову стандартну вагу" in weight_query.edits[0][0]
+
+    text_update, message = make_update()
+    message.text = "125 г"
+    asyncio.run(handlers.text(text_update, context))
+
+    assert service.saved.default_total_weight_g == 125
+    assert message.replies == ["✅ Стандартну вагу змінено на 125 г."]
+    assert context.user_data == {}
 
 
 def test_saved_meal_button_uses_confident_semantic_icon() -> None:

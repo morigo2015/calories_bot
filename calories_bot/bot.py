@@ -133,6 +133,7 @@ GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
 PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX = "protein-goal-disable:"
 GOAL_WAITING_KEY = "awaiting_daily_kcal_goal"
 MEAL_WEIGHT_WAITING_KEY = "awaiting_meal_weight"
+SAVED_MEAL_EDIT_WAITING_KEY = "awaiting_saved_meal_edit"
 INVITE_WAITING_KEY = "awaiting_invite_name"
 BURN_WAITING_KEY = "awaiting_burned_calories"
 SETTINGS_WAITING_KEY = "awaiting_settings_value"
@@ -1802,6 +1803,33 @@ class CaloriesService:
         with self._store_lock:
             return self._saved().delete(saved_meal_id)
 
+    def rename_saved_meal(
+        self, saved_meal_id: str, display_name: str
+    ) -> SavedMeal | None:
+        display_name = self._normalize_saved_name(display_name)
+        with self._store_lock:
+            saved_store = self._saved()
+            current = saved_store.get(saved_meal_id)
+            if current is None:
+                return None
+            if any(
+                meal.saved_meal_id != saved_meal_id
+                and meal.display_name.casefold() == display_name.casefold()
+                for meal in saved_store.list_meals()
+            ):
+                raise SavedMealNameError(
+                    "Страва з такою назвою вже є. Вибери іншу назву."
+                )
+            return saved_store.update(saved_meal_id, display_name=display_name)
+
+    def change_saved_meal_weight(
+        self, saved_meal_id: str, weight_g: int
+    ) -> SavedMeal | None:
+        if not 1 <= weight_g <= MAX_WEIGHT_G:
+            raise ValueError("Saved-meal weight is out of range")
+        with self._store_lock:
+            return self._saved().update(saved_meal_id, default_total_weight_g=weight_g)
+
     def delete_message(
         self, telegram_message_id: int, fallback_day: date
     ) -> MealDeletion:
@@ -2264,6 +2292,7 @@ class TelegramHandlers:
         state = cls._user_state(context)
         state.pop(GOAL_WAITING_KEY, None)
         state.pop(MEAL_WEIGHT_WAITING_KEY, None)
+        state.pop(SAVED_MEAL_EDIT_WAITING_KEY, None)
         state.pop(INVITE_WAITING_KEY, None)
         state.pop(BURN_WAITING_KEY, None)
         state.pop(SETTINGS_WAITING_KEY, None)
@@ -2679,7 +2708,7 @@ class TelegramHandlers:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🗑 Видалити із збережених", callback_data="meals-manage"
+                    "⚙️ Керувати збереженими", callback_data="meals-manage"
                 )
             ]
         )
@@ -3621,16 +3650,89 @@ class TelegramHandlers:
                 InlineKeyboardButton(
                     f"{f'{meal.icon} ' if meal.icon else ''}"
                     f"{self._short_button_name(meal.display_name)}",
-                    callback_data=f"manage-delete:{meal.saved_meal_id}",
+                    callback_data=f"manage-item:{meal.saved_meal_id}",
                 )
             ]
             for meal in meals
         ]
         rows.append([InlineKeyboardButton("↩️ Назад", callback_data="meals-back")])
-        text = "Яку страву видалити?" if meals else "Збережених страв ще немає."
+        text = "Яку страву змінити?" if meals else "Збережених страв ще немає."
         await query.edit_message_text(  # type: ignore[attr-defined]
             text, reply_markup=InlineKeyboardMarkup(rows)
         )
+
+    async def _edit_saved_meal_actions(
+        self, query: object, service: CaloriesService, saved_meal_id: str
+    ) -> bool:
+        meal = await asyncio.to_thread(service.get_saved_meal, saved_meal_id)
+        if meal is None:
+            return False
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            f"{meal.icon + ' ' if meal.icon else ''}{meal.display_name}\n"
+            f"Стандартна вага: {meal.default_total_weight_g} г",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✏️ Змінити назву",
+                            callback_data=f"manage-rename:{saved_meal_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "⚖️ Змінити вагу",
+                            callback_data=f"manage-weight:{saved_meal_id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Видалити",
+                            callback_data=f"manage-delete:{saved_meal_id}",
+                        )
+                    ],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="meals-manage")],
+                ]
+            ),
+        )
+        return True
+
+    async def _start_saved_meal_edit(
+        self,
+        query: object,
+        context: ContextTypes.DEFAULT_TYPE,
+        service: CaloriesService,
+        saved_meal_id: str,
+        kind: Literal["name", "weight"],
+    ) -> bool:
+        meal = await asyncio.to_thread(service.get_saved_meal, saved_meal_id)
+        if meal is None:
+            return False
+        self._start_waiting(
+            context,
+            SAVED_MEAL_EDIT_WAITING_KEY,
+            {"kind": kind, "saved_meal_id": saved_meal_id},
+        )
+        if kind == "name":
+            prompt = (
+                f"Введи нову назву для «{meal.display_name}» "
+                f"(до {MAX_SAVED_MEAL_NAME_LENGTH} символів):"
+            )
+        else:
+            prompt = (
+                f"Введи нову стандартну вагу для «{meal.display_name}» "
+                f"від 1 до {MAX_WEIGHT_G} г:"
+            )
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            prompt,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "↩️ Назад", callback_data=f"manage-item:{saved_meal_id}"
+                        )
+                    ]
+                ]
+            ),
+        )
+        return True
 
     async def _edit_delete_confirmation(
         self, query: object, service: CaloriesService, saved_meal_id: str
@@ -3690,6 +3792,30 @@ class TelegramHandlers:
                     await self._edit_manage_menu(query, service)
                 else:
                     await self._edit_saved_meals_menu(query, service)
+                return
+            if data.startswith("manage-item:"):
+                self._clear_pending_input(context)
+                saved_id = data.removeprefix("manage-item:")
+                await query.answer()
+                if not await self._edit_saved_meal_actions(query, service, saved_id):
+                    raise LookupError
+                return
+            if data.startswith(("manage-rename:", "manage-weight:")):
+                prefix = (
+                    "manage-rename:"
+                    if data.startswith("manage-rename:")
+                    else "manage-weight:"
+                )
+                saved_id = data.removeprefix(prefix)
+                await query.answer()
+                if not await self._start_saved_meal_edit(
+                    query,
+                    context,
+                    service,
+                    saved_id,
+                    "name" if prefix == "manage-rename:" else "weight",
+                ):
+                    raise LookupError
                 return
             if data.startswith("saved-add:"):
                 _, saved_id, weight_raw = data.split(":", maxsplit=2)
@@ -3796,7 +3922,83 @@ class TelegramHandlers:
                 update, context, service, meal_weight_state, message.text
             )
             return
+        saved_meal_edit_state = self._user_state(context).get(
+            SAVED_MEAL_EDIT_WAITING_KEY
+        )
+        if isinstance(saved_meal_edit_state, dict):
+            await self._handle_saved_meal_edit_input(
+                update, context, service, saved_meal_edit_state, message.text
+            )
+            return
         await self._process(service, message, message.text, context=context)
+
+    async def _handle_saved_meal_edit_input(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        service: CaloriesService,
+        state: dict[str, object],
+        text: str,
+    ) -> None:
+        message = update.effective_message
+        if message is None:
+            return
+        saved_meal_id = str(state.get("saved_meal_id", ""))
+        kind = state.get("kind")
+        try:
+            if kind == "name":
+                updated = await asyncio.to_thread(
+                    service.rename_saved_meal, saved_meal_id, text
+                )
+                success = (
+                    f"✅ Назву змінено на «{updated.display_name}»."
+                    if updated is not None
+                    else ""
+                )
+            elif kind == "weight":
+                weight_g = self._parse_weight(text)
+                updated = await asyncio.to_thread(
+                    service.change_saved_meal_weight, saved_meal_id, weight_g
+                )
+                success = (
+                    f"✅ Стандартну вагу змінено на {updated.default_total_weight_g} г."
+                    if updated is not None
+                    else ""
+                )
+            else:
+                self._clear_pending_input(context)
+                return
+            if updated is None:
+                self._clear_pending_input(context)
+                await message.reply_text(
+                    "Цього запису вже немає. Відкрий /saved ще раз.",
+                    do_quote=False,
+                )
+                return
+        except SavedMealNameError as exc:
+            await message.reply_text(str(exc), do_quote=False)
+            return
+        except ValueError:
+            await message.reply_text(
+                f"Введи вагу від 1 до {MAX_WEIGHT_G} г, наприклад: 350 г",
+                do_quote=False,
+            )
+            return
+        except Exception:
+            LOGGER.exception("Could not edit saved meal")
+            await message.reply_text(
+                "Не вдалося зберегти зміни. Спробуй ще раз або обери іншу команду.",
+                do_quote=False,
+            )
+            return
+        self._clear_pending_input(context)
+        await message.reply_text(
+            success,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ До збережених", callback_data="meals-back")]]
+            ),
+            do_quote=False,
+        )
 
     async def _handle_burn_text(
         self,

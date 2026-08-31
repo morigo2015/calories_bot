@@ -35,7 +35,7 @@ async def configure_bot_commands(
     garmin_refresh_time: time | None = None,
 ) -> None:
     user_commands = [
-        BotCommand("meals", "⭐ збережені страви"),
+        BotCommand("saved", "⭐ збережені страви"),
         BotCommand("recent", "🕘 нещодавні страви"),
         BotCommand("day", "📅 За день"),
         BotCommand("week", "📊 За тиждень"),
@@ -231,7 +231,7 @@ def main() -> None:
         CommandHandler("settings", handlers.settings, filters=message_update)
     )
     application.add_handler(
-        CommandHandler("meals", handlers.meals, filters=message_update)
+        CommandHandler(("meals", "saved"), handlers.meals, filters=message_update)
     )
     application.add_handler(
         CommandHandler("recent", handlers.recent, filters=message_update)
