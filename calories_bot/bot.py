@@ -3111,17 +3111,36 @@ class TelegramHandlers:
                     raise ValueError
                 selected_choice = data.removeprefix("burn-conflict:")
                 day = cast(date, conflict["day"])
+                existing = conflict.get("existing")
+                existing_entry = (
+                    existing if isinstance(existing, BurnedCaloriesEntry) else None
+                )
                 if selected_choice == "skip":
-                    resolved.append(f"{day:%d.%m.%Y} — пропущено")
+                    resolved.append(f"⏭ Пропущено: {day:%d.%m.%Y}")
                 else:
                     option_index = int(selected_choice)
                     options = self._burn_conflict_options(conflict)
                     if not 0 <= option_index < len(options):
                         raise ValueError
-                    label, entry = options[option_index]
+                    _, entry = options[option_index]
                     if entry is not None:
                         await asyncio.to_thread(service.save_burned_entry, entry)
-                    resolved.append(f"{day:%d.%m.%Y} — {label.lower()}")
+                        if existing_entry is None:
+                            resolved.append(
+                                f"➕ Додано: {day:%d.%m.%Y} — "
+                                f"{entry.effective_total_kcal} кк"
+                            )
+                        else:
+                            resolved.append(
+                                f"🔄 Змінено: {day:%d.%m.%Y} — "
+                                f"{existing_entry.effective_total_kcal} → "
+                                f"{entry.effective_total_kcal} кк"
+                            )
+                    elif existing_entry is not None:
+                        resolved.append(
+                            f"✓ Без змін: {day:%d.%m.%Y} — "
+                            f"{existing_entry.effective_total_kcal} кк"
+                        )
                 state["conflict_index"] = index + 1
                 await query.answer(
                     "Обрано" if selected_choice != "skip" else "Пропущено"
@@ -3133,9 +3152,7 @@ class TelegramHandlers:
                 summary = str(state.get("summary", ""))
                 self._clear_pending_input(context)
                 await query.edit_message_text(
-                    summary
-                    + "\n\nКонфлікти:\n"
-                    + "\n".join(str(item) for item in resolved),
+                    summary + "\n" + "\n".join(str(item) for item in resolved),
                     reply_markup=None,
                 )
                 return
@@ -4728,7 +4745,7 @@ class TelegramHandlers:
             profile=self._body_profile(current),
         )
         saved: list[BurnedCaloriesEntry] = []
-        unchanged: list[date] = []
+        unchanged: list[BurnedCaloriesEntry] = []
         write_failures: list[date] = []
         conflicts: list[dict[str, object]] = []
         for day, candidates in prepared.entries.items():
@@ -4755,7 +4772,7 @@ class TelegramHandlers:
             if existing is not None and candidate_totals == {
                 existing.effective_total_kcal
             }:
-                unchanged.append(day)
+                unchanged.append(existing)
                 continue
             conflicts.append(
                 {"day": day, "existing": existing, "candidates": candidates}
@@ -4771,6 +4788,7 @@ class TelegramHandlers:
             failed_images=failed_images,
             empty_images=empty_images,
             write_failures=write_failures,
+            has_conflicts=bool(conflicts),
         )
         if not conflicts:
             await message.reply_text(summary, do_quote=False)
@@ -4790,7 +4808,7 @@ class TelegramHandlers:
     def _format_burn_screenshot_summary(
         *,
         saved: list[BurnedCaloriesEntry],
-        unchanged: list[date],
+        unchanged: list[BurnedCaloriesEntry],
         ignored: list[date],
         invalid: list[date],
         profile_required: list[date],
@@ -4798,23 +4816,28 @@ class TelegramHandlers:
         failed_images: int,
         empty_images: int,
         write_failures: list[date],
+        has_conflicts: bool,
     ) -> str:
-        lines = ["🔥 Імпорт витрати"]
+        lines = ["🔥 Імпорт завершено"]
         if saved:
             lines.append(
-                "Збережено: "
-                + ", ".join(
+                "➕ Додано: "
+                + "; ".join(
                     f"{entry.day:%d.%m.%Y} — {entry.effective_total_kcal} кк"
                     for entry in saved
                 )
             )
         if unchanged:
             lines.append(
-                "Без змін: " + ", ".join(f"{day:%d.%m.%Y}" for day in unchanged)
+                "✓ Збіглося із збереженим: "
+                + "; ".join(
+                    f"{entry.day:%d.%m.%Y} — {entry.effective_total_kcal} кк"
+                    for entry in unchanged
+                )
             )
         if ignored:
             lines.append(
-                "Пропущено незавершені дні: "
+                "⏭ Незавершені дні пропущено: "
                 + ", ".join(f"{day:%d.%m.%Y}" for day in ignored)
             )
         if profile_required:
@@ -4842,7 +4865,7 @@ class TelegramHandlers:
                 "Не вдалося записати: "
                 + ", ".join(f"{day:%d.%m.%Y}" for day in write_failures)
             )
-        if len(lines) == 1:
+        if len(lines) == 1 and not has_conflicts:
             lines.append("На скріншотах не знайдено даних для завершених діб.")
         return "\n".join(lines)
 

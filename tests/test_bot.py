@@ -3213,6 +3213,7 @@ async def _async_value(value):
 class BurnScreenshotService:
     def __init__(self, entries=None):
         self.entries = dict(entries or {})
+        self.saved = []
 
     @staticmethod
     def last_completed_day(timestamp):
@@ -3224,6 +3225,7 @@ class BurnScreenshotService:
 
     def save_burned_entry(self, entry):
         self.entries[entry.day] = entry
+        self.saved.append(entry)
         return entry
 
 
@@ -3257,8 +3259,8 @@ def test_burn_screenshot_photo_saves_completed_days_and_ignores_current() -> Non
 
     assert service.entries[date(2026, 8, 1)].effective_total_kcal == 3182
     assert date(2026, 8, 2) not in service.entries
-    assert "Збережено: 01.08.2026 — 3182 кк" in message.replies[0]
-    assert "Пропущено незавершені дні: 02.08.2026" in message.replies[0]
+    assert "➕ Додано: 01.08.2026 — 3182 кк" in message.replies[0]
+    assert "⏭ Незавершені дні пропущено: 02.08.2026" in message.replies[0]
     assert bot_module.BURN_WAITING_KEY not in context.user_data
 
 
@@ -3291,6 +3293,7 @@ def test_burn_screenshot_requests_choice_only_for_different_value() -> None:
 
     assert service.entries[day].effective_total_kcal == 2100
     assert "не збігаються" in message.replies[0]
+    assert "не знайдено" not in message.replies[0]
     buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard
     assert [row[0].text for row in buttons] == [
         "Залишити 2100 кк",
@@ -3303,7 +3306,56 @@ def test_burn_screenshot_requests_choice_only_for_different_value() -> None:
 
     assert service.entries[day].effective_total_kcal == 2200
     assert bot_module.BURN_WAITING_KEY not in context.user_data
-    assert "замінити на 2200 кк" in query.edits[0][0]
+    assert "🔄 Змінено: 01.08.2026 — 2100 → 2200 кк" in query.edits[0][0]
+
+
+def test_burn_screenshot_summary_makes_matching_saved_values_explicit() -> None:
+    days = [date(2026, 7, 31), date(2026, 8, 1)]
+    existing = {
+        day: build_burned_entry(
+            day,
+            "total",
+            2001 + index,
+            datetime(2026, 8, 2, tzinfo=UTC),
+        )
+        for index, day in enumerate(days)
+    }
+
+    class ScreenshotAnalyzer:
+        @staticmethod
+        def analyze(image_bytes, reference_date):
+            del image_bytes, reference_date
+            return BurnScreenshotAnalysis(
+                app="garmin_connect",
+                days=[
+                    BurnScreenshotDay(
+                        day=day,
+                        total_kcal=existing[day].effective_total_kcal,
+                    )
+                    for day in days
+                ],
+            )
+
+    service = BurnScreenshotService(existing)
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        burn_screenshot_analyzer=ScreenshotAnalyzer(),
+    )
+    context = SimpleNamespace(
+        user_data={bot_module.BURN_WAITING_KEY: {"kind": "burn_screenshot"}}
+    )
+    update, message = make_update()
+    message.photo = [BurnScreenshotPhoto()]
+
+    asyncio.run(handlers.photo(update, context))
+
+    assert service.saved == []
+    assert message.replies == [
+        "🔥 Імпорт завершено\n"
+        "✓ Збіглося із збереженим: 31.07.2026 — 2001 кк; "
+        "01.08.2026 — 2002 кк"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -3394,7 +3446,7 @@ def test_burn_screenshot_album_is_processed_as_one_batch(monkeypatch) -> None:
     assert analyzer.calls == 2
     assert sorted(service.entries) == [date(2026, 7, 31), date(2026, 8, 1)]
     assert messages[0].replies == []
-    assert "Збережено:" in messages[1].replies[0]
+    assert "➕ Додано:" in messages[1].replies[0]
     assert bot_module.BURN_WAITING_KEY not in context.user_data
 
 
