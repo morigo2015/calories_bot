@@ -58,6 +58,11 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     )
     monkeypatch.setattr(
         main_module,
+        "OpenAIBurnScreenshotAnalyzer",
+        lambda *args: created.setdefault("burn_screenshot_analyzer", SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        main_module,
         "OpenAITranscriber",
         lambda *args: created.setdefault("transcriber", SimpleNamespace()),
     )
@@ -181,6 +186,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     assert created["post_init"].keywords["admin_user_id"] == 999
     assert created["post_init"].keywords["garmin_calories"] is created["garmin"]
     assert created["meal_grouper"].init_args[1:3] == ("group-model", "medium")
+    assert created["burn_screenshot_analyzer"] is not None
     assert created["post_init"].keywords["garmin_refresh_time"] == time(
         1, tzinfo=ZoneInfo("Europe/Kyiv")
     )

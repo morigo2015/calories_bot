@@ -24,6 +24,12 @@ from calories_bot.analyzer import (
     OpenAIAnalyzer,
     normalize_input,
 )
+from calories_bot.burn_screenshots import (
+    BURN_SCREENSHOT_PROMPT,
+    BurnScreenshotAnalysis,
+    BurnScreenshotError,
+    OpenAIBurnScreenshotAnalyzer,
+)
 from calories_bot.meal_grouping import (
     MEAL_GROUPING_SYSTEM_PROMPT,
     MealGroupingError,
@@ -40,6 +46,7 @@ from scripts.eval_storage import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "evals" / "cases.jsonl"
 DEFAULT_GROUPING_CASES = ROOT / "evals" / "weekly_meal_grouping.jsonl"
+DEFAULT_BURN_SCREENSHOT_CASES = ROOT / "evals" / "burn_screenshots.jsonl"
 DEFAULT_REPORTS = ROOT / "eval-results" / "runs"
 ALLOWED_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
@@ -223,6 +230,24 @@ def serialize_analysis(analysis: FoodAnalysis) -> dict[str, Any]:
                 "portion_display": item.portion_display,
             }
             for item in analysis.items
+        ],
+    }
+
+
+def serialize_burn_screenshot_analysis(
+    analysis: BurnScreenshotAnalysis,
+) -> dict[str, Any]:
+    return {
+        "app": analysis.app,
+        "detected_app_name": analysis.detected_app_name,
+        "days": [
+            {
+                "day": item.day.isoformat(),
+                "total_kcal": item.total_kcal,
+                "active_kcal": item.active_kcal,
+                "resting_kcal": item.resting_kcal,
+            }
+            for item in analysis.days
         ],
     }
 
@@ -440,6 +465,59 @@ def grade_grouping(
     return checks
 
 
+def grade_burn_screenshot(
+    analysis: BurnScreenshotAnalysis, expected: dict[str, Any]
+) -> list[CheckResult]:
+    checks: list[CheckResult] = []
+    _check(
+        checks,
+        "app",
+        analysis.app == expected["app"],
+        analysis.app,
+        expected["app"],
+    )
+    day_count = expected["day_count"]
+    _check(
+        checks,
+        "day_count",
+        _in_range(len(analysis.days), day_count),
+        len(analysis.days),
+        day_count,
+    )
+    actual_by_day = {item.day.isoformat(): item for item in analysis.days}
+    _check(
+        checks,
+        "unique_days",
+        len(actual_by_day) == len(analysis.days),
+        len(actual_by_day),
+        len(analysis.days),
+    )
+    for expected_day in expected["days"]:
+        day = str(expected_day["day"])
+        actual = actual_by_day.get(day)
+        _check(
+            checks,
+            f"day_{day}",
+            actual is not None,
+            day in actual_by_day,
+            True,
+        )
+        if actual is None:
+            continue
+        for field in ("total_kcal", "active_kcal", "resting_kcal"):
+            if field not in expected_day:
+                continue
+            value = getattr(actual, field)
+            _check(
+                checks,
+                f"{day}_{field}",
+                value == expected_day[field],
+                value,
+                expected_day[field],
+            )
+    return checks
+
+
 def check_explicit_sources(analysis: FoodAnalysis, text: str) -> list[CheckResult]:
     normalized = normalize_input(text)
     checks: list[CheckResult] = []
@@ -593,6 +671,68 @@ def run_grouping_case(
         )
 
 
+def run_burn_screenshot_case(
+    analyzer: OpenAIBurnScreenshotAnalyzer,
+    case: dict[str, Any],
+    cases_path: Path,
+    repeat_index: int = 0,
+) -> CaseResult:
+    case_id = str(case["id"])
+    image_name = case.get("image")
+    try:
+        image_path = safe_image_path(cases_path.parent, image_name)
+        image_bytes = image_path.read_bytes()
+        reference_date = datetime.strptime(
+            str(case["reference_date"]), "%Y-%m-%d"
+        ).date()
+    except (DatasetValidationError, OSError, ValueError) as exc:
+        raise SystemExit(f"Cannot read burn screenshot case {case_id}") from exc
+    normalized_input = {
+        "image": str(image_name),
+        "reference_date": reference_date.isoformat(),
+    }
+    started = time.perf_counter()
+    try:
+        result = analyzer.analyze_result(image_bytes, reference_date)
+        checks = grade_burn_screenshot(result.analysis, case["expected"])
+        input_tokens, output_tokens, cost = _metadata_values(result.metadata)
+        return CaseResult(
+            case_id=case_id,
+            repeat_index=repeat_index,
+            passed=all(check.passed for check in checks),
+            hard_failure=False,
+            latency_seconds=time.perf_counter() - started,
+            checks=checks,
+            normalized_input=normalized_input,
+            actual=serialize_burn_screenshot_analysis(result.analysis),
+            error=None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+        )
+    except BurnScreenshotError as exc:
+        cause = exc.__cause__
+        return CaseResult(
+            case_id=case_id,
+            repeat_index=repeat_index,
+            passed=False,
+            hard_failure=True,
+            latency_seconds=time.perf_counter() - started,
+            checks=[],
+            normalized_input=normalized_input,
+            actual=None,
+            error={
+                "type": type(cause).__name__
+                if cause is not None
+                else type(exc).__name__,
+                "message": str(cause) if cause is not None else str(exc),
+            },
+            input_tokens=None,
+            output_tokens=None,
+            cost_usd=None,
+        )
+
+
 def parse_config(raw: str) -> tuple[str, str]:
     if ":" not in raw:
         raise argparse.ArgumentTypeError("use MODEL:EFFORT")
@@ -620,7 +760,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--task",
-        choices=("analysis", "weekly-meals"),
+        choices=("analysis", "weekly-meals", "burn-screenshots"),
         default="analysis",
         help="LLM task to evaluate",
     )
@@ -653,7 +793,11 @@ def main() -> int:
         raise SystemExit("--name must not be empty")
 
     load_dotenv(os.getenv("CALORIES_BOT_ENV_FILE") or None)
-    default_cases = DEFAULT_CASES if args.task == "analysis" else DEFAULT_GROUPING_CASES
+    default_cases = {
+        "analysis": DEFAULT_CASES,
+        "weekly-meals": DEFAULT_GROUPING_CASES,
+        "burn-screenshots": DEFAULT_BURN_SCREENSHOT_CASES,
+    }[args.task]
     cases_path = (args.cases or default_cases).resolve()
     cases = load_cases(cases_path, set(args.case_ids))
     if args.task == "weekly-meals":
@@ -700,9 +844,13 @@ def main() -> int:
     for model, effort in configs:
         print(f"\n{model}:{effort}")
         pricing = configured_pricing if model == configured_model else unknown_pricing
-        runner: OpenAIAnalyzer | OpenAIMealGrouper
+        runner: OpenAIAnalyzer | OpenAIMealGrouper | OpenAIBurnScreenshotAnalyzer
         if args.task == "weekly-meals":
             runner = OpenAIMealGrouper(api_key, model, effort, timeout_seconds, pricing)
+        elif args.task == "burn-screenshots":
+            runner = OpenAIBurnScreenshotAnalyzer(
+                api_key, model, effort, timeout_seconds, pricing
+            )
         else:
             runner = OpenAIAnalyzer(api_key, model, effort, timeout_seconds, pricing)
         results: list[CaseResult] = []
@@ -711,6 +859,11 @@ def main() -> int:
                 if args.task == "weekly-meals":
                     assert isinstance(runner, OpenAIMealGrouper)
                     result = run_grouping_case(runner, case, repeat_index=repeat_index)
+                elif args.task == "burn-screenshots":
+                    assert isinstance(runner, OpenAIBurnScreenshotAnalyzer)
+                    result = run_burn_screenshot_case(
+                        runner, case, cases_path, repeat_index=repeat_index
+                    )
                 else:
                     assert isinstance(runner, OpenAIAnalyzer)
                     result = run_case(
@@ -763,11 +916,11 @@ def main() -> int:
         "finished_at": _iso_utc(_utc_now()),
         "git": _git_metadata(),
         "prompt_sha256": _sha256(
-            (
-                MEAL_GROUPING_SYSTEM_PROMPT
-                if args.task == "weekly-meals"
-                else SYSTEM_PROMPT
-            ).encode("utf-8")
+            {
+                "analysis": SYSTEM_PROMPT,
+                "weekly-meals": MEAL_GROUPING_SYSTEM_PROMPT,
+                "burn-screenshots": BURN_SCREENSHOT_PROMPT,
+            }[args.task].encode("utf-8")
         ),
         "dataset_sha256": _sha256(dataset_bytes),
         "cases_path": _project_path(cases_path),

@@ -78,6 +78,22 @@ python -m scripts.eval_llm --confirm --repeat 3 \
 чіткі критерії та постійне поповнення регресійного набору
 ([Evaluation best practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices)).
 
+Для імпорту витрати є окреме завдання `burn-screenshots` із реальними
+прикладами екранів Garmin Connect:
+
+```bash
+bash scripts/run_tests.sh --llm --confirm \
+  --task burn-screenshots \
+  --name "Перевірка імпорту burn screenshots"
+```
+
+Набір `evals/burn_screenshots.jsonl` перевіряє точні дати й добові значення,
+не допускає підміни рядків середніми показниками з графіка та містить негативний
+екран Garmin без калорій. Для кожного запуску у звіті зберігаються лише шлях і
+SHA-256 зображення, структурована відповідь, токени та розрахункова вартість.
+Окремий реальний приклад Zepp Life слід додати до набору, щойно він буде
+доступний; детермінована поведінка для активних калорій уже покрита unit-тестами.
+
 Для незалежного вибору конфігурації групування використовується task
 `weekly-meals`:
 

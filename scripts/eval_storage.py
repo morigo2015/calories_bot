@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import tempfile
+from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -54,6 +55,61 @@ def validate_case(case: object) -> dict[str, Any]:
     expected = case.get("expected")
     if not isinstance(expected, dict):
         raise DatasetValidationError(f"case {case_id}: expected must be an object")
+    if "reference_date" in case:
+        if "image" not in case:
+            raise DatasetValidationError(
+                f"case {case_id}: burn screenshot case requires an image"
+            )
+        try:
+            date.fromisoformat(str(case["reference_date"]))
+        except ValueError as exc:
+            raise DatasetValidationError(
+                f"case {case_id}: reference_date must use YYYY-MM-DD"
+            ) from exc
+        if expected.get("app") not in {
+            "garmin_connect",
+            "zepp_life",
+            "unknown",
+        }:
+            raise DatasetValidationError(
+                f"case {case_id}: expected.app is not supported"
+            )
+        day_count = expected.get("day_count")
+        if (
+            not isinstance(day_count, list)
+            or len(day_count) != 2
+            or not all(isinstance(value, int) for value in day_count)
+            or day_count[0] < 0
+            or day_count[0] > day_count[1]
+        ):
+            raise DatasetValidationError(
+                f"case {case_id}: expected.day_count must be [min, max]"
+            )
+        days = expected.get("days")
+        if not isinstance(days, list):
+            raise DatasetValidationError(
+                f"case {case_id}: expected.days must be a list"
+            )
+        for expected_day in days:
+            if not isinstance(expected_day, dict):
+                raise DatasetValidationError(
+                    f"case {case_id}: expected day must be an object"
+                )
+            try:
+                date.fromisoformat(str(expected_day["day"]))
+            except (KeyError, ValueError) as exc:
+                raise DatasetValidationError(
+                    f"case {case_id}: expected day must use YYYY-MM-DD"
+                ) from exc
+            for field in ("total_kcal", "active_kcal", "resting_kcal"):
+                value = expected_day.get(field)
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool) or value < 1
+                ):
+                    raise DatasetValidationError(
+                        f"case {case_id}: expected {field} must be positive"
+                    )
+        return case
     if "names" in case:
         names = case["names"]
         if (

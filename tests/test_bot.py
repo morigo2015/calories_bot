@@ -36,6 +36,7 @@ from calories_bot.bot import (
     load_help_text,
     load_start_text,
 )
+from calories_bot.burn_screenshots import BurnScreenshotAnalysis, BurnScreenshotDay
 from calories_bot.burned import build_burned_entry
 from calories_bot.meal_grouping import MealGroupingError, MealGroupingResult
 from calories_bot.models import (
@@ -1998,6 +1999,20 @@ def test_burn_accepts_any_completed_date_and_rejects_current_day() -> None:
     assert "не пізніше 01.08.2026" in message.replies[0]
 
 
+def test_burn_menu_offers_screenshot_import() -> None:
+    service = SimpleNamespace(last_completed_day=lambda timestamp: date(2026, 8, 1))
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, message = make_update()
+
+    asyncio.run(handlers.burn(update, SimpleNamespace(user_data={}, args=[])))
+
+    button = message.reply_kwargs[0]["reply_markup"].inline_keyboard[0][0]
+    assert (button.text, button.callback_data) == (
+        "📷 Імпорт зі скріншотів",
+        "burn-import",
+    )
+
+
 @pytest.mark.parametrize(
     "chat_type", [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]
 )
@@ -3182,6 +3197,205 @@ def test_photo_handler_ignores_media_groups() -> None:
 
     assert service.calls == 0
     assert message.replies == []
+
+
+class BurnScreenshotPhoto:
+    async def get_file(self):
+        return SimpleNamespace(
+            download_as_bytearray=lambda: _async_value(bytearray(b"screenshot"))
+        )
+
+
+async def _async_value(value):
+    return value
+
+
+class BurnScreenshotService:
+    def __init__(self, entries=None):
+        self.entries = dict(entries or {})
+
+    @staticmethod
+    def last_completed_day(timestamp):
+        del timestamp
+        return date(2026, 8, 1)
+
+    def get_burned_entry(self, day):
+        return self.entries.get(day)
+
+    def save_burned_entry(self, entry):
+        self.entries[entry.day] = entry
+        return entry
+
+
+def test_burn_screenshot_photo_saves_completed_days_and_ignores_current() -> None:
+    class ScreenshotAnalyzer:
+        def analyze(self, image_bytes, reference_date):
+            assert image_bytes == b"screenshot"
+            assert reference_date == date(2026, 8, 2)
+            return BurnScreenshotAnalysis(
+                app="garmin_connect",
+                detected_app_name="Garmin Connect",
+                days=[
+                    BurnScreenshotDay(day=date(2026, 8, 1), total_kcal=3182),
+                    BurnScreenshotDay(day=date(2026, 8, 2), total_kcal=2049),
+                ],
+            )
+
+    service = BurnScreenshotService()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        burn_screenshot_analyzer=ScreenshotAnalyzer(),
+    )
+    context = SimpleNamespace(
+        user_data={bot_module.BURN_WAITING_KEY: {"kind": "burn_screenshot"}}
+    )
+    update, message = make_update()
+    message.photo = [BurnScreenshotPhoto()]
+
+    asyncio.run(handlers.photo(update, context))
+
+    assert service.entries[date(2026, 8, 1)].effective_total_kcal == 3182
+    assert date(2026, 8, 2) not in service.entries
+    assert "Збережено: 01.08.2026 — 3182 кк" in message.replies[0]
+    assert "Пропущено незавершені дні: 02.08.2026" in message.replies[0]
+    assert bot_module.BURN_WAITING_KEY not in context.user_data
+
+
+def test_burn_screenshot_requests_choice_only_for_different_value() -> None:
+    day = date(2026, 8, 1)
+    existing = build_burned_entry(day, "total", 2100, datetime(2026, 8, 2, tzinfo=UTC))
+
+    class ScreenshotAnalyzer:
+        @staticmethod
+        def analyze(image_bytes, reference_date):
+            del image_bytes, reference_date
+            return BurnScreenshotAnalysis(
+                app="garmin_connect",
+                days=[BurnScreenshotDay(day=day, total_kcal=2200)],
+            )
+
+    service = BurnScreenshotService({day: existing})
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        burn_screenshot_analyzer=ScreenshotAnalyzer(),
+    )
+    context = SimpleNamespace(
+        user_data={bot_module.BURN_WAITING_KEY: {"kind": "burn_screenshot"}}
+    )
+    update, message = make_update()
+    message.photo = [BurnScreenshotPhoto()]
+
+    asyncio.run(handlers.photo(update, context))
+
+    assert service.entries[day].effective_total_kcal == 2100
+    assert "не збігаються" in message.replies[0]
+    buttons = message.reply_kwargs[0]["reply_markup"].inline_keyboard
+    assert [row[0].text for row in buttons] == [
+        "Залишити 2100 кк",
+        "Замінити на 2200 кк",
+        "Пропустити дату",
+    ]
+
+    callback_update, query = make_callback_update("burn-conflict:1")
+    asyncio.run(handlers.burn_settings_callback(callback_update, context))
+
+    assert service.entries[day].effective_total_kcal == 2200
+    assert bot_module.BURN_WAITING_KEY not in context.user_data
+    assert "замінити на 2200 кк" in query.edits[0][0]
+
+
+@pytest.mark.parametrize(
+    ("analysis", "expected"),
+    [
+        (
+            BurnScreenshotAnalysis(app="garmin_connect", days=[]),
+            "Без добових калорій: 1 фото.",
+        ),
+        (
+            BurnScreenshotAnalysis(
+                app="unknown", detected_app_name="Samsung Health", days=[]
+            ),
+            "Непідтримувані застосунки: Samsung Health.",
+        ),
+    ],
+)
+def test_burn_screenshot_rejects_images_without_supported_daily_calories(
+    analysis, expected
+) -> None:
+    class ScreenshotAnalyzer:
+        @staticmethod
+        def analyze(image_bytes, reference_date):
+            del image_bytes, reference_date
+            return analysis
+
+    service = BurnScreenshotService()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        burn_screenshot_analyzer=ScreenshotAnalyzer(),
+    )
+    context = SimpleNamespace(
+        user_data={bot_module.BURN_WAITING_KEY: {"kind": "burn_screenshot"}}
+    )
+    update, message = make_update()
+    message.photo = [BurnScreenshotPhoto()]
+
+    asyncio.run(handlers.photo(update, context))
+
+    assert service.entries == {}
+    assert expected in message.replies[0]
+
+
+def test_burn_screenshot_album_is_processed_as_one_batch(monkeypatch) -> None:
+    class ScreenshotAnalyzer:
+        def __init__(self):
+            self.calls = 0
+
+        def analyze(self, image_bytes, reference_date):
+            del image_bytes, reference_date
+            self.calls += 1
+            days = [date(2026, 7, 31), date(2026, 8, 1)]
+            return BurnScreenshotAnalysis(
+                app="garmin_connect",
+                days=[
+                    BurnScreenshotDay(
+                        day=days[self.calls - 1],
+                        total_kcal=2000 + self.calls,
+                    )
+                ],
+            )
+
+    async def run_album():
+        service = BurnScreenshotService()
+        analyzer = ScreenshotAnalyzer()
+        handlers = TelegramHandlers(
+            999,
+            FakeManager({123: user_record()}, {123: service}),
+            burn_screenshot_analyzer=analyzer,
+        )
+        context = SimpleNamespace(
+            user_data={bot_module.BURN_WAITING_KEY: {"kind": "burn_screenshot"}}
+        )
+        messages = []
+        for _ in range(2):
+            update, message = make_update()
+            message.photo = [BurnScreenshotPhoto()]
+            message.media_group_id = "album"
+            messages.append(message)
+            await handlers.photo(update, context)
+        await asyncio.sleep(0.03)
+        return analyzer, service, messages, context
+
+    monkeypatch.setattr(bot_module, "BURN_ALBUM_SETTLE_SECONDS", 0.01)
+    analyzer, service, messages, context = asyncio.run(run_album())
+
+    assert analyzer.calls == 2
+    assert sorted(service.entries) == [date(2026, 7, 31), date(2026, 8, 1)]
+    assert messages[0].replies == []
+    assert "Збережено:" in messages[1].replies[0]
+    assert bot_module.BURN_WAITING_KEY not in context.user_data
 
 
 @pytest.mark.parametrize(

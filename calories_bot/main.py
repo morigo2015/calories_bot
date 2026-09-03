@@ -21,6 +21,7 @@ from telegram.ext import (
 from .analytics import AnalyticsStore, BotStatistics, OpenAICostClient
 from .analyzer import OpenAIAnalyzer, OpenAITranscriber
 from .bot import TelegramHandlers, UserManager
+from .burn_screenshots import OpenAIBurnScreenshotAnalyzer
 from .config import Settings
 from .garmin import GarminCalorieStore
 from .meal_grouping import OpenAIMealGrouper
@@ -134,6 +135,14 @@ def main() -> None:
         settings.openai_pricing,
         statistics,
     )
+    burn_screenshot_analyzer = OpenAIBurnScreenshotAnalyzer(
+        settings.openai_api_key,
+        settings.openai_model,
+        settings.openai_reasoning_effort,
+        settings.openai_timeout_seconds,
+        settings.openai_pricing,
+        statistics,
+    )
     transcriber = OpenAITranscriber(
         settings.openai_api_key,
         settings.openai_timeout_seconds,
@@ -185,6 +194,7 @@ def main() -> None:
         garmin_calories,
         transcriber,
         meal_grouper,
+        burn_screenshot_analyzer,
     )
 
     application = (

@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from calories_bot.analyzer import AnalysisError, AnalysisResult
+from calories_bot.burn_screenshots import (
+    BurnScreenshotAnalysis,
+    BurnScreenshotDay,
+    BurnScreenshotResult,
+)
 from calories_bot.meal_grouping import MealGroupingResult
 from calories_bot.models import FoodAnalysis, FoodItem, LLMMetadata
 from scripts import eval_llm
@@ -16,6 +21,7 @@ from scripts.eval_llm import (
     build_dataset_snapshot,
     create_run_identity,
     grade_analysis,
+    grade_burn_screenshot,
     grade_grouping,
     load_cases,
     parse_config,
@@ -146,6 +152,26 @@ def test_grade_non_food_does_not_calculate_meal() -> None:
     assert checks[0].passed
 
 
+def test_grade_burn_screenshot_checks_app_days_and_exact_calories() -> None:
+    analysis = BurnScreenshotAnalysis(
+        app="garmin_connect",
+        detected_app_name="Garmin Connect",
+        days=[BurnScreenshotDay(day="2026-09-01", total_kcal=3182)],
+    )
+
+    checks = grade_burn_screenshot(
+        analysis,
+        {
+            "app": "garmin_connect",
+            "day_count": [1, 1],
+            "days": [{"day": "2026-09-01", "total_kcal": 3182}],
+        },
+    )
+
+    assert checks
+    assert all(check.passed for check in checks)
+
+
 def test_load_cases_supports_selection(tmp_path) -> None:
     path = tmp_path / "cases.jsonl"
     path.write_text(
@@ -261,6 +287,22 @@ class _PassingGrouper:
         )
 
 
+class _PassingBurnScreenshotAnalyzer:
+    def __init__(self, *args: object) -> None:
+        pass
+
+    def analyze_result(self, *args: object) -> BurnScreenshotResult:
+        return BurnScreenshotResult(
+            analysis=BurnScreenshotAnalysis(
+                app="garmin_connect",
+                days=[BurnScreenshotDay(day="2026-09-01", total_kcal=3182)],
+            ),
+            metadata=LLMMetadata(
+                model="test-model", effort="none", input_tokens=3, output_tokens=2
+            ),
+        )
+
+
 def _run_main(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -317,6 +359,49 @@ def test_confirmed_eval_writes_schema_v2_history(
     assert json.loads(explicit_report.read_text(encoding="utf-8")) == report
     assert "test-only-key" not in serialized
     assert "base64" not in serialized
+
+
+def test_confirmed_burn_screenshot_eval_uses_task_dataset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    evals = tmp_path / "evals"
+    images = evals / "images"
+    images.mkdir(parents=True)
+    (images / "burn.jpg").write_bytes(b"image")
+    cases_path = evals / "burn.jsonl"
+    cases_path.write_text(
+        '{"id":"burn","image":"images/burn.jpg",'
+        '"reference_date":"2026-09-02","expected":{'
+        '"app":"garmin_connect","day_count":[1,1],"days":'
+        '[{"day":"2026-09-01","total_kcal":3182}]}}\n',
+        encoding="utf-8",
+    )
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(eval_llm, "DEFAULT_BURN_SCREENSHOT_CASES", cases_path)
+    monkeypatch.setattr(eval_llm, "DEFAULT_REPORTS", reports)
+    monkeypatch.setattr(
+        eval_llm, "OpenAIBurnScreenshotAnalyzer", _PassingBurnScreenshotAnalyzer
+    )
+    monkeypatch.setattr(eval_llm, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_llm", "--task", "burn-screenshots", "--confirm"],
+    )
+
+    assert eval_llm.main() == 0
+    report = json.loads(next(reports.glob("*.json")).read_text(encoding="utf-8"))
+    assert report["task"] == "burn-screenshots"
+    assert report["passed"] is True
+    assert report["configurations"][0]["results"][0]["actual"]["days"] == [
+        {
+            "day": "2026-09-01",
+            "total_kcal": 3182,
+            "active_kcal": None,
+            "resting_kcal": None,
+        }
+    ]
 
 
 def test_confirmed_eval_passes_configured_timeout_to_analyzer(

@@ -31,6 +31,12 @@ from .analyzer import (
     TranscriptionError,
     normalize_input,
 )
+from .burn_screenshots import (
+    BurnScreenshotAnalysis,
+    BurnScreenshotAnalyzer,
+    BurnScreenshotError,
+    prepare_burn_screenshot_entries,
+)
 from .burned import (
     BodyProfile,
     BurnedCaloriesEntry,
@@ -136,6 +142,7 @@ MEAL_WEIGHT_WAITING_KEY = "awaiting_meal_weight"
 SAVED_MEAL_EDIT_WAITING_KEY = "awaiting_saved_meal_edit"
 INVITE_WAITING_KEY = "awaiting_invite_name"
 BURN_WAITING_KEY = "awaiting_burned_calories"
+BURN_ALBUM_SETTLE_SECONDS = 1.0
 SETTINGS_WAITING_KEY = "awaiting_settings_value"
 INVITE_ONLY_TEXT = "Доступ лише за запрошенням."
 BLOCKED_TEXT = "Доступ до бота вимкнено."
@@ -1162,7 +1169,7 @@ class CaloriesService:
         source = None
         if manual is not None:
             source = (
-                "введено вручну"
+                "через /burn"
                 if manual.input_type == "total"
                 else (f"{manual.input_kcal} активних + {manual.resting_kcal} пасивних")
             )
@@ -2090,6 +2097,16 @@ class UserManager:
                     del self._services[key]
 
 
+@dataclass
+class _PendingBurnAlbum:
+    images: list[bytes]
+    message: Message
+    context: object
+    service: CaloriesService
+    user: UserRecord
+    task: asyncio.Task[None] | None = None
+
+
 class TelegramHandlers:
     def __init__(
         self,
@@ -2100,6 +2117,7 @@ class TelegramHandlers:
         garmin_calories: GarminCalories | None = None,
         transcriber: Transcriber | None = None,
         meal_grouper: MealGrouper | None = None,
+        burn_screenshot_analyzer: BurnScreenshotAnalyzer | None = None,
     ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
@@ -2108,6 +2126,8 @@ class TelegramHandlers:
         self._garmin_calories = garmin_calories
         self._transcriber = transcriber
         self._meal_grouper = meal_grouper
+        self._burn_screenshot_analyzer = burn_screenshot_analyzer
+        self._burn_albums: dict[tuple[int, str], _PendingBurnAlbum] = {}
 
     @staticmethod
     @asynccontextmanager
@@ -2974,6 +2994,11 @@ class TelegramHandlers:
                 [
                     [
                         InlineKeyboardButton(
+                            "📷 Імпорт зі скріншотів", callback_data="burn-import"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
                             f"Остання · {last_day:%d.%m}",
                             callback_data=f"burn-day:{last_day.isoformat()}",
                         )
@@ -3012,7 +3037,7 @@ class TelegramHandlers:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "🗑 Видалити ручне значення",
+                        "🗑 Видалити значення /burn",
                         callback_data=f"burn-delete:{selected.isoformat()}",
                     )
                 ]
@@ -3020,7 +3045,7 @@ class TelegramHandlers:
         rows.append([InlineKeyboardButton("❌ Скасувати", callback_data="wait-cancel")])
         current = ""
         if existing is not None:
-            current = f"\nПоточне ручне значення: {existing.effective_total_kcal} кк."
+            current = f"\nПоточне значення /burn: {existing.effective_total_kcal} кк."
         await message.reply_text(
             f"Витрата за {selected:%d.%m.%Y}.{current}\n\nЩо вводимо?",
             reply_markup=InlineKeyboardMarkup(rows),
@@ -3039,6 +3064,81 @@ class TelegramHandlers:
             return
         data = query.data or ""
         try:
+            if data == "burn-import":
+                if self._burn_screenshot_analyzer is None:
+                    await query.answer()
+                    await query.edit_message_text(
+                        "Імпорт зі скріншотів тимчасово недоступний."
+                    )
+                    return
+                self._start_waiting(
+                    context, BURN_WAITING_KEY, {"kind": "burn_screenshot"}
+                )
+                await query.answer()
+                await query.edit_message_text(
+                    "Надішли один скріншот або вибери кілька фото одночасно.\n\n"
+                    "Підтримуються Garmin Connect і Zepp Life. "
+                    "Поточна незавершена доба буде пропущена.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "❌ Скасувати", callback_data="wait-cancel"
+                                )
+                            ]
+                        ]
+                    ),
+                )
+                return
+            if data.startswith("burn-conflict:"):
+                state = self._user_state(context).get(BURN_WAITING_KEY)
+                if not isinstance(state, dict) or state.get("kind") != "burn_conflicts":
+                    raise ValueError
+                conflicts = state.get("conflicts")
+                index = state.get("conflict_index")
+                resolved = state.get("resolved")
+                if (
+                    not isinstance(conflicts, list)
+                    or not isinstance(index, int)
+                    or not isinstance(resolved, list)
+                    or not 0 <= index < len(conflicts)
+                ):
+                    raise ValueError
+                conflict = conflicts[index]
+                if not isinstance(conflict, dict) or not isinstance(
+                    conflict.get("day"), date
+                ):
+                    raise ValueError
+                selected_choice = data.removeprefix("burn-conflict:")
+                day = cast(date, conflict["day"])
+                if selected_choice == "skip":
+                    resolved.append(f"{day:%d.%m.%Y} — пропущено")
+                else:
+                    option_index = int(selected_choice)
+                    options = self._burn_conflict_options(conflict)
+                    if not 0 <= option_index < len(options):
+                        raise ValueError
+                    label, entry = options[option_index]
+                    if entry is not None:
+                        await asyncio.to_thread(service.save_burned_entry, entry)
+                    resolved.append(f"{day:%d.%m.%Y} — {label.lower()}")
+                state["conflict_index"] = index + 1
+                await query.answer(
+                    "Обрано" if selected_choice != "skip" else "Пропущено"
+                )
+                if index + 1 < len(conflicts):
+                    text, markup = self._burn_conflict_prompt(state)
+                    await query.edit_message_text(text, reply_markup=markup)
+                    return
+                summary = str(state.get("summary", ""))
+                self._clear_pending_input(context)
+                await query.edit_message_text(
+                    summary
+                    + "\n\nКонфлікти:\n"
+                    + "\n".join(str(item) for item in resolved),
+                    reply_markup=None,
+                )
+                return
             if data == "burn-other":
                 state = {"kind": "burn_date"}
                 self._start_waiting(context, BURN_WAITING_KEY, state)
@@ -3136,7 +3236,7 @@ class TelegramHandlers:
                 self._clear_pending_input(context)
                 await query.answer("Видалено" if deleted else "Запису вже немає")
                 await query.edit_message_text(
-                    f"Ручне значення за {selected:%d.%m.%Y} видалено."
+                    f"Значення /burn за {selected:%d.%m.%Y} видалено."
                     + (
                         " Використовуватиметься Garmin."
                         if self._is_admin(update)
@@ -4466,12 +4566,22 @@ class TelegramHandlers:
             return True
 
     async def photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self._clear_pending_input(context)
         message = update.effective_message
-        if message is None or not message.photo or message.media_group_id is not None:
+        if message is None or not message.photo:
             return
         service = await self._active_service(update)
         if service is None:
+            return
+        burn_state = self._user_state(context).get(BURN_WAITING_KEY)
+        if isinstance(burn_state, dict) and burn_state.get("kind") == "burn_screenshot":
+            current = await self._active_user(update)
+            if current is not None:
+                await self._handle_burn_screenshot_photo(
+                    message, context, service, current
+                )
+            return
+        self._clear_pending_input(context)
+        if message.media_group_id is not None:
             return
         try:
             existing = await asyncio.to_thread(
@@ -4500,6 +4610,292 @@ class TelegramHandlers:
                 context=context,
                 show_status=False,
             )
+
+    async def _handle_burn_screenshot_photo(
+        self,
+        message: Message,
+        context: ContextTypes.DEFAULT_TYPE,
+        service: CaloriesService,
+        current: UserRecord,
+    ) -> None:
+        if self._burn_screenshot_analyzer is None:
+            self._clear_pending_input(context)
+            await message.reply_text(
+                "Імпорт зі скріншотів тимчасово недоступний.", do_quote=False
+            )
+            return
+        try:
+            telegram_file = await message.photo[-1].get_file()
+            image_bytes = bytes(await telegram_file.download_as_bytearray())
+        except Exception:
+            LOGGER.exception("Could not download a burned-calorie screenshot")
+            await message.reply_text(
+                "Не вдалося завантажити скріншот. Спробуй ще раз.",
+                do_quote=False,
+            )
+            return
+
+        media_group_id = message.media_group_id
+        if media_group_id is None:
+            self._clear_pending_input(context)
+            await self._process_burn_screenshots(
+                message, context, service, current, [image_bytes]
+            )
+            return
+
+        key = (message.chat_id, media_group_id)
+        batch = self._burn_albums.get(key)
+        if batch is None:
+            batch = _PendingBurnAlbum(
+                images=[],
+                message=message,
+                context=context,
+                service=service,
+                user=current,
+            )
+            self._burn_albums[key] = batch
+        batch.images.append(image_bytes)
+        batch.message = message
+        batch.context = context
+        if batch.task is not None:
+            batch.task.cancel()
+        batch.task = asyncio.create_task(self._finish_burn_album(key))
+
+    async def _finish_burn_album(self, key: tuple[int, str]) -> None:
+        try:
+            await asyncio.sleep(BURN_ALBUM_SETTLE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        batch = self._burn_albums.pop(key, None)
+        if batch is None:
+            return
+        state = self._user_state(batch.context).get(BURN_WAITING_KEY)
+        if not isinstance(state, dict) or state.get("kind") != "burn_screenshot":
+            return
+        self._clear_pending_input(batch.context)
+        await self._process_burn_screenshots(
+            batch.message,
+            batch.context,
+            batch.service,
+            batch.user,
+            batch.images,
+        )
+
+    async def _process_burn_screenshots(
+        self,
+        message: Message,
+        context: object,
+        service: CaloriesService,
+        current: UserRecord,
+        images: list[bytes],
+    ) -> None:
+        analyzer = self._burn_screenshot_analyzer
+        if analyzer is None:
+            await message.reply_text(
+                "Імпорт зі скріншотів тимчасово недоступний.", do_quote=False
+            )
+            return
+
+        analyses: list[BurnScreenshotAnalysis] = []
+        unknown_apps: set[str] = set()
+        failed_images = 0
+        empty_images = 0
+        reference_date = self._manager.local_date(message.date)
+        async with self._temporary_status(message, llm=True):
+            for image_bytes in images:
+                try:
+                    analysis = await asyncio.to_thread(
+                        analyzer.analyze, image_bytes, reference_date
+                    )
+                except BurnScreenshotError:
+                    LOGGER.exception("Could not analyze burned-calorie screenshot")
+                    failed_images += 1
+                    continue
+                if analysis.app == "unknown":
+                    unknown_apps.add(
+                        analysis.detected_app_name or "невідомий застосунок"
+                    )
+                    continue
+                if not analysis.days:
+                    empty_images += 1
+                    continue
+                analyses.append(analysis)
+
+        prepared = prepare_burn_screenshot_entries(
+            analyses,
+            last_completed_day=service.last_completed_day(message.date),
+            updated_at=datetime.now(UTC),
+            profile=self._body_profile(current),
+        )
+        saved: list[BurnedCaloriesEntry] = []
+        unchanged: list[date] = []
+        write_failures: list[date] = []
+        conflicts: list[dict[str, object]] = []
+        for day, candidates in prepared.entries.items():
+            try:
+                existing = await asyncio.to_thread(service.get_burned_entry, day)
+            except Exception:
+                LOGGER.exception(
+                    "Could not read burned calories before screenshot import"
+                )
+                write_failures.append(day)
+                continue
+            candidate_totals = {entry.effective_total_kcal for entry in candidates}
+            if existing is None and len(candidates) == 1:
+                try:
+                    saved.append(
+                        await asyncio.to_thread(
+                            service.save_burned_entry, candidates[0]
+                        )
+                    )
+                except Exception:
+                    LOGGER.exception("Could not save screenshot calorie entry")
+                    write_failures.append(day)
+                continue
+            if existing is not None and candidate_totals == {
+                existing.effective_total_kcal
+            }:
+                unchanged.append(day)
+                continue
+            conflicts.append(
+                {"day": day, "existing": existing, "candidates": candidates}
+            )
+
+        summary = self._format_burn_screenshot_summary(
+            saved=saved,
+            unchanged=unchanged,
+            ignored=list(prepared.ignored_days),
+            invalid=list(prepared.invalid_days),
+            profile_required=list(prepared.profile_required_days),
+            unknown_apps=unknown_apps,
+            failed_images=failed_images,
+            empty_images=empty_images,
+            write_failures=write_failures,
+        )
+        if not conflicts:
+            await message.reply_text(summary, do_quote=False)
+            return
+        state: dict[str, object] = {
+            "kind": "burn_conflicts",
+            "conflicts": conflicts,
+            "conflict_index": 0,
+            "summary": summary,
+            "resolved": [],
+        }
+        self._start_waiting(context, BURN_WAITING_KEY, state)
+        text, markup = self._burn_conflict_prompt(state)
+        await message.reply_text(text, reply_markup=markup, do_quote=False)
+
+    @staticmethod
+    def _format_burn_screenshot_summary(
+        *,
+        saved: list[BurnedCaloriesEntry],
+        unchanged: list[date],
+        ignored: list[date],
+        invalid: list[date],
+        profile_required: list[date],
+        unknown_apps: set[str],
+        failed_images: int,
+        empty_images: int,
+        write_failures: list[date],
+    ) -> str:
+        lines = ["🔥 Імпорт витрати"]
+        if saved:
+            lines.append(
+                "Збережено: "
+                + ", ".join(
+                    f"{entry.day:%d.%m.%Y} — {entry.effective_total_kcal} кк"
+                    for entry in saved
+                )
+            )
+        if unchanged:
+            lines.append(
+                "Без змін: " + ", ".join(f"{day:%d.%m.%Y}" for day in unchanged)
+            )
+        if ignored:
+            lines.append(
+                "Пропущено незавершені дні: "
+                + ", ".join(f"{day:%d.%m.%Y}" for day in ignored)
+            )
+        if profile_required:
+            lines.append(
+                "Не додано активні калорії без параметрів тіла: "
+                + ", ".join(f"{day:%d.%m.%Y}" for day in profile_required)
+                + ". Заповни /settings."
+            )
+        if invalid:
+            lines.append(
+                "Неоднозначні дані: " + ", ".join(f"{day:%d.%m.%Y}" for day in invalid)
+            )
+        if unknown_apps:
+            lines.append(
+                "Непідтримувані застосунки: "
+                + ", ".join(sorted(unknown_apps))
+                + ". Передай приклад адміністратору, якщо потрібна підтримка."
+            )
+        if empty_images:
+            lines.append(f"Без добових калорій: {empty_images} фото.")
+        if failed_images:
+            lines.append(f"Не вдалося розпізнати: {failed_images} фото.")
+        if write_failures:
+            lines.append(
+                "Не вдалося записати: "
+                + ", ".join(f"{day:%d.%m.%Y}" for day in write_failures)
+            )
+        if len(lines) == 1:
+            lines.append("На скріншотах не знайдено даних для завершених діб.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _burn_conflict_options(
+        conflict: dict[str, object],
+    ) -> list[tuple[str, BurnedCaloriesEntry | None]]:
+        existing = conflict.get("existing")
+        candidates = conflict.get("candidates")
+        options: list[tuple[str, BurnedCaloriesEntry | None]] = []
+        existing_total: int | None = None
+        if isinstance(existing, BurnedCaloriesEntry):
+            existing_total = existing.effective_total_kcal
+            options.append((f"Залишити {existing_total} кк", None))
+        if isinstance(candidates, tuple):
+            for candidate in candidates:
+                if not isinstance(candidate, BurnedCaloriesEntry):
+                    continue
+                if candidate.effective_total_kcal == existing_total:
+                    continue
+                verb = "Замінити на" if existing_total is not None else "Зберегти"
+                options.append(
+                    (f"{verb} {candidate.effective_total_kcal} кк", candidate)
+                )
+        return options
+
+    @classmethod
+    def _burn_conflict_prompt(
+        cls, state: dict[str, object]
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        conflicts = state.get("conflicts")
+        index = state.get("conflict_index")
+        if not isinstance(conflicts, list) or not isinstance(index, int):
+            raise ValueError("Invalid burn conflict state")
+        conflict = conflicts[index]
+        if not isinstance(conflict, dict) or not isinstance(conflict.get("day"), date):
+            raise ValueError("Invalid burn conflict")
+        day = cast(date, conflict["day"])
+        options = cls._burn_conflict_options(conflict)
+        rows = [
+            [InlineKeyboardButton(label, callback_data=f"burn-conflict:{number}")]
+            for number, (label, _) in enumerate(options)
+        ]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Пропустити дату", callback_data="burn-conflict:skip"
+                )
+            ]
+        )
+        summary = str(state.get("summary", ""))
+        text = f"{summary}\n\nЗначення за {day:%d.%m.%Y} не збігаються. Що зберегти?"
+        return text, InlineKeyboardMarkup(rows)
 
     async def voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
