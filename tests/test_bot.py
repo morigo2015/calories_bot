@@ -228,7 +228,7 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
     )
 
     assert reply == (
-        "<b>За сьогодні (23.08):</b><br/>"
+        "<h3>За сьогодні (23.08):</h3>"
         "<details><summary>🔥 К <b><u>810</u></b></summary>"
         "<ul><li>вівсянка з бананом, 250 г  🔥 К 320</li>"
         "<li>Вівсянка з бананом, 50 г  🔥 К 30</li>"
@@ -404,7 +404,7 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 0, 30, tzinfo=TZ))
 
     assert store.day.isoformat() == "2026-08-01"
-    assert reply.startswith("<b>За сьогодні (01.08):</b><br/>")
+    assert reply.startswith("<h3>За сьогодні (01.08):</h3>")
     assert "<summary>🔥 К <b><u>60</u></b></summary>" in reply
     assert "<li>сир  🔥 К 60</li>" in reply
 
@@ -2202,7 +2202,7 @@ def test_duplicate_photo_is_checked_before_download() -> None:
 
 def test_day_handler_passes_telegram_message_date() -> None:
     rich_reply = (
-        "<b>За сьогодні:</b><br/><details><summary>🔥 60</summary>"
+        "<h3>За сьогодні:</h3><details><summary>🔥 60</summary>"
         "<ul><li>сир  🔥60</li></ul></details>"
     )
 
@@ -2327,7 +2327,7 @@ def test_service_formats_selected_historical_day(tmp_path) -> None:
     )
 
     assert store.day == date(2026, 8, 1)
-    assert reply.startswith("<b>За день (01.08):</b><br/>")
+    assert reply.startswith("<h3>За день (01.08):</h3>")
 
 
 def test_day_navigation_edits_rich_summary_and_hides_next_for_today() -> None:

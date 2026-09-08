@@ -1091,7 +1091,7 @@ def format_day_reply(
             f"<p>Спожито {consumed} кк<br/>"
             f"Витрачено {burned_total} кк{source}</p></details>"
         )
-    return f"<b>{heading}:</b><br/>" + "".join(blocks) + balance_block
+    return f"<h3>{heading}:</h3>" + "".join(blocks) + balance_block
 
 
 class CaloriesService:
@@ -2642,7 +2642,7 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Unexpected error while handling /day")
                 reply = READ_ERROR_TEXT
-            is_rich_day = reply.startswith(("<b>", "<h3>", "<details>"))
+            is_rich_day = reply.startswith(("<h3>", "<details>"))
             if is_rich_day:
                 accounting_day = await asyncio.to_thread(
                     service.accounting_day, message.date
