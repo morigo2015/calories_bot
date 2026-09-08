@@ -33,8 +33,10 @@ from calories_bot.bot import (
     format_weekly_calories_reply,
     format_weekly_meals_reply,
     format_weekly_reply,
+    load_admin_help_text,
     load_help_text,
     load_start_text,
+    load_tips_text,
 )
 from calories_bot.burn_screenshots import BurnScreenshotAnalysis, BurnScreenshotDay
 from calories_bot.burned import build_burned_entry
@@ -3485,7 +3487,26 @@ def test_start_and_help_use_separate_content_for_active_user() -> None:
     assert message.replies == [load_start_text(), load_help_text()]
     assert message.reply_kwargs == [
         {"do_quote": False},
-        {"do_quote": False},
+        {"reply_markup": handlers._help_main_markup(), "do_quote": False},
+    ]
+
+
+def test_help_opens_more_details_and_returns_to_main() -> None:
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: SimpleNamespace()})
+    )
+    context = SimpleNamespace(user_data={})
+
+    more_update, more_query = make_callback_update("help-more")
+    asyncio.run(handlers.help_callback(more_update, context))
+    assert more_query.edits == [
+        (load_tips_text(), {"reply_markup": handlers._help_back_markup()})
+    ]
+
+    main_update, main_query = make_callback_update("help-main")
+    asyncio.run(handlers.help_callback(main_update, context))
+    assert main_query.edits == [
+        (load_help_text(), {"reply_markup": handlers._help_main_markup()})
     ]
 
 
@@ -3933,8 +3954,16 @@ def test_admin_help_and_user_list_are_available_without_personal_account() -> No
     asyncio.run(handlers.users(update, SimpleNamespace()))
 
     assert message.replies == [
-        load_help_text(admin=True),
+        load_help_text(),
         "Користувачі (1):\n• User — активний — ID 123 (@user)",
+    ]
+    help_markup = message.reply_kwargs[0]["reply_markup"].inline_keyboard
+    assert help_markup[1][0].callback_data == "help-admin"
+
+    callback_update, query = make_callback_update("help-admin", user_id=999)
+    asyncio.run(handlers.help_callback(callback_update, SimpleNamespace(user_data={})))
+    assert query.edits == [
+        (load_admin_help_text(), {"reply_markup": handlers._help_back_markup()})
     ]
 
 

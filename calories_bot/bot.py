@@ -105,8 +105,11 @@ TIPS_TEXT_FILE = Path(__file__).with_name("tips.txt")
 ADMIN_HELP_TEXT_FILE = Path(__file__).with_name("admin_help.txt")
 START_FALLBACK_TEXT = "Напиши, що ти з’їв, — я порахую калорії та БЖВ."
 HELP_FALLBACK_TEXT = "Напиши, що ти з’їв, або надішли фото. Команда: /day"
-TIPS_FALLBACK_TEXT = "Використовуй цілі числа; до фото можна додати вагу."
+TIPS_FALLBACK_TEXT = "Точні КБЖВ можна вказати в тексті; до фото можна додати вагу."
 ADMIN_HELP_FALLBACK_TEXT = "Команди адміністратора тимчасово недоступні в довідці."
+HELP_MORE_CALLBACK = "help-more"
+HELP_MAIN_CALLBACK = "help-main"
+HELP_ADMIN_CALLBACK = "help-admin"
 NOT_FOOD_TEXT = (
     "Не вдалося зрозуміти, що саме було з’їдено. Спробуй описати страву інакше."
 )
@@ -114,7 +117,7 @@ PHOTO_NOT_FOOD_TEXT = (
     "Не вдалося розпізнати страву. Спробуй описати її текстом або надіслати інше фото."
 )
 FORMAT_ERROR_TEXT = (
-    "Не вдалося зрозуміти кількість.\n\nНапиши ціле число, наприклад:\nсир 150 г"
+    "Не вдалося зрозуміти кількість.\n\nОпиши її зрозуміліше, наприклад:\nсир 150 г"
 )
 READ_ERROR_TEXT = "Не вдалося прочитати дані. Спробуй ще раз."
 WRITE_ERROR_TEXT = (
@@ -216,11 +219,14 @@ def load_tips_text() -> str:
     return _load_content(TIPS_TEXT_FILE, TIPS_FALLBACK_TEXT)
 
 
+def load_admin_help_text() -> str:
+    return _load_content(ADMIN_HELP_TEXT_FILE, ADMIN_HELP_FALLBACK_TEXT)
+
+
 def load_help_text(*, admin: bool = False) -> str:
     text = _load_content(HELP_TEXT_FILE, HELP_FALLBACK_TEXT)
     if admin:
-        admin_text = _load_content(ADMIN_HELP_TEXT_FILE, ADMIN_HELP_FALLBACK_TEXT)
-        return f"{text}\n\n{admin_text}"
+        return f"{text}\n\n{load_admin_help_text()}"
     return text
 
 
@@ -2481,19 +2487,84 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None:
             return
-        if self._is_admin(update):
-            await message.reply_text(load_help_text(admin=True), do_quote=False)
+        is_admin = self._is_admin(update)
+        if not is_admin and await self._active_user(update) is None:
             return
-        if await self._active_service(update) is not None:
-            await message.reply_text(load_help_text(), do_quote=False)
+        await message.reply_text(
+            load_help_text(),
+            reply_markup=self._help_main_markup(admin=is_admin),
+            do_quote=False,
+        )
 
     async def tips(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)
         message = update.effective_message
         if message is None:
             return
-        if self._is_admin(update) or await self._active_service(update) is not None:
-            await message.reply_text(load_tips_text(), do_quote=False)
+        if not self._is_admin(update) and await self._active_user(update) is None:
+            return
+        await message.reply_text(
+            load_tips_text(),
+            reply_markup=self._help_back_markup(),
+            do_quote=False,
+        )
+
+    @staticmethod
+    def _help_main_markup(*, admin: bool = False) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    "💡 Більше можливостей", callback_data=HELP_MORE_CALLBACK
+                )
+            ]
+        ]
+        if admin:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🛠 Команди адміністратора", callback_data=HELP_ADMIN_CALLBACK
+                    )
+                ]
+            )
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def _help_back_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "↩️ Основна довідка", callback_data=HELP_MAIN_CALLBACK
+                    )
+                ]
+            ]
+        )
+
+    async def help_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        is_admin = self._is_admin(update)
+        if not is_admin and await self._active_user(update, callback=True) is None:
+            return
+        data = query.data or ""
+        if data == HELP_MAIN_CALLBACK:
+            text = load_help_text()
+            markup = self._help_main_markup(admin=is_admin)
+        elif data == HELP_MORE_CALLBACK:
+            text = load_tips_text()
+            markup = self._help_back_markup()
+        elif data == HELP_ADMIN_CALLBACK and is_admin:
+            text = load_admin_help_text()
+            markup = self._help_back_markup()
+        else:
+            await query.answer("Некоректна або застаріла кнопка.", show_alert=True)
+            return
+        self._clear_pending_input(context)
+        await query.answer()
+        await query.edit_message_text(text, reply_markup=markup)
 
     async def info(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._clear_pending_input(context)

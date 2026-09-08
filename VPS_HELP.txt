@@ -1,54 +1,48 @@
-CALORIES BOT — VPS / SYSTEMD
-DIR:  ~/calories-bot
+CALORIES BOT — LIVE SERVER
+DIR:  /home/igor/calories-bot
 UNIT: calories-bot
 
-=== НАЙЧАСТІШЕ =================================================
+=== ОНОВЛЕННЯ ==================================================
+
+Checkout уже знаходиться на live-сервері. Не копіюйте файли з іншого хоста
+й не перезапускайте сервіс окремо.
+
+З кореня проєкту запустіть команду, яку наведено у фінальному звіті:
+
+bash /home/igor/calories-bot/run_update.sh "<короткий опис змін>"
+
+Скрипт додає дозволені файли до Git, створює commit за наявності змін,
+надсилає його до origin, перезапускає calories-bot і перевіряє стан сервісу.
+
+=== ПЕРЕВІРКА ПЕРЕД ОНОВЛЕННЯМ ================================
+
+cd /home/igor/calories-bot
+bash scripts/run_tests.sh
+
+Paid LLM eval запускайте лише після окремого явного погодження:
+bash scripts/run_tests.sh --llm --confirm
+
+=== ДІАГНОСТИКА =================================================
 
 Статус       sudo systemctl status --no-pager calories-bot
 Активний?    sudo systemctl is-active calories-bot
 Логи (100)   sudo journalctl -u calories-bot -n 100 --no-pager
 Логи наживо  sudo journalctl -u calories-bot -f
-Перезапуск   sudo systemctl restart calories-bot
-Зупинка      sudo systemctl stop calories-bot
-Запуск       sudo systemctl start calories-bot
 
-Вийти з логів наживо: Ctrl+C
-
-=== АВТОЗАПУСК ==================================================
-
-Увімкнути    sudo systemctl enable calories-bot
-Вимкнути     sudo systemctl disable calories-bot
-Увімкнути
-і запустити  sudo systemctl enable --now calories-bot
-
-=== ОНОВЛЕННЯ КОДУ ==============================================
-
-1. sudo systemctl stop calories-bot
-2. Скопіювати calories_bot/ і requirements.txt у ~/calories-bot/
-3. cd ~/calories-bot
-4. .venv/bin/python -m pip install -r requirements.txt
-5. sudo systemctl start calories-bot
-6. sudo systemctl status --no-pager calories-bot
+Вийти з live-логів: Ctrl+C
 
 === НАЛАШТУВАННЯ ================================================
 
-Редагувати:
-nano ~/calories-bot/.env
+Редагувати    nano /home/igor/calories-bot/.env
+Права         chmod 600 /home/igor/calories-bot/.env
 
-Застосувати:
-sudo systemctl restart calories-bot
+Після зміни конфігурації застосуйте її через run_update.sh. Не додавайте до
+Git .env, service-account.json, data/ або spreadsheet exports.
 
 === SYSTEMD UNIT =================================================
 
-Після зміни /etc/systemd/system/calories-bot.service:
+Після ручної зміни /etc/systemd/system/calories-bot.service:
 
 sudo systemctl daemon-reload
 sudo systemctl restart calories-bot
 sudo systemctl status --no-pager calories-bot
-
-=== КОПІЮВАННЯ З MICRO ==========================================
-
-Утримувати Shift → виділити мишкою → Ctrl+Shift+C
-Вставити в термінал або іншу програму: Ctrl+Shift+V
-
-Звичайний Ctrl+C у micro копіює лише у внутрішній буфер редактора.

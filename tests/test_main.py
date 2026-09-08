@@ -103,6 +103,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     handlers = SimpleNamespace(
         start=lambda: None,
         help=lambda: None,
+        help_callback=lambda: None,
         tips=lambda: None,
         day=lambda: None,
         day_callback=lambda: None,
@@ -180,7 +181,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 34
+    assert len(app.handlers) == 35
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
@@ -257,16 +258,15 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     )
 
     assert [(command.command, command.description) for command in bot.calls[0][0]] == [
-        ("saved", "⭐ збережені страви"),
-        ("recent", "🕘 нещодавні страви"),
-        ("day", "📅 За день"),
-        ("week", "📊 За тиждень"),
-        ("goal", "🎯 ціль по калоріям"),
-        ("protein_goal", "🥩 ціль по білку"),
-        ("burn", "🔥 внести витрату калорій"),
+        ("saved", "⭐ мої страви"),
+        ("recent", "🕘 нещодавні"),
+        ("day", "📅 за день"),
+        ("week", "📊 за тиждень"),
+        ("goal", "🎯 ціль калорій"),
+        ("protein_goal", "🥩 ціль білка"),
+        ("burn", "🔥 витрата калорій"),
         ("settings", "⚙️ налаштування"),
         ("help", "❓ як користуватися ботом"),
-        ("tips", "💡 додаткові можливості"),
     ]
     assert [command.command for command in bot.calls[1][0]] == [
         "saved",
@@ -278,7 +278,6 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "burn",
         "settings",
         "help",
-        "tips",
         "burned",
         "invite",
         "info",

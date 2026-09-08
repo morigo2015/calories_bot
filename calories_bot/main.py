@@ -36,16 +36,15 @@ async def configure_bot_commands(
     garmin_refresh_time: time | None = None,
 ) -> None:
     user_commands = [
-        BotCommand("saved", "⭐ збережені страви"),
-        BotCommand("recent", "🕘 нещодавні страви"),
-        BotCommand("day", "📅 За день"),
-        BotCommand("week", "📊 За тиждень"),
-        BotCommand("goal", "🎯 ціль по калоріям"),
-        BotCommand("protein_goal", "🥩 ціль по білку"),
-        BotCommand("burn", "🔥 внести витрату калорій"),
+        BotCommand("saved", "⭐ мої страви"),
+        BotCommand("recent", "🕘 нещодавні"),
+        BotCommand("day", "📅 за день"),
+        BotCommand("week", "📊 за тиждень"),
+        BotCommand("goal", "🎯 ціль калорій"),
+        BotCommand("protein_goal", "🥩 ціль білка"),
+        BotCommand("burn", "🔥 витрата калорій"),
         BotCommand("settings", "⚙️ налаштування"),
         BotCommand("help", "❓ як користуватися ботом"),
-        BotCommand("tips", "💡 додаткові можливості"),
     ]
     admin_commands = [
         *user_commands,
@@ -282,6 +281,11 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handlers.day_callback, pattern=r"^day-view:\d{4}-\d{2}-\d{2}$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.help_callback, pattern=r"^help-(?:main|more|admin)$"
         )
     )
     application.add_handler(
