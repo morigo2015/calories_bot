@@ -84,7 +84,7 @@ def test_valid_settings_and_defaults(monkeypatch, tmp_path) -> None:
         == (Path.cwd() / "data" / "garmin_calories.json").resolve()
     )
     assert settings.meal_weight_presets == (50, 100, 150, 200)
-    assert settings.nutrition_mismatch_threshold_percent == 10
+    assert settings.nutrition_mismatch_threshold_percent == 20
 
 
 def test_nutrition_mismatch_threshold_is_configurable(monkeypatch, tmp_path) -> None:

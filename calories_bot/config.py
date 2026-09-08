@@ -172,7 +172,7 @@ class Settings:
                 f"{MAX_MEAL_WEIGHT_PRESETS} unique values from 1 to 10000"
             )
 
-        mismatch_raw = os.getenv("NUTRITION_MISMATCH_THRESHOLD_PERCENT", "10").strip()
+        mismatch_raw = os.getenv("NUTRITION_MISMATCH_THRESHOLD_PERCENT", "20").strip()
         try:
             nutrition_mismatch_threshold_percent = float(mismatch_raw)
         except ValueError as exc:

@@ -431,22 +431,24 @@ def _format_progress_value(
     unit: str,
     include_bar: bool = False,
     bar_separator: str = "\n",
+    include_unit: bool = True,
 ) -> str:
     prefix = f"{emoji} {label}" if label else f"{emoji} "
+    unit_suffix = f" {unit}" if include_unit else ""
     if value is None:
-        return f"{prefix}<b><u>—</u></b> {unit}"
+        return f"{prefix}<b><u>—</u></b>{unit_suffix}"
     visible_value = round_whole(value)
     stored = str(visible_value)
     highlighted = f"<b><u>{stored}</u></b>"
     if goal is None:
-        return f"{prefix}{highlighted} {unit}"
+        return f"{prefix}{highlighted}{unit_suffix}"
     difference = visible_value - goal
     deviation = ""
     if difference > 0:
         deviation = f" → +{difference}"
     elif difference < 0:
         deviation = f" → −{abs(difference)}"
-    line = f"{prefix}{highlighted} / {goal}{deviation} {unit}"
+    line = f"{prefix}{highlighted} / {goal}{deviation}{unit_suffix}"
     if include_bar:
         line += f"{bar_separator}<code>{_format_progress_bar(value, goal)}</code>"
     return line
@@ -477,6 +479,7 @@ def _daily_progress_lines(
     *,
     include_bars: bool = False,
     bar_separator: str = "\n",
+    include_units: bool = True,
 ) -> list[str]:
     return [
         _format_progress_value(
@@ -487,6 +490,7 @@ def _daily_progress_lines(
             unit="кк",
             include_bar=include_bars,
             bar_separator=bar_separator,
+            include_unit=include_units,
         ),
         _format_progress_value(
             summary.protein_g,
@@ -496,9 +500,24 @@ def _daily_progress_lines(
             unit="г",
             include_bar=include_bars,
             bar_separator=bar_separator,
+            include_unit=include_units,
         ),
-        _format_progress_value(summary.fat_g, None, emoji="🥑", label="Ж ", unit="г"),
-        _format_progress_value(summary.carbs_g, None, emoji="🍞", label="В ", unit="г"),
+        _format_progress_value(
+            summary.fat_g,
+            None,
+            emoji="🥑",
+            label="Ж ",
+            unit="г",
+            include_unit=include_units,
+        ),
+        _format_progress_value(
+            summary.carbs_g,
+            None,
+            emoji="🍞",
+            label="В ",
+            unit="г",
+            include_unit=include_units,
+        ),
     ]
 
 
@@ -518,7 +537,7 @@ def format_daily_total(
     )
 
 
-def format_reply(meal: MealResult, mismatch_threshold_percent: float = 10.0) -> str:
+def format_reply(meal: MealResult, mismatch_threshold_percent: float = 20.0) -> str:
     if len(meal.items) > 1:
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
         calculations = [
@@ -1025,6 +1044,7 @@ def format_day_reply(
         daily_protein_goal,
         include_bars=True,
         bar_separator="<br/>",
+        include_units=False,
     )
     blocks: list[str] = []
     for summary_line, (attribute, emoji, label) in zip(
@@ -1060,18 +1080,18 @@ def format_day_reply(
         consumed = round_whole(total.kcal)
         balance = consumed - burned_total
         if balance > 0:
-            label = f"Профіцит {balance} кк"
+            label = f"Профіцит {balance}"
         elif balance < 0:
-            label = f"Дефіцит {abs(balance)} кк"
+            label = f"Дефіцит {abs(balance)}"
         else:
-            label = "Баланс 0 кк"
+            label = "Баланс 0"
         source = f" · {html.escape(burned_source)}" if burned_source else ""
         balance_block = (
             f"<details><summary>⚖️ <b><u>{label}</u></b></summary>"
             f"<p>Спожито {consumed} кк<br/>"
             f"Витрачено {burned_total} кк{source}</p></details>"
         )
-    return f"<h3>{heading}:</h3>" + "".join(blocks) + balance_block
+    return f"<b>{heading}:</b><br/>" + "".join(blocks) + balance_block
 
 
 class CaloriesService:
@@ -1085,7 +1105,7 @@ class CaloriesService:
         daily_kcal_goal: int | None = None,
         saved_store: SavedMealStore | None = None,
         daily_protein_goal: int | None = None,
-        nutrition_mismatch_threshold_percent: float = 10.0,
+        nutrition_mismatch_threshold_percent: float = 20.0,
         burned_store: BurnedCalorieStore | None = None,
     ) -> None:
         self._analyzer = analyzer
@@ -1925,7 +1945,7 @@ class UserManager:
         timezone: ZoneInfo,
         default_day_start: time,
         photo_storage_dir: Path,
-        nutrition_mismatch_threshold_percent: float = 10.0,
+        nutrition_mismatch_threshold_percent: float = 20.0,
     ) -> None:
         self._analyzer = analyzer
         self._registry = registry
@@ -2622,7 +2642,7 @@ class TelegramHandlers:
             except Exception:
                 LOGGER.exception("Unexpected error while handling /day")
                 reply = READ_ERROR_TEXT
-            is_rich_day = reply.startswith(("<h3>", "<details>"))
+            is_rich_day = reply.startswith(("<b>", "<h3>", "<details>"))
             if is_rich_day:
                 accounting_day = await asyncio.to_thread(
                     service.accounting_day, message.date

@@ -228,16 +228,16 @@ def test_format_day_reply_is_readable_and_contains_only_requested_meal_data() ->
     )
 
     assert reply == (
-        "<h3>За сьогодні (23.08):</h3>"
-        "<details><summary>🔥 К <b><u>810</u></b> кк</summary>"
+        "<b>За сьогодні (23.08):</b><br/>"
+        "<details><summary>🔥 К <b><u>810</u></b></summary>"
         "<ul><li>вівсянка з бананом, 250 г  🔥 К 320</li>"
         "<li>Вівсянка з бананом, 50 г  🔥 К 30</li>"
         "<li>курка з рисом, 400 г  🔥 К 460</li></ul></details>"
-        "<details><summary>🥩 Б <b><u>—</u></b> г</summary>"
+        "<details><summary>🥩 Б <b><u>—</u></b></summary>"
         "<p>Немає внесків</p></details>"
-        "<details><summary>🥑 Ж <b><u>—</u></b> г</summary>"
+        "<details><summary>🥑 Ж <b><u>—</u></b></summary>"
         "<p>Немає внесків</p></details>"
-        "<details><summary>🍞 В <b><u>—</u></b> г</summary>"
+        "<details><summary>🍞 В <b><u>—</u></b></summary>"
         "<p>Немає внесків</p></details>"
     )
 
@@ -246,10 +246,10 @@ def test_format_day_reply_handles_empty_day() -> None:
     reply = format_day_reply([])
 
     assert reply.count("<details>") == 4
-    assert "<summary>🔥 К <b><u>0</u></b> кк</summary>" in reply
-    assert "<summary>🥩 Б <b><u>0</u></b> г</summary>" in reply
-    assert "<summary>🥑 Ж <b><u>0</u></b> г</summary>" in reply
-    assert "<summary>🍞 В <b><u>0</u></b> г</summary>" in reply
+    assert "<summary>🔥 К <b><u>0</u></b></summary>" in reply
+    assert "<summary>🥩 Б <b><u>0</u></b></summary>" in reply
+    assert "<summary>🥑 Ж <b><u>0</u></b></summary>" in reply
+    assert "<summary>🍞 В <b><u>0</u></b></summary>" in reply
 
 
 def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
@@ -268,8 +268,8 @@ def test_day_reply_sums_kbjv_but_keeps_rows_calorie_only() -> None:
         ]
     )
 
-    assert "<summary>🔥 К <b><u>575</u></b> кк</summary>" in reply
-    assert "<summary>🥩 Б <b><u>36</u></b> г</summary>" in reply
+    assert "<summary>🔥 К <b><u>575</u></b></summary>" in reply
+    assert "<summary>🥩 Б <b><u>36</u></b></summary>" in reply
     assert "<li>сир  🥩 Б 30</li>" in reply
     assert "<li>хліб  🥩 Б 6</li>" in reply
     assert "сир  🍞 В" not in reply
@@ -305,19 +305,19 @@ def test_day_reply_keeps_repeated_meals_as_separate_rows() -> None:
 
     reply = format_day_reply(meals)
 
-    assert "<summary>🔥 К <b><u>886</u></b> кк</summary>" in reply
+    assert "<summary>🔥 К <b><u>886</u></b></summary>" in reply
     assert "<li>спагеті  🔥 К 420</li><li>сир  🔥 К 106</li>" in reply
     assert "<li>вино  🔥 К 350</li>" in reply
     assert reply.count("<li>кава  🔥 К 2</li>") == 5
     assert "×5" not in reply
-    assert "<summary>🥩 Б <b><u>20</u></b> г</summary>" in reply
+    assert "<summary>🥩 Б <b><u>20</u></b></summary>" in reply
     assert "<li>спагеті  🥩 Б 14</li>" in reply
     assert "<li>сир  🥩 Б 6</li>" in reply
     assert "кава ×5  🥩 Б" not in reply
     assert "вино  🥩 Б" not in reply
-    assert "<summary>🥑 Ж <b><u>20</u></b> г</summary>" in reply
+    assert "<summary>🥑 Ж <b><u>20</u></b></summary>" in reply
     assert "<li>спагеті  🥑 Ж 11</li><li>сир  🥑 Ж 9</li>" in reply
-    assert "<summary>🍞 В <b><u>86</u></b> г</summary>" in reply
+    assert "<summary>🍞 В <b><u>86</u></b></summary>" in reply
     assert (
         "<li>спагеті  🍞 В 72</li><li>сир  🍞 В 1</li><li>вино  🍞 В 13</li>" in reply
     )
@@ -344,10 +344,10 @@ def test_daily_views_round_values_only_while_formatting() -> None:
     )
     day_reply = format_day_reply([DayMeal("тест", 10.5, nutrition)])
     assert (
-        "<summary>🔥 К <b><u>11</u></b> кк</summary><ul><li>тест  🔥 К 11</li>"
+        "<summary>🔥 К <b><u>11</u></b></summary><ul><li>тест  🔥 К 11</li>"
     ) in day_reply
     assert (
-        "<summary>🥩 Б <b><u>3</u></b> г</summary><ul><li>тест  🥩 Б 3</li>"
+        "<summary>🥩 Б <b><u>3</u></b></summary><ul><li>тест  🥩 Б 3</li>"
     ) in day_reply
 
 
@@ -361,7 +361,7 @@ def test_format_day_reply_shows_goal_for_empty_day() -> None:
     reply = format_day_reply([], 1500)
 
     assert (
-        "<summary>🔥 К <b><u>0</u></b> / 1500 → −1500 кк<br/>"
+        "<summary>🔥 К <b><u>0</u></b> / 1500 → −1500<br/>"
         "<code>░░░░░░░░░░░░│░░░</code></summary>"
     ) in reply
     assert reply.count("<details>") == 4
@@ -374,7 +374,7 @@ def test_format_day_reply_includes_daily_goal_and_remaining_calories() -> None:
     )
 
     assert (
-        "<summary>🔥 К <b><u>360</u></b> / 1500 → −1140 кк<br/>"
+        "<summary>🔥 К <b><u>360</u></b> / 1500 → −1140<br/>"
         "<code>██░░░░░░░░░░│░░░</code></summary>"
     ) in reply
     assert "<ul><li>сир  🔥 К 360</li></ul>" in reply
@@ -388,7 +388,7 @@ def test_format_day_reply_shows_goal_overage_without_negative_remaining() -> Non
     )
 
     assert (
-        "<summary>🔥 К <b><u>1600</u></b> / 1500 → +100 кк<br/>"
+        "<summary>🔥 К <b><u>1600</u></b> / 1500 → +100<br/>"
         "<code>████████████│█░░</code></summary>"
     ) in reply
     assert "<ul><li>піца  🔥 К 1600</li></ul>" in reply
@@ -404,8 +404,8 @@ def test_service_day_summary_uses_shifted_accounting_date(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 0, 30, tzinfo=TZ))
 
     assert store.day.isoformat() == "2026-08-01"
-    assert reply.startswith("<h3>За сьогодні (01.08):</h3>")
-    assert "<summary>🔥 К <b><u>60</u></b> кк</summary>" in reply
+    assert reply.startswith("<b>За сьогодні (01.08):</b><br/>")
+    assert "<summary>🔥 К <b><u>60</u></b></summary>" in reply
     assert "<li>сир  🔥 К 60</li>" in reply
 
 
@@ -426,7 +426,7 @@ def test_service_day_summary_uses_daily_goal(tmp_path) -> None:
     reply = service.get_day_summary(datetime(2026, 8, 2, 12, tzinfo=TZ))
 
     assert (
-        "<summary>🔥 К <b><u>60</u></b> / 1500 → −1440 кк<br/>"
+        "<summary>🔥 К <b><u>60</u></b> / 1500 → −1440<br/>"
         "<code>░░░░░░░░░░░░│░░░</code></summary>"
     ) in reply
     assert "<li>сир  🔥 К 60</li>" in reply
@@ -444,7 +444,7 @@ def test_service_appends_normalized_request_and_adds_daily_total(tmp_path) -> No
     assert "🔥 К 60&nbsp;&nbsp;&nbsp;🥩 Б 10&nbsp;&nbsp;&nbsp;🥑 Ж 5" in reply.text
     assert "<sub>На 100 г:</sub><br/>🔥 К 120" in reply.text
     assert reply.daily_total_text == service.get_day_summary(timestamp)
-    assert "<summary>🔥 К <b><u>360</u></b> кк</summary>" in reply.daily_total_text
+    assert "<summary>🔥 К <b><u>360</u></b></summary>" in reply.daily_total_text
     assert reply.accounting_day == date(2026, 8, 2)
     marker = parse_simple_meal_request(store.appended[0][3])
     assert marker is not None
@@ -489,7 +489,7 @@ def test_composite_input_is_stored_and_replied_to_per_component(tmp_path) -> Non
     assert replies[1].telegram_message_id < 0
     assert replies[0].daily_total_text is None
     assert replies[1].daily_total_text == service.get_day_summary(timestamp)
-    assert "<summary>🔥 К <b><u>410</u></b> кк</summary>" in replies[1].daily_total_text
+    assert "<summary>🔥 К <b><u>410</u></b></summary>" in replies[1].daily_total_text
     markers = [parse_simple_meal_request(entry[3]) for entry in store.appended]
     assert [marker.component_index for marker in markers if marker] == [0, 1]
     assert all(marker and marker.component_count == 2 for marker in markers)
@@ -723,7 +723,7 @@ def test_service_refreshes_total_after_deletion_during_analysis(tmp_path) -> Non
     worker.join(timeout=1)
 
     assert not worker.is_alive()
-    assert "<summary>🔥 К <b><u>334</u></b> кк</summary>" in result[0].daily_total_text
+    assert "<summary>🔥 К <b><u>334</u></b></summary>" in result[0].daily_total_text
 
 
 def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
@@ -743,7 +743,7 @@ def test_duplicate_uses_stored_normalized_text_without_openai_or_append(
     assert "<h3>Сир 50 г</h3>" in reply.text
     assert "🔥 К 60&nbsp;&nbsp;&nbsp;🥩 Б 10&nbsp;&nbsp;&nbsp;🥑 Ж 5" in reply.text
     assert "<sub>На 100 г:</sub><br/>🔥 К 120" in reply.text
-    assert "<summary>🔥 К <b><u>360</u></b> кк</summary>" in reply.daily_total_text
+    assert "<summary>🔥 К <b><u>360</u></b></summary>" in reply.daily_total_text
     assert analyzer.calls == 0
     assert store.appended == []
 
@@ -779,7 +779,7 @@ def test_service_saves_photo_and_uses_meal_name_in_reply(tmp_path) -> None:
     photo_path = store.appended[0][4]
     assert "<h3>Сир 50 г</h3>" in reply.text
     assert "🔥 К 60&nbsp;&nbsp;&nbsp;🥩 Б 10&nbsp;&nbsp;&nbsp;🥑 Ж 5" in reply.text
-    assert "<summary>🔥 К <b><u>360</u></b> кк</summary>" in reply.daily_total_text
+    assert "<summary>🔥 К <b><u>360</u></b></summary>" in reply.daily_total_text
     assert analyzer.normalized.text == "50 гр"
     assert analyzer.image_bytes == b"jpeg-data"
     expected_photo = tmp_path / "photos" / "2026-08-02-42.jpg"
@@ -799,7 +799,7 @@ def test_service_accepts_photo_without_caption(tmp_path) -> None:
     assert reply.text.startswith("<h3>Сир ≈50 г</h3>")
     assert "<details><summary>🔥 К 60&nbsp;&nbsp;&nbsp;🥩 Б 10" in reply.text
     assert "<sub>На 100 г:</sub><br/>🔥 К 120" in reply.text
-    assert "<summary>🔥 К <b><u>60</u></b> кк</summary>" in reply.daily_total_text
+    assert "<summary>🔥 К <b><u>60</u></b></summary>" in reply.daily_total_text
     assert analyzer.normalized.text == ""
     assert store.appended[0][2] == ""
 
@@ -867,6 +867,31 @@ def test_reply_warns_when_kcal_and_macros_differ_over_configured_threshold() -> 
         "⚠️ Ккал не збігаються з БЖВ: вказано 100 кк, за формулою — 170 кк (70%)."
     ) in warned
     assert "⚠️" not in hidden
+
+
+def test_reply_default_kcal_mismatch_threshold_is_twenty_percent() -> None:
+    def meal_with_protein(protein_per_100g: float):
+        return calculate_meal(
+            FoodAnalysis(
+                is_food=True,
+                meal_name="продукт",
+                items=[
+                    FoodItem(
+                        name="продукт",
+                        weight_g=100,
+                        weight_estimated=False,
+                        kcal_per_100g=100,
+                        kcal_estimated=False,
+                        protein_per_100g=protein_per_100g,
+                        fat_per_100g=0,
+                        carbs_per_100g=0,
+                    )
+                ],
+            )
+        )
+
+    assert "⚠️" not in format_reply(meal_with_protein(30))
+    assert "⚠️" in format_reply(meal_with_protein(30.5))
 
 
 def test_reply_skips_kcal_check_when_any_macro_is_missing() -> None:
@@ -1256,7 +1281,7 @@ def test_day_reply_shows_burned_source_and_deficit() -> None:
         burned_source="680 активних + 1720 пасивних",
     )
 
-    assert "Дефіцит 600 кк" in reply
+    assert "<summary>⚖️ <b><u>Дефіцит 600</u></b></summary>" in reply
     assert "Витрачено 2400 кк · 680 активних + 1720 пасивних" in reply
 
 
@@ -2177,7 +2202,8 @@ def test_duplicate_photo_is_checked_before_download() -> None:
 
 def test_day_handler_passes_telegram_message_date() -> None:
     rich_reply = (
-        "<details><summary>🔥 60 ккал</summary><ul><li>сир  🔥60</li></ul></details>"
+        "<b>За сьогодні:</b><br/><details><summary>🔥 60</summary>"
+        "<ul><li>сир  🔥60</li></ul></details>"
     )
 
     class FakeService:
@@ -2301,7 +2327,7 @@ def test_service_formats_selected_historical_day(tmp_path) -> None:
     )
 
     assert store.day == date(2026, 8, 1)
-    assert reply.startswith("<h3>За день (01.08):</h3>")
+    assert reply.startswith("<b>За день (01.08):</b><br/>")
 
 
 def test_day_navigation_edits_rich_summary_and_hides_next_for_today() -> None:
