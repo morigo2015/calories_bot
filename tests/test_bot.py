@@ -34,6 +34,7 @@ from calories_bot.bot import (
     format_weekly_meals_reply,
     format_weekly_reply,
     load_admin_help_text,
+    load_examples_text,
     load_help_text,
     load_start_text,
     load_tips_text,
@@ -3529,6 +3530,12 @@ def test_help_opens_more_details_and_returns_to_main() -> None:
         (load_tips_text(), {"reply_markup": handlers._help_back_markup()})
     ]
 
+    examples_update, examples_query = make_callback_update("help-examples")
+    asyncio.run(handlers.help_callback(examples_update, context))
+    assert examples_query.edits == [
+        (load_examples_text(), {"reply_markup": handlers._help_back_markup()})
+    ]
+
     main_update, main_query = make_callback_update("help-main")
     asyncio.run(handlers.help_callback(main_update, context))
     assert main_query.edits == [
@@ -3536,15 +3543,47 @@ def test_help_opens_more_details_and_returns_to_main() -> None:
     ]
 
 
+def test_help_content_uses_menu_labels_and_covers_requested_examples() -> None:
+    handlers = TelegramHandlers(
+        999, FakeManager({123: user_record()}, {123: SimpleNamespace()})
+    )
+    buttons = handlers._help_main_markup().inline_keyboard
+    tips = load_tips_text()
+    examples = load_examples_text()
+
+    assert buttons[1][0].text == "Більше прикладів"
+    assert "≈" not in load_help_text()
+    assert "Значення, які бот оцінив сам, позначені ≈." in tips
+    assert all(
+        label in tips
+        for label in (
+            "🎯 ціль калорій",
+            "🥩 ціль білка",
+            "🔥 витрата калорій",
+            "⚙️ налаштування",
+            "⭐ мої страви",
+        )
+    )
+    assert all(
+        command not in tips
+        for command in ("/goal", "/protein_goal", "/burn", "/settings", "/saved")
+    )
+    assert all(topic in examples for topic in ("цілей", "за тиждень", "Garmin"))
+
+
 def test_help_text_is_loaded_from_editable_files(monkeypatch, tmp_path) -> None:
     help_file = tmp_path / "help.txt"
+    examples_file = tmp_path / "examples.txt"
     admin_help_file = tmp_path / "admin_help.txt"
     help_file.write_text("Перша довідка\n", encoding="utf-8")
+    examples_file.write_text("Приклади\n", encoding="utf-8")
     admin_help_file.write_text("Команди адміністратора\n", encoding="utf-8")
     monkeypatch.setattr(bot_module, "HELP_TEXT_FILE", help_file)
+    monkeypatch.setattr(bot_module, "EXAMPLES_TEXT_FILE", examples_file)
     monkeypatch.setattr(bot_module, "ADMIN_HELP_TEXT_FILE", admin_help_file)
 
     assert load_help_text(admin=True) == "Перша довідка\n\nКоманди адміністратора"
+    assert load_examples_text() == "Приклади"
 
     help_file.write_text("Оновлена довідка\n", encoding="utf-8")
     assert load_help_text() == "Оновлена довідка"
@@ -3984,7 +4023,7 @@ def test_admin_help_and_user_list_are_available_without_personal_account() -> No
         "Користувачі (1):\n• User — активний — ID 123 (@user)",
     ]
     help_markup = message.reply_kwargs[0]["reply_markup"].inline_keyboard
-    assert help_markup[1][0].callback_data == "help-admin"
+    assert help_markup[2][0].callback_data == "help-admin"
 
     callback_update, query = make_callback_update("help-admin", user_id=999)
     asyncio.run(handlers.help_callback(callback_update, SimpleNamespace(user_data={})))

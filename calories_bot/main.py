@@ -285,7 +285,7 @@ def main() -> None:
     )
     application.add_handler(
         CallbackQueryHandler(
-            handlers.help_callback, pattern=r"^help-(?:main|more|admin)$"
+            handlers.help_callback, pattern=r"^help-(?:main|more|examples|admin)$"
         )
     )
     application.add_handler(

@@ -102,12 +102,15 @@ RECENT_MEALS_LIMIT = 16
 HELP_TEXT_FILE = Path(__file__).with_name("help.txt")
 START_TEXT_FILE = Path(__file__).with_name("start.txt")
 TIPS_TEXT_FILE = Path(__file__).with_name("tips.txt")
+EXAMPLES_TEXT_FILE = Path(__file__).with_name("examples.txt")
 ADMIN_HELP_TEXT_FILE = Path(__file__).with_name("admin_help.txt")
 START_FALLBACK_TEXT = "Напиши, що ти з’їв, — я порахую калорії та БЖВ."
-HELP_FALLBACK_TEXT = "Напиши, що ти з’їв, або надішли фото. Команда: /day"
+HELP_FALLBACK_TEXT = "Напиши, що ти з’їв, або надішли фото. Підсумок є в 📅 за день."
 TIPS_FALLBACK_TEXT = "Точні КБЖВ можна вказати в тексті; до фото можна додати вагу."
+EXAMPLES_FALLBACK_TEXT = "Напиши, що ти з’їв, або надішли фото страви чи етикетки."
 ADMIN_HELP_FALLBACK_TEXT = "Команди адміністратора тимчасово недоступні в довідці."
 HELP_MORE_CALLBACK = "help-more"
+HELP_EXAMPLES_CALLBACK = "help-examples"
 HELP_MAIN_CALLBACK = "help-main"
 HELP_ADMIN_CALLBACK = "help-admin"
 NOT_FOOD_TEXT = (
@@ -217,6 +220,10 @@ def load_start_text() -> str:
 
 def load_tips_text() -> str:
     return _load_content(TIPS_TEXT_FILE, TIPS_FALLBACK_TEXT)
+
+
+def load_examples_text() -> str:
+    return _load_content(EXAMPLES_TEXT_FILE, EXAMPLES_FALLBACK_TEXT)
 
 
 def load_admin_help_text() -> str:
@@ -2536,7 +2543,12 @@ class TelegramHandlers:
                 InlineKeyboardButton(
                     "💡 Більше можливостей", callback_data=HELP_MORE_CALLBACK
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    "Більше прикладів", callback_data=HELP_EXAMPLES_CALLBACK
+                )
+            ],
         ]
         if admin:
             rows.append(
@@ -2575,6 +2587,9 @@ class TelegramHandlers:
             markup = self._help_main_markup(admin=is_admin)
         elif data == HELP_MORE_CALLBACK:
             text = load_tips_text()
+            markup = self._help_back_markup()
+        elif data == HELP_EXAMPLES_CALLBACK:
+            text = load_examples_text()
             markup = self._help_back_markup()
         elif data == HELP_ADMIN_CALLBACK and is_admin:
             text = load_admin_help_text()
