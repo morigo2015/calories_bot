@@ -17,6 +17,7 @@ from .sheets import accounting_date
 LOGGER = logging.getLogger(__name__)
 GARMIN_CACHE_SCHEMA_VERSION = 1
 GARMIN_WEEK_DAYS = 7
+GARMIN_RECENT_DAY_RECHECK_INTERVAL = timedelta(hours=1)
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
 
@@ -62,9 +63,13 @@ class GarminCalorieStore:
         self._lock = threading.Lock()
 
     def refresh_if_due(self, now: datetime | None = None) -> bool:
-        """Refresh once for each accounting day; preserve the cache on failure."""
+        """Refresh the week daily and recheck its newest day once per hour."""
 
         current = now or datetime.now(self._timezone)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=self._timezone)
+        else:
+            current = current.astimezone(self._timezone)
         refresh_day = accounting_date(current, self._timezone, self._day_start)
         with self._lock:
             try:
@@ -75,8 +80,14 @@ class GarminCalorieStore:
                 )
                 existing = None
             if existing is not None and existing.refresh_day == refresh_day.isoformat():
-                return False
-            snapshot = self._fetch_snapshot(refresh_day, current)
+                refreshed_at = datetime.fromisoformat(existing.refreshed_at).astimezone(
+                    self._timezone
+                )
+                if current - refreshed_at < GARMIN_RECENT_DAY_RECHECK_INTERVAL:
+                    return False
+                snapshot = self._recheck_latest_day(existing, current)
+            else:
+                snapshot = self._fetch_snapshot(refresh_day, current)
             self._write_snapshot(snapshot)
             return True
 
@@ -119,24 +130,40 @@ class GarminCalorieStore:
     def _fetch_snapshot(
         self, refresh_day: date, refreshed_at: datetime
     ) -> GarminCalorieSnapshot:
-        client = Garmin(retry_attempts=2)
-        client.login(str(self._tokenstore))
+        client = self._connect()
         last_day = refresh_day - timedelta(days=1)
         first_day = last_day - timedelta(days=GARMIN_WEEK_DAYS - 1)
-        days: list[GarminDailyCalories] = []
-        for offset in range(GARMIN_WEEK_DAYS):
-            day = first_day + timedelta(days=offset)
-            summary = client.get_user_summary(day.isoformat())
-            days.append(
-                GarminDailyCalories(
-                    day=day.isoformat(),
-                    total_kcal=self._parse_total_kcal(summary, day),
-                )
-            )
+        days = tuple(
+            self._fetch_day(client, first_day + timedelta(days=offset))
+            for offset in range(GARMIN_WEEK_DAYS)
+        )
         return GarminCalorieSnapshot(
             refresh_day=refresh_day.isoformat(),
-            refreshed_at=refreshed_at.astimezone(self._timezone).isoformat(),
-            days=tuple(days),
+            refreshed_at=refreshed_at.isoformat(),
+            days=days,
+        )
+
+    def _recheck_latest_day(
+        self, snapshot: GarminCalorieSnapshot, refreshed_at: datetime
+    ) -> GarminCalorieSnapshot:
+        latest_day = date.fromisoformat(snapshot.refresh_day) - timedelta(days=1)
+        latest = self._fetch_day(self._connect(), latest_day)
+        return GarminCalorieSnapshot(
+            refresh_day=snapshot.refresh_day,
+            refreshed_at=refreshed_at.isoformat(),
+            days=(*snapshot.days[:-1], latest),
+        )
+
+    def _connect(self) -> Garmin:
+        client = Garmin(retry_attempts=2)
+        client.login(str(self._tokenstore))
+        return client
+
+    def _fetch_day(self, client: Garmin, day: date) -> GarminDailyCalories:
+        summary = client.get_user_summary(day.isoformat())
+        return GarminDailyCalories(
+            day=day.isoformat(),
+            total_kcal=self._parse_total_kcal(summary, day),
         )
 
     @staticmethod
@@ -180,6 +207,8 @@ class GarminCalorieStore:
             )
             if parsed_days != expected_days:
                 raise ValueError("snapshot days are not consecutive")
+            if parsed_days[-1] != date.fromisoformat(refresh_day) - timedelta(days=1):
+                raise ValueError("snapshot does not end on the latest completed day")
         except (KeyError, TypeError, ValueError) as exc:
             raise GarminCacheError(
                 "Garmin calorie cache has an invalid schema"
