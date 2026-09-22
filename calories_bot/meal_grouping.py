@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -9,7 +10,10 @@ from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel, Field, model_validator
 
 from .analyzer import ModelPricing, UsageRecorder, metadata_from_usage
+from .llm_cache import LLMResponseCache, llm_cache_key
 from .models import LLMMetadata
+
+LOGGER = logging.getLogger(__name__)
 
 MAX_WEEKLY_MEAL_GROUPS = 20
 
@@ -73,12 +77,14 @@ class OpenAIMealGrouper:
         timeout_seconds: float,
         pricing: ModelPricing,
         usage_recorder: UsageRecorder | None = None,
+        response_cache: LLMResponseCache | None = None,
     ) -> None:
         self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
         self._model = model
         self._effort = effort
         self._pricing = pricing
         self._usage_recorder = usage_recorder
+        self._response_cache = response_cache
 
     def group(self, meal_names: tuple[str, ...]) -> MealGroupingResult:
         if not meal_names:
@@ -89,36 +95,68 @@ class OpenAIMealGrouper:
             {"source_id": source_id, "name": name}
             for source_id, name in enumerate(meal_names)
         ]
-        try:
-            response = self._client.responses.parse(
-                model=self._model,
-                reasoning={"effort": cast(ReasoningEffort, self._effort)},
-                store=False,
-                input=cast(
-                    Any,
-                    [
-                        {"role": "system", "content": MEAL_GROUPING_SYSTEM_PROMPT},
-                        {
-                            "role": "user",
-                            "content": json.dumps(source, ensure_ascii=False),
-                        },
-                    ],
-                ),
-                text_format=MealGrouping,
-            )
-        except Exception as exc:
-            raise MealGroupingError("OpenAI meal-grouping request failed") from exc
-
-        metadata = metadata_from_usage(
-            getattr(response, "usage", None),
-            self._model,
-            self._effort,
-            self._pricing,
-            self._usage_recorder,
+        operation = "meal_grouping"
+        cache_key = llm_cache_key(
+            operation,
+            {
+                "model": self._model,
+                "effort": self._effort,
+                "system_prompt": MEAL_GROUPING_SYSTEM_PROMPT,
+                "source": source,
+            },
         )
-        parsed = response.output_parsed
+        parsed: MealGrouping | None = None
+        cache = getattr(self, "_response_cache", None)
+        if cache is not None:
+            try:
+                cached = cache.get_cached_llm_response(operation, cache_key)
+                if cached is not None:
+                    parsed = MealGrouping.model_validate_json(cached)
+            except Exception:
+                LOGGER.exception("Could not read cached OpenAI meal grouping")
         if parsed is None:
-            raise MealGroupingError("OpenAI returned no structured meal grouping")
+            try:
+                response = self._client.responses.parse(
+                    model=self._model,
+                    reasoning={"effort": cast(ReasoningEffort, self._effort)},
+                    store=False,
+                    input=cast(
+                        Any,
+                        [
+                            {
+                                "role": "system",
+                                "content": MEAL_GROUPING_SYSTEM_PROMPT,
+                            },
+                            {
+                                "role": "user",
+                                "content": json.dumps(source, ensure_ascii=False),
+                            },
+                        ],
+                    ),
+                    text_format=MealGrouping,
+                )
+            except Exception as exc:
+                raise MealGroupingError("OpenAI meal-grouping request failed") from exc
+
+            metadata = metadata_from_usage(
+                getattr(response, "usage", None),
+                self._model,
+                self._effort,
+                self._pricing,
+                self._usage_recorder,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                raise MealGroupingError("OpenAI returned no structured meal grouping")
+            if cache is not None:
+                try:
+                    cache.store_cached_llm_response(
+                        operation, cache_key, parsed.model_dump_json()
+                    )
+                except Exception:
+                    LOGGER.exception("Could not cache OpenAI meal grouping")
+        else:
+            metadata = LLMMetadata(model=self._model, effort=self._effort)
         by_id: dict[int, str] = {}
         for assignment in parsed.assignments:
             if assignment.source_id in by_id:

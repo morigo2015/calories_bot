@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 
 from .analyzer import ModelPricing
 
-DEFAULT_MEAL_WEIGHT_PRESETS = (50, 100, 150, 200)
-MAX_MEAL_WEIGHT_PRESETS = 8
+DEFAULT_MEAL_WEIGHT_PRESETS = (5, 10, 20, 30, 40, 50, 80, 100, 150, 200, 250, 300)
+MAX_MEAL_WEIGHT_PRESETS = 12
 
 
 class ConfigError(RuntimeError):

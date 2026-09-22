@@ -58,6 +58,41 @@ def test_openai_screenshot_analyzer_sends_image_and_reference_date() -> None:
     }
 
 
+def test_openai_screenshot_analyzer_reuses_local_cache() -> None:
+    parsed = BurnScreenshotAnalysis(
+        app="garmin_connect",
+        days=[BurnScreenshotDay(day=date(2026, 9, 1), total_kcal=3182)],
+    )
+    calls = []
+    values = {}
+
+    class Cache:
+        def get_cached_llm_response(self, operation, cache_key):
+            return values.get((operation, cache_key))
+
+        def store_cached_llm_response(self, operation, cache_key, response_json):
+            values[(operation, cache_key)] = response_json
+
+    analyzer = OpenAIBurnScreenshotAnalyzer.__new__(OpenAIBurnScreenshotAnalyzer)
+    analyzer._client = SimpleNamespace(
+        responses=SimpleNamespace(
+            parse=lambda **kwargs: (
+                calls.append(kwargs)
+                or SimpleNamespace(output_parsed=parsed, usage=None)
+            )
+        )
+    )
+    analyzer._model = "test-model"
+    analyzer._effort = "none"
+    analyzer._pricing = ModelPricing(None, None, None)
+    analyzer._usage_recorder = None
+    analyzer._response_cache = Cache()
+
+    assert analyzer.analyze(b"same-image", date(2026, 9, 2)) == parsed
+    assert analyzer.analyze(b"same-image", date(2026, 9, 2)) == parsed
+    assert len(calls) == 1
+
+
 def test_prepare_entries_prefers_total_and_ignores_unfinished_day() -> None:
     analysis = BurnScreenshotAnalysis(
         app="garmin_connect",

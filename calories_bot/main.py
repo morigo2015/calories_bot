@@ -40,6 +40,7 @@ async def configure_bot_commands(
         BotCommand("recent", "🕘 нещодавні"),
         BotCommand("day", "📅 за день"),
         BotCommand("week", "📊 за тиждень"),
+        BotCommand("month", "📈 за місяць"),
         BotCommand("goal", "🎯 ціль калорій"),
         BotCommand("protein_goal", "🥩 ціль білка"),
         BotCommand("burn", "🔥 витрата калорій"),
@@ -133,6 +134,7 @@ def main() -> None:
         settings.openai_timeout_seconds,
         settings.openai_pricing,
         statistics,
+        statistics,
     )
     burn_screenshot_analyzer = OpenAIBurnScreenshotAnalyzer(
         settings.openai_api_key,
@@ -141,10 +143,12 @@ def main() -> None:
         settings.openai_timeout_seconds,
         settings.openai_pricing,
         statistics,
+        statistics,
     )
     transcriber = OpenAITranscriber(
         settings.openai_api_key,
         settings.openai_timeout_seconds,
+        statistics,
     )
     meal_grouper = OpenAIMealGrouper(
         settings.openai_api_key,
@@ -152,6 +156,7 @@ def main() -> None:
         settings.weekly_meals_llm_reasoning_effort,
         settings.openai_timeout_seconds,
         settings.weekly_meals_llm_pricing,
+        statistics,
         statistics,
     )
     google_client = gspread.service_account(
@@ -226,6 +231,9 @@ def main() -> None:
     application.add_handler(CommandHandler("day", handlers.day, filters=message_update))
     application.add_handler(
         CommandHandler("week", handlers.weekly, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("month", handlers.monthly, filters=message_update)
     )
     application.add_handler(
         CommandHandler("goal", handlers.goal, filters=message_update)

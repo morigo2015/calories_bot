@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal, Protocol, cast
@@ -16,7 +17,10 @@ from .burned import (
     BurnedCaloriesEntry,
     build_burned_entry,
 )
+from .llm_cache import LLMResponseCache, content_sha256, llm_cache_key
 from .models import LLMMetadata
+
+LOGGER = logging.getLogger(__name__)
 
 BURN_SCREENSHOT_PROMPT = """You read screenshots of daily calories burned.
 Return only the structured BurnScreenshotAnalysis object.
@@ -94,12 +98,14 @@ class OpenAIBurnScreenshotAnalyzer:
         timeout_seconds: float,
         pricing: ModelPricing,
         usage_recorder: UsageRecorder | None = None,
+        response_cache: LLMResponseCache | None = None,
     ) -> None:
         self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
         self._model = model
         self._effort = effort
         self._pricing = pricing
         self._usage_recorder = usage_recorder
+        self._response_cache = response_cache
 
     def analyze(
         self, image_bytes: bytes, reference_date: date
@@ -117,51 +123,82 @@ class OpenAIBurnScreenshotAnalyzer:
             if image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
             else "image/jpeg"
         )
-        try:
-            response = self._client.responses.parse(
-                model=self._model,
-                reasoning={"effort": cast(ReasoningEffort, self._effort)},
-                store=False,
-                input=cast(
-                    Any,
-                    [
-                        {"role": "system", "content": BURN_SCREENSHOT_PROMPT},
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": (
-                                        "Reference local date for resolving omitted "
-                                        "years and relative labels: "
-                                        f"{reference_date.isoformat()}"
-                                    ),
-                                },
-                                {
-                                    "type": "input_image",
-                                    "image_url": (
-                                        f"data:{image_mime_type};base64,{encoded_image}"
-                                    ),
-                                    "detail": "auto",
-                                },
-                            ],
-                        },
-                    ],
-                ),
-                text_format=BurnScreenshotAnalysis,
-            )
-        except Exception as exc:
-            raise BurnScreenshotError("OpenAI screenshot request failed") from exc
-        metadata = metadata_from_usage(
-            getattr(response, "usage", None),
-            self._model,
-            self._effort,
-            self._pricing,
-            self._usage_recorder,
+        operation = "burn_screenshot"
+        cache_key = llm_cache_key(
+            operation,
+            {
+                "model": self._model,
+                "effort": self._effort,
+                "system_prompt": BURN_SCREENSHOT_PROMPT,
+                "reference_date": reference_date.isoformat(),
+                "image_sha256": content_sha256(image_bytes),
+            },
         )
-        parsed = response.output_parsed
+        parsed: BurnScreenshotAnalysis | None = None
+        cache = getattr(self, "_response_cache", None)
+        if cache is not None:
+            try:
+                cached = cache.get_cached_llm_response(operation, cache_key)
+                if cached is not None:
+                    parsed = BurnScreenshotAnalysis.model_validate_json(cached)
+            except Exception:
+                LOGGER.exception("Could not read cached OpenAI screenshot analysis")
         if parsed is None:
-            raise BurnScreenshotError("OpenAI returned no screenshot analysis")
+            try:
+                response = self._client.responses.parse(
+                    model=self._model,
+                    reasoning={"effort": cast(ReasoningEffort, self._effort)},
+                    store=False,
+                    input=cast(
+                        Any,
+                        [
+                            {"role": "system", "content": BURN_SCREENSHOT_PROMPT},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": (
+                                            "Reference local date for resolving "
+                                            "omitted years and relative labels: "
+                                            f"{reference_date.isoformat()}"
+                                        ),
+                                    },
+                                    {
+                                        "type": "input_image",
+                                        "image_url": (
+                                            f"data:{image_mime_type};base64,"
+                                            f"{encoded_image}"
+                                        ),
+                                        "detail": "auto",
+                                    },
+                                ],
+                            },
+                        ],
+                    ),
+                    text_format=BurnScreenshotAnalysis,
+                )
+            except Exception as exc:
+                raise BurnScreenshotError("OpenAI screenshot request failed") from exc
+            metadata = metadata_from_usage(
+                getattr(response, "usage", None),
+                self._model,
+                self._effort,
+                self._pricing,
+                self._usage_recorder,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                raise BurnScreenshotError("OpenAI returned no screenshot analysis")
+            if cache is not None:
+                try:
+                    cache.store_cached_llm_response(
+                        operation, cache_key, parsed.model_dump_json()
+                    )
+                except Exception:
+                    LOGGER.exception("Could not cache OpenAI screenshot analysis")
+        else:
+            metadata = LLMMetadata(model=self._model, effort=self._effort)
         return BurnScreenshotResult(analysis=parsed, metadata=metadata)
 
 

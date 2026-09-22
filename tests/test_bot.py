@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
-from telegram.constants import ChatType, ParseMode
+from telegram.constants import ChatAction, ChatType, ParseMode
 
 from calories_bot import bot as bot_module
 from calories_bot.analyzer import AnalysisError, AnalysisResult, InputFormatError
@@ -13,8 +13,6 @@ from calories_bot.bot import (
     ANALYSIS_ERROR_TEXT,
     DELETE_ERROR_TEXT,
     FORMAT_ERROR_TEXT,
-    LLM_OPERATION_TEXT,
-    LONG_OPERATION_TEXT,
     NOT_FOOD_TEXT,
     READ_ERROR_TEXT,
     RECENT_MEALS_LIMIT,
@@ -918,6 +916,33 @@ def test_reply_skips_kcal_check_when_any_macro_is_missing() -> None:
     assert "⚠️" not in format_reply(meal)
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Сухе вино", "Темне пиво", "Текіла", "Чача", "Горілка", "Віскі"],
+)
+def test_reply_skips_kcal_macro_warning_for_alcohol(name: str) -> None:
+    meal = calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name=name,
+            items=[
+                FoodItem(
+                    name=name,
+                    weight_g=100,
+                    weight_estimated=False,
+                    kcal_per_100g=100,
+                    kcal_estimated=False,
+                    protein_per_100g=10,
+                    fat_per_100g=10,
+                    carbs_per_100g=10,
+                )
+            ],
+        )
+    )
+
+    assert "⚠️" not in format_reply(meal, mismatch_threshold_percent=10)
+
+
 def test_composite_reply_stays_compact() -> None:
     analysis = FoodAnalysis(
         is_food=True,
@@ -1583,6 +1608,38 @@ def test_weekly_service_uses_one_completed_day_when_history_is_empty(tmp_path) -
     assert reply.startswith("<h3>Попередні 1 день (без сьогодні):</h3>")
 
 
+def test_monthly_service_uses_thirty_completed_days_and_cached_grouper(
+    tmp_path,
+) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    store.first_meal_day = date(2026, 7, 1)
+    store.period_meals = [
+        PeriodMeal(
+            "сир",
+            100,
+            300,
+            NutritionSummary(kcal=300, protein_g=30, fat_g=15, carbs_g=3),
+            date(2026, 8, 8),
+        )
+    ]
+    grouped = []
+    grouper = SimpleNamespace(
+        group=lambda names: (
+            grouped.append(names) or MealGroupingResult(("Сир",), METADATA)
+        )
+    )
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    reply = service.get_monthly(
+        datetime(2026, 8, 9, 12, tzinfo=TZ), meal_grouper=grouper
+    )
+
+    assert store.range == (date(2026, 7, 10), date(2026, 8, 8))
+    assert reply.startswith("<h3>Попередні 30 днів (без сьогодні):</h3>")
+    assert grouped == [("сир",)]
+    assert reply.count("<li><b>") >= 30
+
+
 def test_weekly_meals_never_exceeds_twenty_rows() -> None:
     meals = [PeriodMeal(f"Страва {index}", 100, 1_000 - index) for index in range(25)]
 
@@ -1918,20 +1975,6 @@ class FakeManager:
 
 
 def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
-    class FakeSentMessage:
-        def __init__(self, parent, text, message_id):
-            self._parent = parent
-            self.text = text
-            self.message_id = message_id
-            self.chat_id = user_id if chat_id is None else chat_id
-            self.date = datetime(2026, 8, 2, 9, tzinfo=UTC)
-
-        async def delete(self):
-            index = self._parent.replies.index(self.text)
-            self._parent.replies.pop(index)
-            self._parent.reply_kwargs.pop(index)
-            self._parent.deleted_replies.append(self.text)
-
     class FakeMessage:
         text = "сир 50"
         caption = None
@@ -1945,13 +1988,21 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
             self.replies = []
             self.reply_kwargs = []
             self.deleted_replies = []
+            self.typing_actions = []
             self.chat_id = user_id if chat_id is None else chat_id
+
+        def get_bot(self):
+            actions = self.typing_actions
+
+            class Bot:
+                async def send_chat_action(self, *, chat_id, action):
+                    actions.append((chat_id, action))
+
+            return Bot()
 
         async def reply_text(self, text, **kwargs):
             self.replies.append(text)
             self.reply_kwargs.append(kwargs)
-            if text in {LONG_OPERATION_TEXT, LLM_OPERATION_TEXT}:
-                return FakeSentMessage(self, text, 100)
             return None
 
     message = FakeMessage()
@@ -2089,7 +2140,7 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
     assert message.reply_kwargs[0]["do_quote"] is False
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert "reply_markup" not in message.reply_kwargs[1]
-    assert message.deleted_replies == [LLM_OPERATION_TEXT]
+    assert message.typing_actions == [(123, ChatAction.TYPING)]
 
 
 def test_voice_is_transcribed_and_processed_as_food_text() -> None:
@@ -2137,23 +2188,23 @@ def test_voice_is_transcribed_and_processed_as_food_text() -> None:
         "Сливи двісті грамів калорійність сорок калорій на сто грамів"
     )
     assert message.replies == ["Сливи"]
-    assert message.deleted_replies == [LLM_OPERATION_TEXT]
+    assert message.typing_actions == [(123, ChatAction.TYPING)]
 
 
-def test_temporary_status_is_deleted_when_operation_fails() -> None:
+def test_temporary_typing_status_stops_when_operation_fails() -> None:
     handlers = TelegramHandlers(999, FakeManager())
     _, message = make_update()
 
     async def fail_after_status():
         with pytest.raises(RuntimeError, match="controlled"):
             async with handlers._temporary_status(message, llm=True):
-                assert message.replies == [LLM_OPERATION_TEXT]
+                assert message.typing_actions == [(123, ChatAction.TYPING)]
                 raise RuntimeError("controlled")
 
     asyncio.run(fail_after_status())
 
     assert message.replies == []
-    assert message.deleted_replies == [LLM_OPERATION_TEXT]
+    assert message.typing_actions == [(123, ChatAction.TYPING)]
 
 
 def test_voice_without_transcriber_returns_clear_error() -> None:
@@ -2431,7 +2482,7 @@ def test_weekly_calories_excludes_current_accounting_day_for_user(tmp_path) -> N
     rich_html = bot.calls[0][1]["api_kwargs"]["rich_message"]["html"]
     assert rich_html.startswith("<h3>Різниця калорій за тиждень</h3>")
     assert "<details><summary>По дням</summary>" in rich_html
-    assert message.deleted_replies == [LONG_OPERATION_TEXT]
+    assert message.typing_actions == [(123, ChatAction.TYPING)]
 
 
 def test_admin_weekly_calories_includes_garmin_balance(tmp_path) -> None:
@@ -2540,7 +2591,7 @@ def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:
     assert message.replies[0].startswith("<b>КБЖВ за тиждень</b>")
     assert "<b>Деталі по стравам</b>" in message.replies[0]
     assert "<b><u>Сир</u></b> 100 г — 🔥 К 360" in message.replies[0]
-    assert message.deleted_replies == [LLM_OPERATION_TEXT]
+    assert message.typing_actions == [(123, ChatAction.TYPING)]
 
 
 def test_goal_waiting_state_consumes_text_without_food_analysis() -> None:
@@ -2621,8 +2672,20 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
         async def edit_message_text(self, **kwargs):
             self.edits.append(kwargs)
 
+    class Statistics:
+        def __init__(self):
+            self.weight_choices = []
+
+        def record_weight_choice(self, *args):
+            self.weight_choices.append(args)
+
     service = WeightService()
-    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    statistics = Statistics()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        statistics=statistics,
+    )
     update, message = make_update()
     message.text = "100"
     bot = Bot()
@@ -2637,6 +2700,7 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
                 "prompt_chat_id": 123,
                 "prompt_message_id": 778,
                 "accepts_text": True,
+                "selection_source": "manual",
             }
         },
         bot=bot,
@@ -2660,6 +2724,7 @@ def test_meal_weight_state_updates_existing_reply_and_sends_full_result() -> Non
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert message.reply_kwargs[0]["do_quote"] is False
     assert "reply_markup" not in message.reply_kwargs[1]
+    assert statistics.weight_choices == [(100, "manual")]
 
 
 def test_meal_weight_state_closes_without_reply_when_weight_is_unchanged() -> None:
@@ -2716,7 +2781,7 @@ def test_weight_parser_accepts_natural_gram_formats(raw: str) -> None:
 
 
 def test_weight_choice_buttons_use_configured_presets() -> None:
-    handlers = TelegramHandlers(999, FakeManager(), (75, 125, 250))
+    handlers = TelegramHandlers(999, FakeManager(), (250, 75, 125))
 
     keyboard = handlers._weight_choice_markup(42, date(2026, 8, 2)).inline_keyboard
 
@@ -2724,6 +2789,19 @@ def test_weight_choice_buttons_use_configured_presets() -> None:
     assert keyboard[0][1].callback_data == "meal-weight-set:42:2026-08-02:125"
     assert keyboard[1][0].text == "Інша вага"
     assert keyboard[1][0].callback_data == "meal-weight-other:42:2026-08-02"
+
+
+def test_default_weight_buttons_use_three_ascending_rows() -> None:
+    handlers = TelegramHandlers(999, FakeManager())
+
+    keyboard = handlers._weight_choice_markup(42, date(2026, 8, 2)).inline_keyboard
+
+    assert [[button.text for button in row] for row in keyboard[:3]] == [
+        ["5г", "10г", "20г", "30г"],
+        ["40г", "50г", "80г", "100г"],
+        ["150г", "200г", "250г", "300г"],
+    ]
+    assert keyboard[3][0].text == "Інша вага"
 
 
 def test_weight_text_is_ignored_until_other_weight_is_selected() -> None:
@@ -4040,7 +4118,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.11.0"]
+    assert admin_message.replies == ["Версія: 1.11.1"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4069,7 +4147,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.11.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.11.1\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

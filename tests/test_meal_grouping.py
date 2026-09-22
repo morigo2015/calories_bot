@@ -125,3 +125,32 @@ def test_grouping_accepts_more_than_twenty_valid_groups() -> None:
     result = grouper.group(tuple(f"Страва {index}" for index in range(21)))
 
     assert result.group_names == tuple(f"Група {index}" for index in range(21))
+
+
+def test_grouping_reuses_local_cache() -> None:
+    grouper, seen = _grouper(
+        MealGrouping(assignments=[MealGroupAssignment(source_id=0, group_name="Вино")])
+    )
+    values = {}
+    calls = 0
+    original_parse = grouper._client.responses.parse
+
+    def parse(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original_parse(**kwargs)
+
+    class Cache:
+        def get_cached_llm_response(self, operation, cache_key):
+            return values.get((operation, cache_key))
+
+        def store_cached_llm_response(self, operation, cache_key, response_json):
+            values[(operation, cache_key)] = response_json
+
+    grouper._client.responses.parse = parse
+    grouper._response_cache = Cache()
+
+    assert grouper.group(("Сухе вино",)).group_names == ("Вино",)
+    assert grouper.group(("Сухе вино",)).group_names == ("Вино",)
+    assert calls == 1
+    assert seen.kwargs is not None

@@ -9,7 +9,7 @@ import secrets
 import shutil
 import threading
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -17,7 +17,7 @@ from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
-from telegram.constants import ChatType, ParseMode
+from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import ContextTypes
 
 from . import __version__
@@ -133,8 +133,6 @@ ANALYSIS_ERROR_TEXT = "Не вдалося порахувати КБЖВ. Спр
 GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Спробуй ще раз."
 WEEK_ERROR_TEXT = "Не вдалося сформувати тижневий підсумок. Спробуй ще раз."
 VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
-LONG_OPERATION_TEXT = "⏳ Хвилинку, думаю. . ."
-LLM_OPERATION_TEXT = "⏳ Хвилинку, спілкуюсь з AI. . ."
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
@@ -160,6 +158,7 @@ GARMIN_READ_ERROR_TEXT = (
     "Перевір журнал оновлення або спробуй після наступного оновлення доби."
 )
 WEEK_DAYS = 7
+MONTH_DAYS = 30
 MACRO_TRACKING_START_DATE = date(2026, 8, 17)
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
@@ -364,6 +363,8 @@ def _format_daily_icon_nutrition(summary: NutritionSummary) -> str:
 
 
 def _format_calorie_warning(item: CalculatedFoodItem, threshold_percent: float) -> str:
+    if _is_alcoholic_item(item.name):
+        return ""
     mismatch = calorie_macro_mismatch_percent(item)
     if mismatch is None or mismatch <= threshold_percent:
         return ""
@@ -381,6 +382,21 @@ def _format_calorie_warning(item: CalculatedFoodItem, threshold_percent: float) 
         f"за формулою — {round_whole(calculated)} кк "
         f"({mismatch_text}).</p>"
     )
+
+
+_ALCOHOL_PATTERN = re.compile(
+    r"(?:\b(?:алкогол\w*|вино|вина|вином|вині|wine|пиво|пива|пивом|beer|"
+    r"горіл\w*|водк\w*|текіл\w*|tequila|чач\w*|віскі|виски|whisk(?:e)?y|"
+    r"коньяк\w*|бренд[іи]|brandy|ром(?:у|ом|і)?|rum|джин(?:у|ом|і)?|gin|"
+    r"лікер\w*|ликер\w*|liqueur|сидр\w*|cider|вермут\w*|vermouth|"
+    r"просекко|prosecco|шампан\w*|champagne|мартін[іи]|martini)\b|"
+    r"алкогольн\w+\s+коктейл\w*)",
+    re.IGNORECASE,
+)
+
+
+def _is_alcoholic_item(name: str) -> bool:
+    return _ALCOHOL_PATTERN.search(name) is not None
 
 
 def _format_item_calculation(
@@ -586,8 +602,10 @@ def format_weekly_calories_reply(
 
 
 def _weekly_period_text(period_days: int) -> str:
-    if not 1 <= period_days <= WEEK_DAYS:
-        raise ValueError("Weekly report period must contain from one to seven days")
+    if not 1 <= period_days <= MONTH_DAYS:
+        raise ValueError("Report period must contain from one to thirty days")
+    if period_days == MONTH_DAYS:
+        return "за 30 днів"
     if period_days == WEEK_DAYS:
         return "за тиждень"
     if period_days == 1:
@@ -836,8 +854,10 @@ def format_weekly_reply(
     daily_kcal_goal: int | None = None,
     daily_protein_goal: int | None = None,
     period_days: int = WEEK_DAYS,
+    expected_period_days: int = WEEK_DAYS,
 ) -> str:
     _weekly_period_text(period_days)
+    _weekly_period_text(expected_period_days)
     start_day = end_day - timedelta(days=period_days - 1)
     days = [start_day + timedelta(days=offset) for offset in range(period_days)]
     consumed = {
@@ -983,8 +1003,12 @@ def format_weekly_reply(
     day_word = "день" if period_days == 1 else "дні" if period_days <= 4 else "днів"
     history_note = (
         ""
-        if period_days == WEEK_DAYS
-        else "<p><sub>історія повного тижня ще не накопичена</sub></p>"
+        if period_days == expected_period_days
+        else (
+            "<p><sub>історія повного тижня ще не накопичена</sub></p>"
+            if expected_period_days == WEEK_DAYS
+            else "<p><sub>історія повних 30 днів ще не накопичена</sub></p>"
+        )
     )
     return (
         f"<h3>Попередні {period_days} {day_word} (без сьогодні):</h3>"
@@ -1313,15 +1337,36 @@ class CaloriesService:
         burned_totals: dict[date, int] | None = None,
         meal_grouper: MealGrouper | None = None,
     ) -> str:
+        return self._get_period_summary(
+            timestamp, WEEK_DAYS, burned_totals, meal_grouper
+        )
+
+    def get_monthly(
+        self,
+        timestamp: datetime,
+        burned_totals: dict[date, int] | None = None,
+        meal_grouper: MealGrouper | None = None,
+    ) -> str:
+        return self._get_period_summary(
+            timestamp, MONTH_DAYS, burned_totals, meal_grouper
+        )
+
+    def _get_period_summary(
+        self,
+        timestamp: datetime,
+        maximum_days: int,
+        burned_totals: dict[date, int] | None = None,
+        meal_grouper: MealGrouper | None = None,
+    ) -> str:
         end_day = self._accounting_day(timestamp) - timedelta(days=1)
-        full_start_day = end_day - timedelta(days=WEEK_DAYS - 1)
+        full_start_day = end_day - timedelta(days=maximum_days - 1)
         first_meal_day = self._store.get_first_meal_day()
         if first_meal_day is None:
             period_days = 1
         elif first_meal_day <= full_start_day:
-            period_days = WEEK_DAYS
+            period_days = maximum_days
         else:
-            period_days = max(1, min(WEEK_DAYS, (end_day - first_meal_day).days + 1))
+            period_days = max(1, min(maximum_days, (end_day - first_meal_day).days + 1))
         start_day = end_day - timedelta(days=period_days - 1)
         meals = self._store.get_period_meals(start_day, end_day)
 
@@ -1363,6 +1408,7 @@ class CaloriesService:
             self._daily_kcal_goal,
             self._daily_protein_goal,
             period_days,
+            maximum_days,
         )
 
     @staticmethod
@@ -2145,7 +2191,20 @@ class TelegramHandlers:
         self,
         admin_user_id: int,
         manager: UserManager,
-        meal_weight_presets: tuple[int, ...] = (50, 100, 150, 200),
+        meal_weight_presets: tuple[int, ...] = (
+            5,
+            10,
+            20,
+            30,
+            40,
+            50,
+            80,
+            100,
+            150,
+            200,
+            250,
+            300,
+        ),
         statistics: BotStatistics | None = None,
         garmin_calories: GarminCalories | None = None,
         transcriber: Transcriber | None = None,
@@ -2167,32 +2226,39 @@ class TelegramHandlers:
     async def _temporary_status(
         message: object | None, *, llm: bool = False
     ) -> AsyncIterator[None]:
-        status: object | None = None
-        if message is not None:
+        del llm
+        typing_task: asyncio.Task[None] | None = None
+        get_bot = getattr(message, "get_bot", None)
+        chat_id = getattr(message, "chat_id", None)
+        if callable(get_bot) and chat_id is not None:
             try:
-                reply_text = getattr(message, "reply_text", None)
-                if callable(reply_text):
-                    status = await reply_text(
-                        LLM_OPERATION_TEXT if llm else LONG_OPERATION_TEXT,
-                        do_quote=False,
-                    )
+                bot = get_bot()
+
+                async def keep_typing() -> None:
+                    try:
+                        while True:
+                            await bot.send_chat_action(
+                                chat_id=chat_id, action=ChatAction.TYPING
+                            )
+                            await asyncio.sleep(4)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        LOGGER.warning(
+                            "Could not refresh Telegram typing status", exc_info=True
+                        )
+
+                typing_task = asyncio.create_task(keep_typing())
+                await asyncio.sleep(0)
             except Exception:
-                LOGGER.warning(
-                    "Could not send a temporary operation status", exc_info=True
-                )
+                LOGGER.warning("Could not start Telegram typing status", exc_info=True)
         try:
             yield
         finally:
-            if status is not None:
-                try:
-                    delete = getattr(status, "delete", None)
-                    if callable(delete):
-                        await delete()
-                except Exception:
-                    LOGGER.warning(
-                        "Could not delete a temporary operation status",
-                        exc_info=True,
-                    )
+            if typing_task is not None:
+                typing_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await typing_task
 
     @staticmethod
     async def _send_rich_html(
@@ -2799,6 +2865,38 @@ class TelegramHandlers:
                     context,
                     reply,
                     operation="/week report",
+                )
+            else:
+                await message.reply_text(reply, do_quote=False)
+
+    async def monthly(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if message is None:
+            return
+        service = await self._active_service(update)
+        if service is None:
+            return
+        async with self._temporary_status(message, llm=self._meal_grouper is not None):
+            try:
+                burned_totals = None
+                if self._is_admin(update):
+                    burned_totals = await self._get_current_garmin_calories()
+                reply = await asyncio.to_thread(
+                    service.get_monthly,
+                    message.date,
+                    burned_totals,
+                    self._meal_grouper,
+                )
+            except Exception:
+                LOGGER.exception("Could not build /month")
+                reply = "Не вдалося сформувати місячний підсумок. Спробуй ще раз."
+            if reply.startswith("<h3>"):
+                await self._send_rich_html(
+                    message,
+                    context,
+                    reply,
+                    operation="/month report",
                 )
             else:
                 await message.reply_text(reply, do_quote=False)
@@ -3796,7 +3894,7 @@ class TelegramHandlers:
                     f"meal-weight-set:{message_id}:{day.isoformat()}:{weight}"
                 ),
             )
-            for weight in self._meal_weight_presets
+            for weight in sorted(self._meal_weight_presets)
         ]
         rows = [
             preset_buttons[index : index + 4]
@@ -3838,12 +3936,14 @@ class TelegramHandlers:
                 ).split(":", maxsplit=2)
                 weight_g = self._parse_weight(weight_raw)
                 is_other = False
+                state["selection_source"] = "preset"
             elif data.startswith("meal-weight-other:"):
                 message_raw, day_raw = data.removeprefix("meal-weight-other:").split(
                     ":", maxsplit=1
                 )
                 weight_g = None
                 is_other = True
+                state["selection_source"] = "manual"
             else:
                 raise ValueError
             message_id = int(message_raw)
@@ -4572,6 +4672,19 @@ class TelegramHandlers:
             if result is None:
                 raise LookupError
             await self._send_meal_replies(message, result, context, service)
+            selection_source = state.get("selection_source")
+            if self._statistics is not None and selection_source in {
+                "preset",
+                "manual",
+            }:
+                try:
+                    await asyncio.to_thread(
+                        self._statistics.record_weight_choice,
+                        weight_g,
+                        selection_source,
+                    )
+                except Exception:
+                    LOGGER.warning("Could not record a weight choice", exc_info=True)
             self._clear_pending_input(context)
             try:
                 await context.bot.edit_message_text(

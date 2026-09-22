@@ -47,6 +47,7 @@ class LLMSummary:
     cached_input_tokens: int
     output_tokens: int
     estimated_cost_usd: Decimal | None
+    local_cache_hits: int
 
 
 class AnalyticsStore:
@@ -80,6 +81,33 @@ class AnalyticsStore:
                     );
                     CREATE INDEX IF NOT EXISTS llm_usage_events_recorded_at
                         ON llm_usage_events(recorded_at);
+
+                    CREATE TABLE IF NOT EXISTS llm_response_cache (
+                        operation TEXT NOT NULL,
+                        cache_key TEXT NOT NULL,
+                        response_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        last_hit_at TEXT,
+                        hit_count INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (operation, cache_key)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS llm_cache_hit_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        recorded_at TEXT NOT NULL,
+                        operation TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS llm_cache_hit_events_recorded_at
+                        ON llm_cache_hit_events(recorded_at);
+
+                    CREATE TABLE IF NOT EXISTS weight_choice_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        recorded_at TEXT NOT NULL,
+                        weight_g INTEGER NOT NULL,
+                        source TEXT NOT NULL CHECK (source IN ('preset', 'manual'))
+                    );
+                    CREATE INDEX IF NOT EXISTS weight_choice_events_recorded_at
+                        ON weight_choice_events(recorded_at);
 
                     CREATE TABLE IF NOT EXISTS daily_total_messages (
                         chat_id INTEGER NOT NULL,
@@ -158,6 +186,74 @@ class AnalyticsStore:
                 )
         except sqlite3.Error as exc:
             raise AnalyticsError("Could not record OpenAI token usage") from exc
+
+    def get_cached_llm_response(self, operation: str, cache_key: str) -> str | None:
+        now = datetime.now(UTC)
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT response_json
+                    FROM llm_response_cache
+                    WHERE operation = ? AND cache_key = ?
+                    """,
+                    (operation, cache_key),
+                ).fetchone()
+                if row is None:
+                    return None
+                connection.execute(
+                    """
+                    UPDATE llm_response_cache
+                    SET last_hit_at = ?, hit_count = hit_count + 1
+                    WHERE operation = ? AND cache_key = ?
+                    """,
+                    (_utc_iso(now), operation, cache_key),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO llm_cache_hit_events (recorded_at, operation)
+                    VALUES (?, ?)
+                    """,
+                    (_utc_iso(now), operation),
+                )
+                return str(row[0])
+        except sqlite3.Error as exc:
+            raise AnalyticsError("Could not read the local LLM cache") from exc
+
+    def store_cached_llm_response(
+        self, operation: str, cache_key: str, response_json: str
+    ) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO llm_response_cache (
+                        operation, cache_key, response_json, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(operation, cache_key) DO UPDATE SET
+                        response_json = excluded.response_json
+                    """,
+                    (operation, cache_key, response_json, _utc_iso(datetime.now(UTC))),
+                )
+        except sqlite3.Error as exc:
+            raise AnalyticsError("Could not write the local LLM cache") from exc
+
+    def record_weight_choice(
+        self, recorded_at: datetime, weight_g: int, source: str
+    ) -> None:
+        if source not in {"preset", "manual"}:
+            raise ValueError("Weight choice source must be preset or manual")
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO weight_choice_events (recorded_at, weight_g, source)
+                    VALUES (?, ?, ?)
+                    """,
+                    (_utc_iso(recorded_at), weight_g, source),
+                )
+        except sqlite3.Error as exc:
+            raise AnalyticsError("Could not record a weight choice") from exc
 
     def record_daily_total_message(
         self,
@@ -264,6 +360,14 @@ class AnalyticsStore:
                     """,
                     (_utc_iso(since),),
                 ).fetchall()
+                cache_hit_row = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM llm_cache_hit_events
+                    WHERE recorded_at >= ?
+                    """,
+                    (_utc_iso(since),),
+                ).fetchone()
         except sqlite3.Error as exc:
             raise AnalyticsError("Could not read OpenAI token statistics") from exc
         input_tokens = sum(int(row[0]) for row in rows)
@@ -282,6 +386,7 @@ class AnalyticsStore:
             cached_input_tokens=cached_input_tokens,
             output_tokens=output_tokens,
             estimated_cost_usd=estimated_cost,
+            local_cache_hits=int(cache_hit_row[0]) if cache_hit_row else 0,
         )
 
 
@@ -400,6 +505,17 @@ class BotStatistics:
             estimated_cost_usd,
         )
 
+    def get_cached_llm_response(self, operation: str, cache_key: str) -> str | None:
+        return self._store.get_cached_llm_response(operation, cache_key)
+
+    def store_cached_llm_response(
+        self, operation: str, cache_key: str, response_json: str
+    ) -> None:
+        self._store.store_cached_llm_response(operation, cache_key, response_json)
+
+    def record_weight_choice(self, weight_g: int, source: str) -> None:
+        self._store.record_weight_choice(datetime.now(UTC), weight_g, source)
+
     def record_daily_total_message(
         self,
         chat_id: int,
@@ -444,6 +560,7 @@ class BotStatistics:
             f"• вхідні токени: {_format_integer(llm.input_tokens)}",
             f"• вихідні токени: {_format_integer(llm.output_tokens)}",
             f"• кешовані токени: {_format_integer(llm.cached_input_tokens)}",
+            f"• запитів із локального кешу: {_format_integer(llm.local_cache_hits)}",
             "• розрахункова вартість: "
             + _format_cost(llm.estimated_cost_usd, missing="не розраховано"),
         ]

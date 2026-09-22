@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Literal, Protocol, cast
 from openai import OpenAI
 from openai.types.shared import ReasoningEffort
 
+from .llm_cache import LLMResponseCache, content_sha256, llm_cache_key
 from .models import FoodAnalysis, LLMMetadata, MealIconSuggestion, MealResult
 
 LOGGER = logging.getLogger(__name__)
@@ -169,12 +171,36 @@ class Transcriber(Protocol):
 
 
 class OpenAITranscriber:
-    def __init__(self, api_key: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        timeout_seconds: float,
+        response_cache: LLMResponseCache | None = None,
+    ) -> None:
         self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
+        self._response_cache = response_cache
 
     def transcribe(self, audio_bytes: bytes) -> str:
         if not audio_bytes:
             raise TranscriptionError("Voice message is empty")
+        operation = "transcription"
+        cache_key = llm_cache_key(
+            operation,
+            {
+                "model": TRANSCRIPTION_MODEL,
+                "audio_sha256": content_sha256(audio_bytes),
+            },
+        )
+        cache = getattr(self, "_response_cache", None)
+        if cache is not None:
+            try:
+                cached = cache.get_cached_llm_response(operation, cache_key)
+                if cached is not None:
+                    text = str(json.loads(cached)).strip()
+                    if text:
+                        return text
+            except Exception:
+                LOGGER.exception("Could not read cached OpenAI transcription")
         try:
             transcription = self._client.audio.transcriptions.create(
                 model=TRANSCRIPTION_MODEL,
@@ -185,6 +211,13 @@ class OpenAITranscriber:
         text = str(getattr(transcription, "text", "")).strip()
         if not text:
             raise TranscriptionError("OpenAI returned an empty transcript")
+        if cache is not None:
+            try:
+                cache.store_cached_llm_response(
+                    operation, cache_key, json.dumps(text, ensure_ascii=False)
+                )
+            except Exception:
+                LOGGER.exception("Could not cache OpenAI transcription")
         return text
 
 
@@ -815,12 +848,14 @@ class OpenAIAnalyzer:
         timeout_seconds: float,
         pricing: ModelPricing,
         usage_recorder: UsageRecorder | None = None,
+        response_cache: LLMResponseCache | None = None,
     ) -> None:
         self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
         self._model = model
         self._effort = effort
         self._pricing = pricing
         self._usage_recorder = usage_recorder
+        self._response_cache = response_cache
 
     def _metadata_from_usage(self, usage: Any | None) -> LLMMetadata:
         return metadata_from_usage(
@@ -855,6 +890,31 @@ class OpenAIAnalyzer:
             }
             for portion in normalized.household_portions
         ]
+        operation = "food_analysis"
+        cache_key = llm_cache_key(
+            operation,
+            {
+                "model": self._model,
+                "effort": self._effort,
+                "system_prompt": SYSTEM_PROMPT,
+                "normalized_text": normalized.text,
+                "original_text": normalized.original_text,
+                "constraints": constraints,
+                "portion_hints": portion_hints,
+                "image_sha256": (
+                    content_sha256(image_bytes) if image_bytes is not None else None
+                ),
+            },
+        )
+        parsed: FoodAnalysis | None = None
+        cache = getattr(self, "_response_cache", None)
+        if cache is not None:
+            try:
+                cached = cache.get_cached_llm_response(operation, cache_key)
+                if cached is not None:
+                    parsed = FoodAnalysis.model_validate_json(cached)
+            except Exception:
+                LOGGER.exception("Could not read cached OpenAI food analysis")
         user_content: str | list[dict[str, str]] = normalized.text
         if image_bytes is not None:
             encoded_image = base64.b64encode(image_bytes).decode("ascii")
@@ -875,37 +935,46 @@ class OpenAIAnalyzer:
                 },
             ]
 
-        try:
-            response = self._client.responses.parse(
-                model=self._model,
-                reasoning={"effort": cast(ReasoningEffort, self._effort)},
-                store=False,
-                input=cast(
-                    Any,
-                    [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {
-                            "role": "developer",
-                            "content": (
-                                "Authoritative source values with character positions: "
-                                f"{constraints}. Deterministic portion hints: "
-                                f"{portion_hints}. Original user text: "
-                                f"{normalized.original_text!r}"
-                            ),
-                        },
-                        {"role": "user", "content": user_content},
-                    ],
-                ),
-                text_format=FoodAnalysis,
-            )
-        except Exception as exc:
-            raise AnalysisError("OpenAI request failed") from exc
-
-        metadata = self._metadata_from_usage(getattr(response, "usage", None))
-
-        parsed = response.output_parsed
         if parsed is None:
-            raise AnalysisError("OpenAI returned no structured analysis")
+            try:
+                response = self._client.responses.parse(
+                    model=self._model,
+                    reasoning={"effort": cast(ReasoningEffort, self._effort)},
+                    store=False,
+                    input=cast(
+                        Any,
+                        [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {
+                                "role": "developer",
+                                "content": (
+                                    "Authoritative source values with character "
+                                    "positions: "
+                                    f"{constraints}. Deterministic portion hints: "
+                                    f"{portion_hints}. Original user text: "
+                                    f"{normalized.original_text!r}"
+                                ),
+                            },
+                            {"role": "user", "content": user_content},
+                        ],
+                    ),
+                    text_format=FoodAnalysis,
+                )
+            except Exception as exc:
+                raise AnalysisError("OpenAI request failed") from exc
+            metadata = self._metadata_from_usage(getattr(response, "usage", None))
+            parsed = response.output_parsed
+            if parsed is None:
+                raise AnalysisError("OpenAI returned no structured analysis")
+            if cache is not None:
+                try:
+                    cache.store_cached_llm_response(
+                        operation, cache_key, parsed.model_dump_json()
+                    )
+                except Exception:
+                    LOGGER.exception("Could not cache OpenAI food analysis")
+        else:
+            metadata = LLMMetadata(model=self._model, effort=self._effort)
         analysis = enforce_explicit_values(
             parsed,
             normalized.explicit_values,
@@ -916,6 +985,25 @@ class OpenAIAnalyzer:
         return AnalysisResult(analysis=analysis, metadata=metadata)
 
     def suggest_meal_icon(self, meal: MealResult) -> MealIconSuggestion:
+        operation = "meal_icon"
+        cache_key = llm_cache_key(
+            operation,
+            {
+                "model": self._model,
+                "effort": self._effort,
+                "system_prompt": ICON_SYSTEM_PROMPT,
+                "meal_name": meal.meal_name,
+                "components": [item.name for item in meal.items],
+            },
+        )
+        cache = getattr(self, "_response_cache", None)
+        if cache is not None:
+            try:
+                cached = cache.get_cached_llm_response(operation, cache_key)
+                if cached is not None:
+                    return MealIconSuggestion.model_validate_json(cached)
+            except Exception:
+                LOGGER.exception("Could not read cached OpenAI meal icon")
         try:
             response = self._client.responses.parse(
                 model=self._model,
@@ -941,4 +1029,12 @@ class OpenAIAnalyzer:
         self._metadata_from_usage(getattr(response, "usage", None))
         if response.output_parsed is None:
             raise AnalysisError("OpenAI returned no icon suggestion")
-        return response.output_parsed
+        parsed = response.output_parsed
+        if cache is not None:
+            try:
+                cache.store_cached_llm_response(
+                    operation, cache_key, parsed.model_dump_json()
+                )
+            except Exception:
+                LOGGER.exception("Could not cache OpenAI meal icon")
+        return parsed

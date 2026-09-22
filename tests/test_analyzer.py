@@ -151,6 +151,33 @@ def test_openai_transcriber_sends_telegram_voice_to_recommended_model() -> None:
     ]
 
 
+def test_openai_transcriber_reuses_local_cache() -> None:
+    calls = []
+    values = {}
+
+    class Cache:
+        def get_cached_llm_response(self, operation, cache_key):
+            return values.get((operation, cache_key))
+
+        def store_cached_llm_response(self, operation, cache_key, response_json):
+            values[(operation, cache_key)] = response_json
+
+    transcriber = OpenAITranscriber("key", 30, Cache())
+    transcriber._client = SimpleNamespace(
+        audio=SimpleNamespace(
+            transcriptions=SimpleNamespace(
+                create=lambda **kwargs: (
+                    calls.append(kwargs) or SimpleNamespace(text="сливи 200 грамів")
+                )
+            )
+        )
+    )
+
+    assert transcriber.transcribe(b"same-audio") == "сливи 200 грамів"
+    assert transcriber.transcribe(b"same-audio") == "сливи 200 грамів"
+    assert len(calls) == 1
+
+
 def test_openai_transcriber_rejects_empty_audio() -> None:
     transcriber = OpenAITranscriber("key", 30)
 
@@ -654,6 +681,41 @@ def test_openai_analyzer_allows_missing_usage() -> None:
     result = analyzer.analyze(NormalizedInput("привіт", ()))
     assert result.metadata.input_tokens is None
     assert result.metadata.llm_cost_usd is None
+
+
+def test_openai_analyzer_reuses_local_cache() -> None:
+    calls = []
+    values = {}
+    parsed = FoodAnalysis(is_food=False, meal_name="", items=[])
+
+    class Cache:
+        def get_cached_llm_response(self, operation, cache_key):
+            return values.get((operation, cache_key))
+
+        def store_cached_llm_response(self, operation, cache_key, response_json):
+            values[(operation, cache_key)] = response_json
+
+    analyzer = OpenAIAnalyzer.__new__(OpenAIAnalyzer)
+    analyzer._client = SimpleNamespace(
+        responses=SimpleNamespace(
+            parse=lambda **kwargs: (
+                calls.append(kwargs)
+                or SimpleNamespace(output_parsed=parsed, usage=None)
+            )
+        )
+    )
+    analyzer._model = "test-model"
+    analyzer._effort = "none"
+    analyzer._pricing = ModelPricing(None, None, None)
+    analyzer._usage_recorder = None
+    analyzer._response_cache = Cache()
+
+    first = analyzer.analyze(NormalizedInput("привіт", ()))
+    second = analyzer.analyze(NormalizedInput("привіт", ()))
+
+    assert first.analysis == second.analysis == parsed
+    assert len(calls) == 1
+    assert second.metadata.input_tokens is None
 
 
 def test_openai_analyzer_sends_text_and_base64_photo() -> None:

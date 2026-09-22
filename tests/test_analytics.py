@@ -71,9 +71,42 @@ def test_store_sums_llm_usage_and_requires_pricing_for_every_event(tmp_path) -> 
     assert summary.cached_input_tokens == 90
     assert summary.output_tokens == 50
     assert summary.estimated_cost_usd == Decimal("0.003")
+    assert summary.local_cache_hits == 0
 
     store.record_llm_usage(NOW, "model", 1, 0, 1, None)
     assert store.llm_summary(NOW - timedelta(days=30)).estimated_cost_usd is None
+
+
+def test_store_caches_llm_responses_and_counts_hits_by_period(tmp_path) -> None:
+    store = AnalyticsStore(tmp_path / "statistics.sqlite3")
+
+    assert store.get_cached_llm_response("food_analysis", "key") is None
+    store.store_cached_llm_response("food_analysis", "key", '{"is_food":false}')
+    assert store.get_cached_llm_response("food_analysis", "key") == (
+        '{"is_food":false}'
+    )
+    assert (
+        AnalyticsStore(tmp_path / "statistics.sqlite3").get_cached_llm_response(
+            "food_analysis", "key"
+        )
+        == '{"is_food":false}'
+    )
+
+    assert store.llm_summary(datetime.min.replace(tzinfo=UTC)).local_cache_hits == 2
+
+
+def test_store_records_weight_choice_source(tmp_path) -> None:
+    path = tmp_path / "statistics.sqlite3"
+    store = AnalyticsStore(path)
+
+    store.record_weight_choice(NOW, 100, "preset")
+    store.record_weight_choice(NOW, 125, "manual")
+
+    with store._connect() as connection:
+        rows = connection.execute(
+            "SELECT weight_g, source FROM weight_choice_events ORDER BY id"
+        ).fetchall()
+    assert rows == [(100, "preset"), (125, "manual")]
 
 
 def test_store_tracks_daily_total_message_ids_durably_by_chat(tmp_path) -> None:
@@ -172,5 +205,6 @@ def test_info_formats_restart_messages_tokens_and_missing_admin_key(tmp_path) ->
     assert "вхідні токени: 1 200" in text
     assert "вихідні токени: 45" in text
     assert "кешовані токени: 300" in text
+    assert "запитів із локального кешу: 0" in text
     assert "розрахункова вартість: $0.012345" in text
     assert "не задано Admin API key" in text
