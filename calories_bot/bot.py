@@ -915,19 +915,24 @@ def format_weekly_reply(
     for summary_line, (attribute, emoji, label, divisor) in zip(
         summary_lines, specs, strict=True
     ):
-        contributions: list[tuple[int, str, float]] = []
+        contributions: list[tuple[int, str, int]] = []
         if divisor:
             for meal_name, weight, nutrition in aggregated:
                 value = getattr(nutrition, attribute)
                 if value is not None and value > 0:
                     contributions.append(
-                        (round_whole(value / divisor), meal_name, weight)
+                        (
+                            round_whole(value / divisor),
+                            meal_name,
+                            round_whole(weight / period_days),
+                        )
                     )
         # contributions.sort(key=lambda item: item[0], reverse=True)
+        unit = "кк" if attribute == "kcal" else "г"
         rows = [
-            f"<li>{html.escape(name)}, {round_whole(weight)} г  "
-            f"{emoji} {label} {value}</li>"
-            for value, name, weight in contributions
+            f"<li>{html.escape(name)}, у середньому {average_weight} г/день  "
+            f"{emoji} {label} {value} {unit}/день</li>"
+            for value, name, average_weight in contributions
             if value > 0
         ]
         body = f"<ul>{''.join(rows)}</ul>" if rows else "<p>Немає внесків</p>"

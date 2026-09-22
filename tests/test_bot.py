@@ -1272,7 +1272,7 @@ def test_weekly_reply_combines_meals_macros_and_consumed_calories() -> None:
 
     assert reply.startswith("<h3>Попередні 7 днів (без сьогодні):</h3>")
     assert "<summary>🔥 К <b><u>100</u></b> кк</summary>" in reply
-    assert "<li>сир, 200 г  🔥 К 100</li>" in reply
+    assert "<li>сир, у середньому 29 г/день  🔥 К 100 кк/день</li>" in reply
     assert "<details><summary>КБЖВ по дням</summary>" in reply
     assert "<b>сб 08.08</b>: 🔥 К 700" in reply
     assert "Витрачено" not in reply
@@ -1368,7 +1368,7 @@ def test_service_manual_burned_value_overrides_garmin_and_can_be_deleted(
     assert service.get_burned_entry(target) is None
 
 
-def test_weekly_service_groups_meals_and_shows_their_total_weight(tmp_path) -> None:
+def test_weekly_service_groups_meals_and_shows_average_daily_weight(tmp_path) -> None:
     class Grouper:
         def group(self, names):
             assert set(names) == {"Кава", "Кава чорна"}
@@ -1399,7 +1399,29 @@ def test_weekly_service_groups_meals_and_shows_their_total_weight(tmp_path) -> N
         datetime(2026, 8, 9, 12, tzinfo=TZ), meal_grouper=Grouper()
     )
 
-    assert "<li>Кава, 500 г  🔥 К 150</li>" in reply
+    assert "<li>Кава, у середньому 71 г/день  🔥 К 150 кк/день</li>" in reply
+
+
+def test_monthly_contributions_use_daily_average_for_weight_and_calories() -> None:
+    end_day = date(2026, 9, 21)
+    fruit = NutritionSummary(
+        kcal=9_240,
+        protein_g=180,
+        fat_g=60,
+        carbs_g=2_310,
+    )
+
+    reply = format_weekly_reply(
+        end_day,
+        {end_day: fruit},
+        [PeriodMeal("Фрукти", 26_600, 9_240, fruit, end_day)],
+        period_days=30,
+        expected_period_days=30,
+    )
+
+    assert "<li>Фрукти, у середньому 887 г/день  🔥 К 308 кк/день</li>" in reply
+    assert "<li>Фрукти, у середньому 887 г/день  🥩 Б 6 г/день</li>" in reply
+    assert "26600 г" not in reply
 
 
 def test_weekly_reply_uses_actual_days_for_averages_and_garmin_details() -> None:
@@ -4118,7 +4140,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.11.1"]
+    assert admin_message.replies == ["Версія: 1.11.2"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4147,7 +4169,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.11.1\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.11.2\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
