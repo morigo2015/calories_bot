@@ -40,7 +40,7 @@ def build_store(tmp_path):
     )
 
 
-def test_refreshes_seven_completed_days_and_formats_cache(monkeypatch, tmp_path):
+def test_refreshes_thirty_completed_days_and_formats_latest_week(monkeypatch, tmp_path):
     FakeGarmin.instances.clear()
     monkeypatch.setattr(garmin_module, "Garmin", FakeGarmin)
     store = build_store(tmp_path)
@@ -50,26 +50,67 @@ def test_refreshes_seven_completed_days_and_formats_cache(monkeypatch, tmp_path)
     assert store.refresh_if_due(datetime(2026, 8, 14, 1, 30, tzinfo=TZ)) is False
 
     assert len(FakeGarmin.instances) == 1
-    assert FakeGarmin.instances[0].requested_days == [
-        "2026-08-07",
-        "2026-08-08",
-        "2026-08-09",
-        "2026-08-10",
-        "2026-08-11",
-        "2026-08-12",
-        "2026-08-13",
-    ]
+    assert len(FakeGarmin.instances[0].requested_days) == 30
+    assert FakeGarmin.instances[0].requested_days[0] == "2026-07-15"
+    assert FakeGarmin.instances[0].requested_days[-1] == "2026-08-13"
     report = store.format_weekly_report()
     assert report.startswith("🔥 Витрата калорій за останні 7 днів (Garmin):")
-    assert "• 07.08, пт — 2 001 ккал" in report
-    assert "• 13.08, чт — 2 007 ккал" in report
-    assert "Разом: 14 028 ккал" in report
-    assert "У середньому: 2 004 ккал/день" in report
+    assert "• 07.08, пт — 2 024 ккал" in report
+    assert "• 13.08, чт — 2 030 ккал" in report
+    assert "Разом: 14 189 ккал" in report
+    assert "У середньому: 2 027 ккал/день" in report
     assert "Оновлено: 14.08.2026 01:00" in report
     daily = store.get_daily_calories()
-    assert daily[datetime(2026, 8, 7).date()] == 2001
-    assert daily[datetime(2026, 8, 13).date()] == 2007
+    assert len(daily) == 30
+    assert daily[datetime(2026, 7, 15).date()] == 2001
+    assert daily[datetime(2026, 8, 13).date()] == 2030
     assert (tmp_path / "garmin-calories.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_upgrades_legacy_week_cache_by_fetching_only_missing_days(
+    monkeypatch, tmp_path
+):
+    cache_path = tmp_path / "garmin-calories.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "refresh_day": "2026-08-14",
+                "refreshed_at": "2026-08-14T01:00:00+03:00",
+                "days": [
+                    {"day": f"2026-08-{day:02d}", "total_kcal": 1900 + day}
+                    for day in range(7, 14)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    FakeGarmin.instances.clear()
+    monkeypatch.setattr(garmin_module, "Garmin", FakeGarmin)
+    store = build_store(tmp_path)
+
+    assert store.refresh_if_due(datetime(2026, 8, 14, 1, 30, tzinfo=TZ)) is True
+
+    assert len(FakeGarmin.instances) == 1
+    assert len(FakeGarmin.instances[0].requested_days) == 23
+    assert FakeGarmin.instances[0].requested_days[0] == "2026-07-15"
+    assert FakeGarmin.instances[0].requested_days[-1] == "2026-08-06"
+    assert store.get_daily_calories()[datetime(2026, 8, 13).date()] == 1913
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["schema_version"] == 2
+
+
+def test_next_day_refresh_reuses_archive_and_fetches_one_new_day(monkeypatch, tmp_path):
+    FakeGarmin.instances.clear()
+    monkeypatch.setattr(garmin_module, "Garmin", FakeGarmin)
+    store = build_store(tmp_path)
+    store.refresh_if_due(datetime(2026, 8, 14, 1, tzinfo=TZ))
+    FakeGarmin.instances.clear()
+
+    assert store.refresh_if_due(datetime(2026, 8, 15, 1, tzinfo=TZ)) is True
+
+    assert len(FakeGarmin.instances) == 1
+    assert FakeGarmin.instances[0].requested_days == ["2026-08-14"]
+    assert len(store.get_daily_calories()) == 30
 
 
 def test_rechecks_latest_completed_day_hourly(monkeypatch, tmp_path):

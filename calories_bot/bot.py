@@ -915,7 +915,7 @@ def format_weekly_reply(
     for summary_line, (attribute, emoji, label, divisor) in zip(
         summary_lines, specs, strict=True
     ):
-        contributions: list[tuple[int, str, int]] = []
+        contributions: list[tuple[int, str, int, int]] = []
         if divisor:
             for meal_name, weight, nutrition in aggregated:
                 value = getattr(nutrition, attribute)
@@ -924,17 +924,24 @@ def format_weekly_reply(
                         (
                             round_whole(value / divisor),
                             meal_name,
+                            round_whole(weight),
                             round_whole(weight / period_days),
                         )
                     )
         # contributions.sort(key=lambda item: item[0], reverse=True)
         unit = "кк" if attribute == "kcal" else "г"
-        rows = [
-            f"<li>{html.escape(name)}, у середньому {average_weight} г/день  "
-            f"{emoji} {label} {value} {unit}/день</li>"
-            for value, name, average_weight in contributions
-            if value > 0
-        ]
+        rows = []
+        for value, name, total_weight, average_weight in contributions:
+            if value <= 0:
+                continue
+            if expected_period_days == MONTH_DAYS:
+                weight_text = f"{total_weight} г ({average_weight} г/день)"
+            else:
+                weight_text = f"у середньому {average_weight} г/день"
+            rows.append(
+                f"<li>{html.escape(name)}, {weight_text}  "
+                f"{emoji} {label} {value} {unit}/день</li>"
+            )
         body = f"<ul>{''.join(rows)}</ul>" if rows else "<p>Немає внесків</p>"
         progress_blocks.append(
             f"<details><summary>{summary_line}</summary>{body}</details>"
