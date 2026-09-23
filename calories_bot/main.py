@@ -309,6 +309,12 @@ def main() -> None:
     )
     application.add_handler(
         CallbackQueryHandler(
+            handlers.nutrition_basis_callback,
+            pattern=r"^nutrition-basis:(?:per_100g|portion)$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
             handlers.meal_weight_callback,
             pattern=r"^meal-weight:-?\d+:\d{4}-\d{2}-\d{2}$",
         )

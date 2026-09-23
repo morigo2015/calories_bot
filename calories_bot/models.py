@@ -160,6 +160,28 @@ class FoodItem(BaseModel):
         return self
 
 
+class PortionNutrition(BaseModel):
+    """Authoritative nutrition values for the whole consumed portion."""
+
+    kcal: float | None = Field(default=None, ge=0)
+    protein_g: float | None = Field(default=None, ge=0)
+    fat_g: float | None = Field(default=None, ge=0)
+    carbs_g: float | None = Field(default=None, ge=0)
+    kcal_source_id: str | None = Field(default=None, exclude=True)
+    protein_source_id: str | None = Field(default=None, exclude=True)
+    fat_source_id: str | None = Field(default=None, exclude=True)
+    carbs_source_id: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def validate_values(self) -> PortionNutrition:
+        if all(
+            value is None
+            for value in (self.kcal, self.protein_g, self.fat_g, self.carbs_g)
+        ):
+            raise ValueError("Portion nutrition must contain at least one value")
+        return self
+
+
 class FoodAnalysis(BaseModel):
     is_food: bool
     meal_name: str = Field(
@@ -169,6 +191,7 @@ class FoodAnalysis(BaseModel):
         )
     )
     items: list[FoodItem]
+    portion_nutrition: PortionNutrition | None = None
 
     @model_validator(mode="after")
     def validate_shape(self) -> FoodAnalysis:
@@ -192,6 +215,8 @@ class FoodAnalysis(BaseModel):
         else:
             if self.items:
                 raise ValueError("A non-food response must not contain items")
+            if self.portion_nutrition is not None:
+                raise ValueError("A non-food response must not contain nutrition")
             self.meal_name = ""
         return self
 
@@ -216,6 +241,7 @@ class MealResult(BaseModel):
     fat_g: float | None = Field(default=None, ge=0)
     carbs_g: float | None = Field(default=None, ge=0)
     estimated: bool
+    portion_nutrition: PortionNutrition | None = None
 
 
 class LLMMetadata(BaseModel):
@@ -246,8 +272,6 @@ class SavedMeal(BaseModel):
 
     @model_validator(mode="after")
     def validate_display_name(self) -> SavedMeal:
-        if len(self.base_meal.items) != 1:
-            raise ValueError("A saved meal must contain exactly one item")
         self.display_name = " ".join(self.display_name.split())
         if not self.display_name:
             raise ValueError("Saved meal name cannot be empty")
@@ -342,21 +366,20 @@ def item_calorie_total_estimated(item: CalculatedFoodItem) -> bool:
 
 
 def nutrition_summary(meal: MealResult) -> NutritionSummary:
+    portion = meal.portion_nutrition
     return NutritionSummary(
         kcal=meal.meal_kcal,
         protein_g=meal.protein_g,
         fat_g=meal.fat_g,
         carbs_g=meal.carbs_g,
-        kcal_estimated=any(item_calorie_total_estimated(item) for item in meal.items),
-        protein_estimated=any(
-            item_nutrient_total_estimated(item, "protein") for item in meal.items
-        ),
-        fat_estimated=any(
-            item_nutrient_total_estimated(item, "fat") for item in meal.items
-        ),
-        carbs_estimated=any(
-            item_nutrient_total_estimated(item, "carbs") for item in meal.items
-        ),
+        kcal_estimated=(portion is None or portion.kcal is None)
+        and any(item_calorie_total_estimated(item) for item in meal.items),
+        protein_estimated=(portion is None or portion.protein_g is None)
+        and any(item_nutrient_total_estimated(item, "protein") for item in meal.items),
+        fat_estimated=(portion is None or portion.fat_g is None)
+        and any(item_nutrient_total_estimated(item, "fat") for item in meal.items),
+        carbs_estimated=(portion is None or portion.carbs_g is None)
+        and any(item_nutrient_total_estimated(item, "carbs") for item in meal.items),
     )
 
 
@@ -391,6 +414,19 @@ def calorie_macro_mismatch_percent(item: FoodItem) -> float | None:
     return abs(calculated_kcal - item.kcal_per_100g) / item.kcal_per_100g * 100
 
 
+def meal_calorie_macro_mismatch_percent(meal: MealResult) -> float | None:
+    """Return the kcal-vs-macros difference for the consumed portion."""
+
+    macros = (meal.protein_g, meal.fat_g, meal.carbs_g)
+    if any(value is None for value in macros):
+        return None
+    protein, fat, carbs = (float(value) for value in macros if value is not None)
+    calculated_kcal = protein * 4 + fat * 9 + carbs * 4
+    if meal.meal_kcal == 0:
+        return 0.0 if calculated_kcal == 0 else float("inf")
+    return abs(calculated_kcal - meal.meal_kcal) / meal.meal_kcal * 100
+
+
 def round_meal_nutrition(meal: MealResult) -> MealResult:
     """Return a storage-safe meal whose nutritional values keep tenths."""
 
@@ -415,11 +451,19 @@ def round_meal_nutrition(meal: MealResult) -> MealResult:
         for item in meal.items
     ]
 
-    def item_total(nutrient: str) -> float | None:
-        values = [getattr(item, f"{nutrient}_g") for item in items]
-        if any(value is None for value in values):
-            return None
-        return round_tenth(sum(float(value) for value in values if value is not None))
+    portion = meal.portion_nutrition
+    rounded_portion = (
+        None
+        if portion is None
+        else portion.model_copy(
+            update={
+                "kcal": rounded_optional(portion.kcal),
+                "protein_g": rounded_optional(portion.protein_g),
+                "fat_g": rounded_optional(portion.fat_g),
+                "carbs_g": rounded_optional(portion.carbs_g),
+            }
+        )
+    )
 
     return meal.model_copy(
         update={
@@ -429,7 +473,11 @@ def round_meal_nutrition(meal: MealResult) -> MealResult:
             "fat_per_100g": rounded_optional(meal.fat_per_100g),
             "carbs_per_100g": rounded_optional(meal.carbs_per_100g),
             "meal_kcal": round_tenth(meal.meal_kcal),
-            **{f"{nutrient}_g": item_total(nutrient) for nutrient in nutrient_fields},
+            **{
+                f"{nutrient}_g": rounded_optional(getattr(meal, f"{nutrient}_g"))
+                for nutrient in nutrient_fields
+            },
+            "portion_nutrition": rounded_portion,
         }
     )
 
@@ -466,22 +514,35 @@ def calculate_meal(analysis: FoodAnalysis) -> MealResult:
             )
         )
 
-    def per_100g(nutrient: str) -> float | None:
-        total = macro_totals[nutrient]
+    portion = analysis.portion_nutrition
+    meal_kcal = (
+        total_calories if portion is None or portion.kcal is None else portion.kcal
+    )
+    final_macros = {
+        nutrient: (
+            macro_totals[nutrient]
+            if portion is None or getattr(portion, f"{nutrient}_g") is None
+            else getattr(portion, f"{nutrient}_g")
+        )
+        for nutrient in macro_totals
+    }
+
+    def final_per_100g(nutrient: str) -> float | None:
+        total = final_macros[nutrient]
         return None if total is None else total / total_weight * 100
 
     return MealResult(
         meal_name=analysis.meal_name,
         items=items,
         total_weight_g=total_weight,
-        kcal_per_100g=total_calories / total_weight * 100,
-        meal_kcal=total_calories,
-        protein_per_100g=per_100g("protein"),
-        fat_per_100g=per_100g("fat"),
-        carbs_per_100g=per_100g("carbs"),
-        protein_g=macro_totals["protein"],
-        fat_g=macro_totals["fat"],
-        carbs_g=macro_totals["carbs"],
+        kcal_per_100g=meal_kcal / total_weight * 100,
+        meal_kcal=meal_kcal,
+        protein_per_100g=final_per_100g("protein"),
+        fat_per_100g=final_per_100g("fat"),
+        carbs_per_100g=final_per_100g("carbs"),
+        protein_g=final_macros["protein"],
+        fat_g=final_macros["fat"],
+        carbs_g=final_macros["carbs"],
         estimated=any(
             item.weight_estimated
             or item.kcal_estimated
@@ -490,6 +551,7 @@ def calculate_meal(analysis: FoodAnalysis) -> MealResult:
             or item.carbs_estimated
             for item in analysis.items
         ),
+        portion_nutrition=portion,
     )
 
 
@@ -544,7 +606,24 @@ def scale_meal(
                 }
             )
         )
-    meal_kcal = sum(item.calories for item in items)
+    portion = meal.portion_nutrition
+    scaled_portion = (
+        None
+        if portion is None
+        else portion.model_copy(
+            update={
+                field: (None if value is None else value * ratio)
+                for field in ("kcal", "protein_g", "fat_g", "carbs_g")
+                if (value := getattr(portion, field)) is not None
+            }
+        )
+    )
+    item_kcal = sum(item.calories for item in items)
+    meal_kcal = (
+        item_kcal
+        if scaled_portion is None or scaled_portion.kcal is None
+        else scaled_portion.kcal
+    )
 
     def scaled_total(nutrient: str) -> float | None:
         values = [getattr(item, f"{nutrient}_g") for item in items]
@@ -554,9 +633,15 @@ def scale_meal(
             else sum(value for value in values if value is not None)
         )
 
-    protein_g = scaled_total("protein")
-    fat_g = scaled_total("fat")
-    carbs_g = scaled_total("carbs")
+    def final_total(nutrient: str) -> float | None:
+        portion_total = (
+            None if scaled_portion is None else getattr(scaled_portion, f"{nutrient}_g")
+        )
+        return scaled_total(nutrient) if portion_total is None else portion_total
+
+    protein_g = final_total("protein")
+    fat_g = final_total("fat")
+    carbs_g = final_total("carbs")
     return MealResult(
         meal_name=meal_name or meal.meal_name,
         items=items,
@@ -572,4 +657,5 @@ def scale_meal(
         fat_g=fat_g,
         carbs_g=carbs_g,
         estimated=meal.estimated,
+        portion_nutrition=scaled_portion,
     )

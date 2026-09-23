@@ -6,7 +6,6 @@ import pytest
 
 from calories_bot.bot import (
     CaloriesService,
-    CompositeMealWeightError,
     MealWeightUnchangedError,
     SavedMealNameError,
 )
@@ -15,6 +14,7 @@ from calories_bot.models import (
     FoodItem,
     LLMMetadata,
     MealIconSuggestion,
+    PortionNutrition,
     RecentMeal,
     SavedMeal,
     StoredMeal,
@@ -163,6 +163,18 @@ def test_saved_meal_store_persists_icon() -> None:
 
     assert stored.icon == "🧀"
     assert store._worksheet.rows[1][5] == "🧀"
+
+
+def test_saved_meal_store_accepts_composite_meal() -> None:
+    store = sheet_store([SAVED_MEALS_HEADERS])
+
+    stored = store.append(saved("lunch", 1, "Обід", value=composite_meal(), weight=300))
+
+    assert [item.name for item in stored.base_meal.items] == ["курка", "рис"]
+    assert [item.name for item in store.get("lunch").base_meal.items] == [
+        "курка",
+        "рис",
+    ]
 
 
 def test_saved_meal_store_updates_name_and_default_weight() -> None:
@@ -322,6 +334,33 @@ def test_scale_meal_changes_all_components_without_changing_origins() -> None:
     assert result.items[0].weight_origin == "user_text"
     assert result.items[1].weight_origin == "model_estimate"
     assert result.items[0].portion_display is None
+
+
+def test_scale_meal_scales_authoritative_portion_nutrition() -> None:
+    base = calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name="плов",
+            items=[
+                FoodItem(
+                    name="плов",
+                    weight_g=350,
+                    weight_estimated=False,
+                    kcal_per_100g=100,
+                    kcal_estimated=True,
+                )
+            ],
+            portion_nutrition=PortionNutrition(kcal=620, protein_g=32),
+        )
+    )
+
+    result = scale_meal(base, 700)
+
+    assert result.meal_kcal == 1240
+    assert result.protein_g == 64
+    assert result.portion_nutrition is not None
+    assert result.portion_nutrition.kcal == 1240
+    assert result.portion_nutrition.protein_g == 64
 
 
 class MemorySavedStore:
@@ -595,6 +634,26 @@ def test_reused_saved_meal_scales_without_llm_and_retry_is_idempotent(tmp_path) 
     assert meals.rows[0][2].metadata.model == "saved_meal"
 
 
+def test_composite_meal_can_be_saved_and_reused(monkeypatch, tmp_path) -> None:
+    meals = MemoryMealStore()
+    meals.add_source(1, composite_meal())
+    saved_meals = MemorySavedStore()
+    app = service(tmp_path, meals, saved_meals)
+    monkeypatch.setattr("calories_bot.bot.secrets.token_urlsafe", lambda size: "lunch")
+
+    stored, created = app.save_source_meal(1, DAY)
+    repeated = app.add_saved_meal(
+        "lunch", 600, -123, datetime(2026, 8, 9, 12, tzinfo=UTC)
+    )
+
+    assert created is True
+    assert stored is not None and len(stored.base_meal.items) == 2
+    assert repeated is not None
+    assert repeated.can_save is False
+    assert meals.rows[-1][2].meal.total_weight_g == 600
+    assert [item.weight_g for item in meals.rows[-1][2].meal.items] == [200, 400]
+
+
 def test_service_renames_saved_meal_and_changes_its_default_weight(tmp_path) -> None:
     meals = MemoryMealStore()
     saved_meals = MemorySavedStore()
@@ -723,11 +782,18 @@ def test_change_weight_rejects_unchanged_weight_without_updating_store(
     assert meals.rows[0][2].meal.total_weight_g == 50
 
 
-def test_weight_changes_are_rejected_for_composite_meals(tmp_path) -> None:
+def test_weight_changes_scale_composite_meals(tmp_path) -> None:
     meals = MemoryMealStore()
     meals.add_source(1, composite_meal())
     saved_meals = MemorySavedStore()
     app = service(tmp_path, meals, saved_meals)
 
-    with pytest.raises(CompositeMealWeightError):
-        app.change_meal_weight(1, DAY, 500)
+    result = app.change_meal_weight(1, DAY, 500)
+
+    assert result is not None
+    updated = meals.rows[0][2].meal
+    assert updated.total_weight_g == 500
+    assert [item.weight_g for item in updated.items] == pytest.approx(
+        [500 / 3, 1000 / 3]
+    )
+    assert updated.meal_kcal == 666.7

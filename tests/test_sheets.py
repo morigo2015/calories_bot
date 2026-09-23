@@ -10,6 +10,7 @@ from calories_bot.models import (
     FoodItem,
     LLMMetadata,
     NutritionSummary,
+    PortionNutrition,
     calculate_meal,
     format_simple_meal_request,
     scale_meal,
@@ -515,7 +516,7 @@ def test_append_keeps_tenths_for_all_nutrition() -> None:
     assert saved.meal.protein_g == 0.4
     assert saved.meal.fat_g == 0.4
     assert saved.meal.carbs_g == 3.4
-    stored_item = json.loads(store._worksheet.rows[1][10])[0]
+    stored_item = json.loads(store._worksheet.rows[1][10])["items"][0]
     assert stored_item["kcal_per_100g"] == 123.4
     assert stored_item["protein_per_100g"] == 1.2
     assert stored_item["fat_per_100g"] == 1.2
@@ -524,6 +525,51 @@ def test_append_keeps_tenths_for_all_nutrition() -> None:
     assert stored_item["protein_g"] == 0.4
     assert stored_item["fat_g"] == 0.4
     assert stored_item["carbs_g"] == 3.4
+
+
+def test_append_round_trips_whole_portion_nutrition() -> None:
+    meal = calculate_meal(
+        FoodAnalysis(
+            is_food=True,
+            meal_name="плов",
+            items=[
+                FoodItem(
+                    name="плов",
+                    weight_g=350,
+                    weight_estimated=False,
+                    kcal_per_100g=100,
+                    kcal_estimated=True,
+                    protein_per_100g=1,
+                    fat_per_100g=1,
+                    carbs_per_100g=1,
+                )
+            ],
+            portion_nutrition=PortionNutrition(
+                kcal=620,
+                protein_g=32,
+                fat_g=18,
+                carbs_g=82,
+            ),
+        )
+    )
+    store = build_store([HEADERS])
+
+    store.append_meal(
+        datetime(2026, 8, 2, 12, tzinfo=TZ),
+        42,
+        "плов",
+        "плов",
+        None,
+        meal,
+        METADATA,
+    )
+    restored = store.get_meal(datetime(2026, 8, 2).date(), 42)
+
+    assert restored is not None
+    assert restored.meal.meal_kcal == 620
+    assert restored.meal.protein_g == 32
+    assert restored.meal.portion_nutrition is not None
+    assert restored.meal.portion_nutrition.carbs_g == 82
 
 
 def test_append_allows_blank_photo_usage_and_cost() -> None:

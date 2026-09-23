@@ -34,10 +34,13 @@ Rules:
   is supplied.
 - Keep food items in the same order as they appear in the message.
 - Explicit source IDs are authoritative. Assign each ID to the nearest food
-  item and to the matching field.
+  item and to the matching field, except nutrition explicitly stated for the
+  whole meal. Assign whole-meal kcal and macros to portion_nutrition instead.
 - Every explicit source ID must be used exactly once.
-- A plain number without an explicit source ID is part of the description,
-  for example "2 яйця" or "піца 30 см".
+- Interpret plain numbers from context. They may describe an informal gram
+  amount, a count such as "2 яйця", or another measure such as "піца 30 см".
+  Never invent an explicit source ID for them. If a plain number is used as a
+  weight, keep weight_source_id=null and weight_estimated=true.
 - Weight is mandatory for every food item. Always return weight_g in grams.
   Never omit it, return null, or substitute a household measure without grams.
 - If weight is absent, estimate the grams for the described consumed portion and
@@ -50,9 +53,13 @@ Rules:
   present. Estimate every missing nutrient separately. Set its estimated flag,
   origin, and source ID by the same rules as kcal.
 - Preserve decimal nutrition values from text and labels; do not round them.
-- Compact К/Б/Ж/В source values and natural values "на 100 г" are per 100 g.
-  Values explicitly described as being for a portion or package apply to that
-  consumed portion; the application converts them to per-100-g density.
+- Canonical values marked "/100г" are per 100 g. Values marked "/порцію"
+  apply to the consumed portion. When portion values describe the entire meal,
+  put only the explicitly supplied values and their source IDs in
+  portion_nutrition. Never calculate or invent portion_nutrition totals.
+- Values for one named item's own portion may remain on that item. Values
+  introduced by words such as "разом", "всього", "загалом" or "на всю
+  порцію" describe the whole meal and must use portion_nutrition.
 - For supplied values, set the matching estimated flag to false and return
   its source ID. The application will set the origin to user_text.
 - On a nutrition-label photo, try to read kcal, protein, fat, and carbohydrates,
@@ -71,6 +78,9 @@ Rules:
 Examples:
 - "сир 150 г" -> one item; assign the weight source and estimate kcal/100g.
 - "сир 150 г, 120 ккал/100 г" -> assign both authoritative sources.
+- "айран 100 г плюс протеїн 25 г" -> two items in one meal.
+- "плов 350 г, на всю порцію К620 Б32 Ж18 В82" -> one item and
+  portion_nutrition with the four authoritative portion source IDs.
 - "два яйця і бутерброд" -> two named items with estimated missing nutrition.
 - "зїв рис курку і салат салата небагато" -> three items: rice, chicken,
   and salad; the repeated word does not create a fourth item.
@@ -96,6 +106,10 @@ class AnalysisError(RuntimeError):
 
 class InputFormatError(ValueError):
     """Raised when deterministic input normalization rejects a message."""
+
+
+class NutritionBasisRequired(InputFormatError):
+    """Raised when supplied nutrition needs a per-100-g or portion basis."""
 
 
 class TranscriptionError(RuntimeError):
@@ -253,6 +267,7 @@ _CANONICAL_PORTION_KCAL = re.compile(
 )
 _PLAIN_KCAL = re.compile(
     rf"(?<!\w)(?P<value>{_NUMBER})\s*{_KCAL_UNIT}(?!\w)"
+    rf"(?!\s*/\s*порц\w*)"
     rf"(?!\s*(?:/|на|за)\s*(?:100|сто))",
     re.IGNORECASE,
 )
@@ -290,14 +305,19 @@ _PER_100_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _PORTION_CONTEXT = re.compile(
-    r"(?:у|в|на)\s+(?:цій\s+|одній\s+)?(?:порці\w*|упаковц\w*)",
+    r"(?:"
+    r"(?:у|в|на|за|для)\s+(?:цій\s+|одній\s+)?(?:порці\w*|упаковц\w*)"
+    r"|(?:на|за)\s+(?:всю|цілу)\s+(?:порці\w*|страв\w*|таріл\w*|упаков\w*)"
+    r"|\b(?:всього|разом|загалом|усього)\b"
+    r")",
     re.IGNORECASE,
 )
 
 
-def _nearby_basis_context(text: str, start: int) -> str:
-    before = text[:start]
-    return re.split(r"[,;\n]", before)[-1]
+def _nearby_basis_context(text: str, start: int, end: int | None = None) -> str:
+    before = re.split(r"[,;\n]", text[:start])[-1]
+    after = re.split(r"[,;\n]", text[end if end is not None else start :])[0]
+    return before + " " + after
 
 
 _EXPLICIT_WEIGHT = re.compile(
@@ -469,12 +489,32 @@ def _placeholder(index: int) -> str:
     return f"\ue000{letters}\ue001"
 
 
-def normalize_input(text: str) -> NormalizedInput:
+def normalize_input(
+    text: str,
+    *,
+    nutrition_basis: Literal["per_100g", "portion"] | None = None,
+) -> NormalizedInput:
     original_text = text
     normalized = text.strip()
     if not normalized:
         raise InputFormatError("Message is empty")
     normalized = _SPOKEN_NUMBER.sub(_replace_spoken_number, normalized)
+
+    has_explicit_basis = bool(
+        _TEXT_KCAL.search(normalized)
+        or _PER_100_PREFIX.search(normalized)
+        or _PORTION_CONTEXT.search(normalized)
+    )
+    has_ambiguous_natural_nutrition = bool(
+        _PLAIN_KCAL.search(normalized)
+        or any(pattern.search(normalized) for pattern in _NATURAL_MACROS.values())
+    )
+    if (
+        nutrition_basis is None
+        and not has_explicit_basis
+        and has_ambiguous_natural_nutrition
+    ):
+        raise NutritionBasisRequired("Nutrition basis is ambiguous")
 
     def replace_hash(match: re.Match[str]) -> str:
         value = _nonnegative_number(
@@ -501,7 +541,13 @@ def normalize_input(text: str) -> NormalizedInput:
         marker = match.group("marker").casefold()
         _kind, label = compact_labels[marker]
         value = _nonnegative_number(match.group("value"), label)
-        return f"{_plain_decimal(value)} {label}/100г"
+        context = _nearby_basis_context(normalized, match.start(), match.end())
+        basis = (
+            "порцію"
+            if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+            else "100г"
+        )
+        return f"{_plain_decimal(value)} {label}/{basis}"
 
     normalized = _COMPACT_NUTRIENT.sub(replace_compact, normalized)
 
@@ -512,11 +558,14 @@ def normalize_input(text: str) -> NormalizedInput:
     normalized = _TEXT_KCAL.sub(replace_text_kcal, normalized)
 
     def replace_portion_kcal(match: re.Match[str]) -> str:
-        context = _nearby_basis_context(normalized, match.start())
-        if not _PORTION_CONTEXT.search(context):
-            return match.group(0)
+        context = _nearby_basis_context(normalized, match.start(), match.end())
         value = _nonnegative_number(match.group("value"), "Calories")
-        return f"{_plain_decimal(value)} ккал/порцію"
+        basis = (
+            "порцію"
+            if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+            else "100г"
+        )
+        return f"{_plain_decimal(value)} ккал/{basis}"
 
     normalized = _PLAIN_KCAL.sub(replace_portion_kcal, normalized)
 
@@ -538,8 +587,12 @@ def normalize_input(text: str) -> NormalizedInput:
             source_text: str = normalized,
         ) -> str:
             value = _nonnegative_number(match.group("value"), nutrient_label)
-            context = _nearby_basis_context(source_text, match.start())
-            basis = "порцію" if _PORTION_CONTEXT.search(context) else "100г"
+            context = _nearby_basis_context(source_text, match.start(), match.end())
+            basis = (
+                "порцію"
+                if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+                else "100г"
+            )
             return f"{_plain_decimal(value)} г {nutrient_label}/{basis}"
 
         normalized = pattern.sub(replace_natural_macro, normalized)
@@ -662,6 +715,35 @@ def enforce_explicit_values(
     sources = {source.source_id: source for source in explicit_values}
     used: set[str] = set()
     items = [item.model_copy(deep=True) for item in analysis.items]
+    portion = (
+        None
+        if analysis.portion_nutrition is None
+        else analysis.portion_nutrition.model_copy(deep=True)
+    )
+
+    if portion is not None:
+        portion_assignments = (
+            ("kcal", "kcal", portion.kcal_source_id),
+            ("protein", "protein_g", portion.protein_source_id),
+            ("fat", "fat_g", portion.fat_source_id),
+            ("carbs", "carbs_g", portion.carbs_source_id),
+        )
+        for kind, field, source_id in portion_assignments:
+            if source_id is None:
+                if getattr(portion, field) is not None:
+                    raise AnalysisError(
+                        f"Portion {kind} value has no explicit source ID"
+                    )
+                continue
+            source = sources.get(source_id)
+            if source is None or source.kind != kind or source.basis != "portion":
+                raise AnalysisError(f"Invalid portion source ID: {source_id}")
+            if source_id in used:
+                raise AnalysisError(
+                    f"Explicit source ID was used more than once: {source_id}"
+                )
+            used.add(source_id)
+            setattr(portion, field, source.value)
 
     for item in items:
         assignments = (
@@ -740,7 +822,38 @@ def enforce_explicit_values(
             "The model did not assign every explicit source ID: "
             + ", ".join(sorted(missing))
         )
-    return FoodAnalysis(is_food=True, meal_name=analysis.meal_name, items=items)
+    return FoodAnalysis(
+        is_food=True,
+        meal_name=analysis.meal_name,
+        items=items,
+        portion_nutrition=portion,
+    )
+
+
+def _food_analysis_cache_json(analysis: FoodAnalysis) -> str:
+    """Serialize analysis with transient source IDs needed for re-validation."""
+
+    data = analysis.model_dump()
+    item_source_fields = (
+        "weight_source_id",
+        "kcal_source_id",
+        "protein_source_id",
+        "fat_source_id",
+        "carbs_source_id",
+    )
+    for item_data, item in zip(data["items"], analysis.items, strict=True):
+        item_data.update({field: getattr(item, field) for field in item_source_fields})
+    if analysis.portion_nutrition is not None:
+        portion_data = data["portion_nutrition"]
+        assert isinstance(portion_data, dict)
+        for field in (
+            "kcal_source_id",
+            "protein_source_id",
+            "fat_source_id",
+            "carbs_source_id",
+        ):
+            portion_data[field] = getattr(analysis.portion_nutrition, field)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
 def apply_household_portions(
@@ -772,7 +885,12 @@ def apply_household_portions(
             item.weight_estimated = True
             item.weight_origin = "deterministic_reference"
         available.remove(match_index)
-    return FoodAnalysis(is_food=True, meal_name=analysis.meal_name, items=items)
+    return FoodAnalysis(
+        is_food=True,
+        meal_name=analysis.meal_name,
+        items=items,
+        portion_nutrition=analysis.portion_nutrition,
+    )
 
 
 def calculate_llm_cost(
@@ -969,7 +1087,7 @@ class OpenAIAnalyzer:
             if cache is not None:
                 try:
                     cache.store_cached_llm_response(
-                        operation, cache_key, parsed.model_dump_json()
+                        operation, cache_key, _food_analysis_cache_json(parsed)
                     )
                 except Exception:
                     LOGGER.exception("Could not cache OpenAI food analysis")

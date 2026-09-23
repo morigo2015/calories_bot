@@ -225,37 +225,42 @@ def _date_from_sheet_serial(value: object) -> date:
 
 def _meal_from_row(row: list[object]) -> StoredMeal:
     padded = row + [""] * (len(HEADERS) - len(row))
-    items_data = json.loads(str(padded[ITEMS_JSON_COLUMN]))
-    items = [CalculatedFoodItem.model_validate(item) for item in items_data]
+    stored_data = json.loads(str(padded[ITEMS_JSON_COLUMN]))
+    if isinstance(stored_data, dict):
+        meal = MealResult.model_validate(stored_data)
+    else:
+        items = [CalculatedFoodItem.model_validate(item) for item in stored_data]
 
-    def total_for(nutrient: str) -> float | None:
-        values = [getattr(item, f"{nutrient}_g") for item in items]
-        return (
-            None
-            if any(value is None for value in values)
-            else sum(value for value in values if value is not None)
+        def total_for(nutrient: str) -> float | None:
+            values = [getattr(item, f"{nutrient}_g") for item in items]
+            return (
+                None
+                if any(value is None for value in values)
+                else sum(value for value in values if value is not None)
+            )
+
+        protein_g = total_for("protein")
+        fat_g = total_for("fat")
+        carbs_g = total_for("carbs")
+        total_weight_g = float(str(padded[TOTAL_WEIGHT_COLUMN]))
+        meal = MealResult(
+            meal_name=str(padded[MEAL_NAME_COLUMN]),
+            items=items,
+            total_weight_g=total_weight_g,
+            kcal_per_100g=float(str(padded[KCAL_PER_100G_COLUMN])),
+            meal_kcal=float(str(padded[MEAL_KCAL_COLUMN])),
+            protein_per_100g=(
+                None if protein_g is None else protein_g / total_weight_g * 100
+            ),
+            fat_per_100g=None if fat_g is None else fat_g / total_weight_g * 100,
+            carbs_per_100g=(
+                None if carbs_g is None else carbs_g / total_weight_g * 100
+            ),
+            protein_g=protein_g,
+            fat_g=fat_g,
+            carbs_g=carbs_g,
+            estimated=_parse_bool(padded[ESTIMATED_COLUMN]),
         )
-
-    protein_g = total_for("protein")
-    fat_g = total_for("fat")
-    carbs_g = total_for("carbs")
-    total_weight_g = float(str(padded[TOTAL_WEIGHT_COLUMN]))
-    meal = MealResult(
-        meal_name=str(padded[MEAL_NAME_COLUMN]),
-        items=items,
-        total_weight_g=total_weight_g,
-        kcal_per_100g=float(str(padded[KCAL_PER_100G_COLUMN])),
-        meal_kcal=float(str(padded[MEAL_KCAL_COLUMN])),
-        protein_per_100g=(
-            None if protein_g is None else protein_g / total_weight_g * 100
-        ),
-        fat_per_100g=None if fat_g is None else fat_g / total_weight_g * 100,
-        carbs_per_100g=(None if carbs_g is None else carbs_g / total_weight_g * 100),
-        protein_g=protein_g,
-        fat_g=fat_g,
-        carbs_g=carbs_g,
-        estimated=_parse_bool(padded[ESTIMATED_COLUMN]),
-    )
     metadata = LLMMetadata(
         model=str(padded[MODEL_COLUMN]),
         effort=str(padded[EFFORT_COLUMN]),
@@ -272,17 +277,9 @@ def _meal_from_row(row: list[object]) -> StoredMeal:
 
 
 def _persisted_meals_equal(left: MealResult, right: MealResult) -> bool:
-    """Compare only fields represented directly in the worksheet row."""
+    """Compare the complete meal payload persisted in the worksheet row."""
 
-    return (
-        left.meal_name == right.meal_name
-        and left.total_weight_g == right.total_weight_g
-        and left.meal_kcal == right.meal_kcal
-        and left.kcal_per_100g == right.kcal_per_100g
-        and left.estimated == right.estimated
-        and [item.model_dump() for item in left.items]
-        == [item.model_dump() for item in right.items]
-    )
+    return left.model_dump() == right.model_dump()
 
 
 class GoogleSheetsStore:
@@ -598,7 +595,7 @@ class GoogleSheetsStore:
         except (TypeError, ValueError):
             accounting_day = day
         items_json = json.dumps(
-            [item.model_dump() for item in meal.items],
+            meal.model_dump(),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -850,7 +847,7 @@ class GoogleSheetsStore:
     ) -> StoredMeal:
         meal = round_meal_nutrition(meal)
         items_json = json.dumps(
-            [item.model_dump() for item in meal.items],
+            meal.model_dump(),
             ensure_ascii=False,
             separators=(",", ":"),
         )

@@ -10,6 +10,7 @@ from calories_bot.analyzer import (
     InputFormatError,
     ModelPricing,
     NormalizedInput,
+    NutritionBasisRequired,
     OpenAIAnalyzer,
     OpenAITranscriber,
     TranscriptionError,
@@ -22,6 +23,7 @@ from calories_bot.models import (
     FoodAnalysis,
     FoodItem,
     MealIconSuggestion,
+    PortionNutrition,
     calculate_meal,
     round_whole,
 )
@@ -329,6 +331,62 @@ def test_compact_kbjv_accepts_spaces_middle_dot_and_keeps_decimals() -> None:
     ]
 
 
+def test_compact_kbjv_supports_explicit_whole_portion_basis() -> None:
+    normalized = normalize_input("плов 350 г, на всю порцію К620 Б32 Ж18 В82")
+
+    assert normalized.text == (
+        "плов 350 гр, на всю порцію 620 ккал/порцію "
+        "32 г білків/порцію 18 г жирів/порцію 82 г вуглеводів/порцію"
+    )
+    assert [value.basis for value in normalized.explicit_values] == [
+        None,
+        "portion",
+        "portion",
+        "portion",
+        "portion",
+    ]
+
+
+def test_whole_portion_kbjv_override_component_estimates() -> None:
+    normalized = normalize_input("плов 350 г, на всю порцію К620 Б32 Ж18 В82")
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="плов",
+        items=[
+            FoodItem(
+                name="плов",
+                weight_g=1,
+                weight_estimated=True,
+                kcal_per_100g=100,
+                kcal_estimated=True,
+                protein_per_100g=1,
+                fat_per_100g=1,
+                carbs_per_100g=1,
+                weight_source_id="W1",
+            )
+        ],
+        portion_nutrition=PortionNutrition(
+            kcal=1,
+            protein_g=1,
+            fat_g=1,
+            carbs_g=1,
+            kcal_source_id="K1",
+            protein_source_id="P1",
+            fat_source_id="F1",
+            carbs_source_id="C1",
+        ),
+    )
+
+    meal = calculate_meal(enforce_explicit_values(analysis, normalized.explicit_values))
+
+    assert meal.total_weight_g == 350
+    assert meal.meal_kcal == 620
+    assert meal.protein_g == 32
+    assert meal.fat_g == 18
+    assert meal.carbs_g == 82
+    assert meal.kcal_per_100g == pytest.approx(177.142857)
+
+
 def test_decimal_kbjv_accepts_comma_and_dot_but_weight_stays_whole() -> None:
     normalized = normalize_input(
         "йогурт 150 г, 72,5 ккал/100 г, білки 4,2, жири 2.5, вуглеводи 8,1"
@@ -359,6 +417,34 @@ def test_natural_macros_support_per_100g_and_portion_basis() -> None:
         "portion",
         "portion",
         "portion",
+    ]
+
+
+@pytest.mark.parametrize("context", ["на порцію", "за порцію", "для порції"])
+def test_natural_calories_accept_common_portion_phrases(context: str) -> None:
+    normalized = normalize_input(f"плов 350 г, {context} 620 ккал")
+
+    assert normalized.explicit_values[-1].basis == "portion"
+
+
+def test_natural_nutrition_without_basis_requests_clarification() -> None:
+    with pytest.raises(NutritionBasisRequired):
+        normalize_input("плов 350 г, 620 ккал, білки 32, жири 18, вуглеводи 82")
+
+
+@pytest.mark.parametrize("basis", ["per_100g", "portion"])
+def test_selected_basis_applies_to_ambiguous_natural_nutrition(basis: str) -> None:
+    normalized = normalize_input(
+        "плов 350 г, 620 ккал, білки 32, жири 18, вуглеводи 82",
+        nutrition_basis=basis,
+    )
+
+    assert [value.basis for value in normalized.explicit_values] == [
+        None,
+        basis,
+        basis,
+        basis,
+        basis,
     ]
 
 
@@ -716,6 +802,57 @@ def test_openai_analyzer_reuses_local_cache() -> None:
     assert first.analysis == second.analysis == parsed
     assert len(calls) == 1
     assert second.metadata.input_tokens is None
+
+
+def test_openai_analyzer_cache_preserves_explicit_source_assignments() -> None:
+    calls = []
+    values = {}
+    normalized = normalize_input("сир 50 г К120")
+    parsed = FoodAnalysis(
+        is_food=True,
+        meal_name="сир",
+        items=[
+            FoodItem(
+                name="сир",
+                weight_g=1,
+                weight_estimated=True,
+                kcal_per_100g=1,
+                kcal_estimated=True,
+                weight_source_id="W1",
+                kcal_source_id="K1",
+            )
+        ],
+    )
+
+    class Cache:
+        def get_cached_llm_response(self, operation, cache_key):
+            return values.get((operation, cache_key))
+
+        def store_cached_llm_response(self, operation, cache_key, response_json):
+            values[(operation, cache_key)] = response_json
+
+    analyzer = OpenAIAnalyzer.__new__(OpenAIAnalyzer)
+    analyzer._client = SimpleNamespace(
+        responses=SimpleNamespace(
+            parse=lambda **kwargs: (
+                calls.append(kwargs)
+                or SimpleNamespace(output_parsed=parsed, usage=None)
+            )
+        )
+    )
+    analyzer._model = "test-model"
+    analyzer._effort = "none"
+    analyzer._pricing = ModelPricing(None, None, None)
+    analyzer._usage_recorder = None
+    analyzer._response_cache = Cache()
+
+    first = analyzer.analyze(normalized)
+    second = analyzer.analyze(normalized)
+
+    assert first.analysis.items[0].weight_g == 50
+    assert second.analysis.items[0].weight_g == 50
+    assert second.analysis.items[0].kcal_per_100g == 120
+    assert len(calls) == 1
 
 
 def test_openai_analyzer_sends_text_and_base64_photo() -> None:

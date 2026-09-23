@@ -27,6 +27,7 @@ from .analyzer import (
     Analyzer,
     InputFormatError,
     NormalizedInput,
+    NutritionBasisRequired,
     Transcriber,
     TranscriptionError,
     normalize_input,
@@ -62,6 +63,7 @@ from .models import (
     format_simple_meal_request,
     item_calorie_total_estimated,
     item_nutrient_total_estimated,
+    meal_calorie_macro_mismatch_percent,
     nutrition_summary,
     parse_simple_meal_request,
     round_meal_nutrition,
@@ -143,6 +145,7 @@ GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
 PROTEIN_GOAL_DISABLE_CALLBACK_PREFIX = "protein-goal-disable:"
 GOAL_WAITING_KEY = "awaiting_daily_kcal_goal"
 MEAL_WEIGHT_WAITING_KEY = "awaiting_meal_weight"
+NUTRITION_BASIS_WAITING_KEY = "awaiting_nutrition_basis"
 SAVED_MEAL_EDIT_WAITING_KEY = "awaiting_saved_meal_edit"
 INVITE_WAITING_KEY = "awaiting_invite_name"
 BURN_WAITING_KEY = "awaiting_burned_calories"
@@ -177,10 +180,6 @@ class NotFoodError(ValueError):
 
 class SavedMealNameError(ValueError):
     """Raised when an explicitly chosen saved-meal name is unavailable."""
-
-
-class CompositeMealWeightError(ValueError):
-    """Raised when weight editing is requested for a composite meal."""
 
 
 class MealWeightUnchangedError(ValueError):
@@ -384,6 +383,29 @@ def _format_calorie_warning(item: CalculatedFoodItem, threshold_percent: float) 
     )
 
 
+def _format_meal_calorie_warning(meal: MealResult, threshold_percent: float) -> str:
+    if _is_alcoholic_item(meal.meal_name):
+        return ""
+    mismatch = meal_calorie_macro_mismatch_percent(meal)
+    if mismatch is None or mismatch <= threshold_percent:
+        return ""
+    assert meal.protein_g is not None
+    assert meal.fat_g is not None
+    assert meal.carbs_g is not None
+    calculated = meal.protein_g * 4 + meal.fat_g * 9 + meal.carbs_g * 4
+    mismatch_text = (
+        f"{round_whole(mismatch)}%"
+        if mismatch != float("inf")
+        else f"понад {round_whole(threshold_percent)}%"
+    )
+    return (
+        "<p>⚠️ Ккал не збігаються з БЖВ: "
+        f"вказано {round_whole(meal.meal_kcal)} кк, "
+        f"за формулою — {round_whole(calculated)} кк "
+        f"({mismatch_text}).</p>"
+    )
+
+
 _ALCOHOL_PATTERN = re.compile(
     r"(?:\b(?:алкогол\w*|вино|вина|вином|вині|wine|пиво|пива|пивом|beer|"
     r"горіл\w*|водк\w*|текіл\w*|tequila|чач\w*|віскі|виски|whisk(?:e)?y|"
@@ -561,6 +583,37 @@ def format_daily_total(
 
 
 def format_reply(meal: MealResult, mismatch_threshold_percent: float = 20.0) -> str:
+    if meal.portion_nutrition is not None:
+        meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
+        weight_prefix = (
+            "≈" if any(item.weight_origin != "user_text" for item in meal.items) else ""
+        )
+        body = [
+            f"<h3>{meal_name} {weight_prefix}{round_whole(meal.total_weight_g)} г</h3>",
+            f"<details><summary>{_format_icon_nutrition(nutrition_summary(meal))}</summary>",
+            "<p><sub>На 100 г:</sub><br/>",
+            _format_icon_nutrition(
+                NutritionSummary(
+                    kcal=meal.kcal_per_100g,
+                    protein_g=meal.protein_per_100g,
+                    fat_g=meal.fat_per_100g,
+                    carbs_g=meal.carbs_per_100g,
+                )
+            ),
+            "</p></details>",
+            "<p><sub>Вказані показники усієї порції враховано "
+            "з повідомлення.</sub></p>",
+        ]
+        if len(meal.items) > 1:
+            components = "<br/>".join(
+                f"{html.escape(item.name[:1].upper() + item.name[1:])} "
+                f"{'≈' if item.weight_origin != 'user_text' else ''}"
+                f"{round_whole(item.weight_g)} г"
+                for item in meal.items
+            )
+            body.append(f"<p><sub>Склад:</sub><br/>{components}</p>")
+        body.append(_format_meal_calorie_warning(meal, mismatch_threshold_percent))
+        return "".join(body)
     if len(meal.items) > 1:
         meal_name = html.escape(meal.meal_name[:1].upper() + meal.meal_name[1:])
         calculations = [
@@ -1424,42 +1477,6 @@ class CaloriesService:
         )
 
     @staticmethod
-    def _component_message_id(source_message_id: int, component_index: int) -> int:
-        if component_index == 0:
-            return source_message_id
-        raw = hashlib.sha256(
-            f"meal-component:{source_message_id}:{component_index}".encode()
-        ).digest()
-        value = int.from_bytes(raw[:7], "big") & ((1 << 52) - 1)
-        return -(value or component_index)
-
-    @staticmethod
-    def _single_item_meals(meal: MealResult) -> list[MealResult]:
-        return [
-            MealResult(
-                meal_name=item.name,
-                items=[item],
-                total_weight_g=item.weight_g,
-                kcal_per_100g=item.kcal_per_100g,
-                meal_kcal=item.calories,
-                protein_per_100g=item.protein_per_100g,
-                fat_per_100g=item.fat_per_100g,
-                carbs_per_100g=item.carbs_per_100g,
-                protein_g=item.protein_g,
-                fat_g=item.fat_g,
-                carbs_g=item.carbs_g,
-                estimated=(
-                    item.weight_estimated
-                    or item.kcal_estimated
-                    or item.protein_estimated
-                    or item.fat_estimated
-                    or item.carbs_estimated
-                ),
-            )
-            for item in meal.items
-        ]
-
-    @staticmethod
     def _reply_collection(replies: list[MealReply]) -> MealReply | list[MealReply]:
         return replies[0] if len(replies) == 1 else replies
 
@@ -1482,7 +1499,6 @@ class CaloriesService:
                 ),
                 telegram_message_id=source_message_id,
                 accounting_day=day,
-                can_change_weight=len(first.meal.items) == 1,
                 daily_total_text=daily_summary,
             )
         components = self._store.get_component_meals(day, source_message_id)
@@ -1524,6 +1540,8 @@ class CaloriesService:
         telegram_message_id: int,
         timestamp: datetime,
         image_bytes: bytes | None = None,
+        *,
+        nutrition_basis: Literal["per_100g", "portion"] | None = None,
     ) -> MealReply | list[MealReply]:
         timestamp = self._local_timestamp(timestamp)
         day = self._accounting_day(timestamp)
@@ -1539,7 +1557,7 @@ class CaloriesService:
                     return existing_reply
 
         normalized = (
-            normalize_input(text)
+            normalize_input(text, nutrition_basis=nutrition_basis)
             if text.strip()
             else NormalizedInput(text="", explicit_values=())
         )
@@ -1549,7 +1567,7 @@ class CaloriesService:
         result = self._analyzer.analyze(normalized, image_bytes)
         if not result.analysis.is_food:
             raise NotFoodError
-        meals = self._single_item_meals(calculate_meal(result.analysis))
+        meal = calculate_meal(result.analysis)
         with self._store_lock:
             # Refresh after analysis: a deletion may have completed while the
             # model was working, so the earlier daily total is no longer valid.
@@ -1571,78 +1589,37 @@ class CaloriesService:
                 )
                 photo_file.write_bytes(image_bytes)
                 photo_path = str(photo_file)
-            existing_components: dict[int, tuple[int, StoredMeal]] = {}
-            if state.existing is not None:
-                for message_id, stored in self._store.get_component_meals(
-                    day, telegram_message_id
-                ):
-                    marker = parse_simple_meal_request(stored.normalized_request)
-                    if marker is not None:
-                        existing_components[marker.component_index] = (
-                            message_id,
-                            stored,
-                        )
-            stored_components: list[tuple[int, StoredMeal]] = []
             try:
-                for index, meal in enumerate(meals):
-                    existing = existing_components.get(index)
-                    if existing is not None:
-                        stored_components.append(existing)
-                        continue
-                    component_message_id = self._component_message_id(
-                        telegram_message_id, index
-                    )
-                    stored = self._store.append_meal(
-                        timestamp,
-                        component_message_id,
-                        text,
-                        format_simple_meal_request(
-                            telegram_message_id,
-                            index,
-                            len(meals),
-                            "analysis",
-                            normalized.text,
-                        ),
-                        photo_path,
-                        round_meal_nutrition(meal),
-                        (
-                            result.metadata
-                            if index == 0
-                            else LLMMetadata(
-                                model=result.metadata.model,
-                                effort=result.metadata.effort,
-                            )
-                        ),
-                    )
-                    stored_components.append((component_message_id, stored))
+                stored = self._store.append_meal(
+                    timestamp,
+                    telegram_message_id,
+                    text,
+                    format_simple_meal_request(
+                        telegram_message_id,
+                        0,
+                        1,
+                        "analysis",
+                        normalized.text,
+                    ),
+                    photo_path,
+                    round_meal_nutrition(meal),
+                    result.metadata,
+                )
             except SheetsWriteUncertainError:
                 raise
-            except SheetsWriteError as exc:
-                if photo_path is not None and not stored_components:
+            except SheetsWriteError:
+                if photo_path is not None:
                     self._delete_photo(photo_path)
-                if stored_components:
-                    raise SheetsWriteUncertainError(
-                        "Only part of the component meal was stored"
-                    ) from exc
                 raise
             daily_summary = self._format_day_summary(day)
-            replies = []
-            for index, (component_message_id, stored) in enumerate(stored_components):
-                replies.append(
-                    MealReply(
-                        text=format_reply(
-                            stored.meal, self._nutrition_mismatch_threshold_percent
-                        ),
-                        telegram_message_id=component_message_id,
-                        accounting_day=day,
-                        daily_total_text=(
-                            daily_summary
-                            if index == len(stored_components) - 1
-                            else None
-                        ),
-                    )
-                )
-            return self._reply_collection(replies)
+            return MealReply(
+                text=format_reply(
+                    stored.meal, self._nutrition_mismatch_threshold_percent
+                ),
+                telegram_message_id=telegram_message_id,
+                accounting_day=day,
+                daily_total_text=daily_summary,
+            )
 
     def _saved(self) -> SavedMealStore:
         if self._saved_store is None:
@@ -1804,7 +1781,6 @@ class CaloriesService:
             telegram_message_id=event_id,
             accounting_day=day,
             can_save=can_save,
-            can_change_weight=len(stored.meal.items) == 1,
             daily_total_text=daily_summary,
         )
 
@@ -1868,8 +1844,6 @@ class CaloriesService:
             source = self._store.get_meal(day, message_id)
             if source is None:
                 return None
-            if len(source.meal.items) != 1:
-                raise CompositeMealWeightError
             if round_whole(source.meal.total_weight_g) == weight_g:
                 raise MealWeightUnchangedError(weight_g)
             updated = self._store.update_meal(
@@ -2442,6 +2416,7 @@ class TelegramHandlers:
         state = cls._user_state(context)
         state.pop(GOAL_WAITING_KEY, None)
         state.pop(MEAL_WEIGHT_WAITING_KEY, None)
+        state.pop(NUTRITION_BASIS_WAITING_KEY, None)
         state.pop(SAVED_MEAL_EDIT_WAITING_KEY, None)
         state.pop(INVITE_WAITING_KEY, None)
         state.pop(BURN_WAITING_KEY, None)
@@ -3838,12 +3813,79 @@ class TelegramHandlers:
                             telegram_message_id=message_id,
                             accounting_day=day,
                             can_save=False,
-                            can_change_weight=len(saved.base_meal.items) == 1,
                         )
                     )
                 )
             except Exception:
                 LOGGER.warning("Could not hide saved-meal button", exc_info=True)
+
+    async def nutrition_basis_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        state = self._user_state(context).get(NUTRITION_BASIS_WAITING_KEY)
+        basis_raw = (query.data or "").removeprefix("nutrition-basis:")
+        if not isinstance(state, dict) or basis_raw not in {"per_100g", "portion"}:
+            await query.answer("Це уточнення вже неактуальне.", show_alert=True)
+            return
+        if not isinstance(query.message, Message):
+            await query.answer("Це повідомлення вже недоступне.", show_alert=True)
+            return
+        try:
+            text = str(state["text"])
+            message_id = int(state["message_id"])
+            timestamp = datetime.fromisoformat(str(state["timestamp"]))
+            image_value = state.get("image_bytes")
+            image_bytes = bytes(image_value) if image_value is not None else None
+        except (KeyError, TypeError, ValueError):
+            self._clear_pending_input(context)
+            await query.answer("Не вдалося відновити опис страви.", show_alert=True)
+            return
+
+        self._clear_pending_input(context)
+        await query.answer()
+        basis = cast(Literal["per_100g", "portion"], basis_raw)
+        try:
+            async with self._temporary_status(query.message, llm=True):
+                result = await asyncio.to_thread(
+                    service.process_message,
+                    text,
+                    message_id,
+                    timestamp,
+                    image_bytes,
+                    nutrition_basis=basis,
+                )
+        except NotFoodError:
+            reply = PHOTO_NOT_FOOD_TEXT if image_bytes is not None else NOT_FOOD_TEXT
+        except InputFormatError:
+            reply = FORMAT_ERROR_TEXT
+        except SheetsReadError:
+            LOGGER.exception("Could not read the calorie log after clarification")
+            reply = READ_ERROR_TEXT
+        except SheetsWriteUncertainError:
+            LOGGER.exception("Could not verify the clarified calorie log write")
+            reply = UNCERTAIN_WRITE_TEXT
+        except SheetsWriteError:
+            LOGGER.exception("Could not write the clarified calorie log")
+            reply = WRITE_ERROR_TEXT
+        except AnalysisError:
+            LOGGER.exception("Could not analyze clarified food input")
+            reply = ANALYSIS_ERROR_TEXT
+        except Exception:
+            LOGGER.exception("Unexpected error after nutrition-basis clarification")
+            reply = ANALYSIS_ERROR_TEXT
+        else:
+            label = "усієї порції" if basis == "portion" else "100 г"
+            with suppress(Exception):
+                await query.edit_message_text(f"КБЖВ для {label} ✓")
+            await self._send_meal_replies(query.message, result, context, service)
+            return
+        await query.edit_message_text(reply, reply_markup=None)
 
     async def meal_weight_callback(
         self,
@@ -3871,12 +3913,6 @@ class TelegramHandlers:
             return
         if source is None:
             await query.answer("Цього запису вже немає.", show_alert=True)
-            return
-        if len(source.meal.items) != 1:
-            await query.answer(
-                "Змінити вагу можна лише для страви з одного компонента.",
-                show_alert=True,
-            )
             return
         if not isinstance(query.message, Message):
             await query.answer("Це повідомлення вже недоступне.", show_alert=True)
@@ -4394,6 +4430,12 @@ class TelegramHandlers:
                 update, context, service, saved_meal_edit_state, message.text
             )
             return
+        nutrition_basis_state = self._user_state(context).get(
+            NUTRITION_BASIS_WAITING_KEY
+        )
+        if isinstance(nutrition_basis_state, dict):
+            await self._remove_waiting_prompt_buttons(context, nutrition_basis_state)
+            self._clear_pending_input(context)
         await self._process(service, message, message.text, context=context)
 
     async def _handle_saved_meal_edit_input(
@@ -4720,12 +4762,6 @@ class TelegramHandlers:
             unchanged_text = f"Вага вже становить {exc.weight_g} г."
             if not await self._edit_waiting_prompt(context, state, unchanged_text):
                 await message.reply_text(unchanged_text, do_quote=False)
-        except CompositeMealWeightError:
-            self._clear_pending_input(context)
-            await message.reply_text(
-                "Змінити вагу можна лише для страви з одного компонента.",
-                do_quote=False,
-            )
         except LookupError:
             self._clear_pending_input(context)
             await message.reply_text(
@@ -5410,6 +5446,45 @@ class TelegramHandlers:
                 message.date,
                 image_bytes,
             )
+        except NutritionBasisRequired:
+            if context is None:
+                await message.reply_text(
+                    "Уточни, ці КБЖВ вказані на 100 г чи на всю порцію.",
+                    do_quote=False,
+                )
+                return
+            state: dict[str, object] = {
+                "text": text,
+                "message_id": message.message_id,
+                "timestamp": message.date.isoformat(),
+                "image_bytes": image_bytes,
+            }
+            self._start_waiting(context, NUTRITION_BASIS_WAITING_KEY, state)
+            prompt = await message.reply_text(
+                "Ці КБЖВ вказані для:",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "Усієї порції",
+                                callback_data="nutrition-basis:portion",
+                            ),
+                            InlineKeyboardButton(
+                                "100 г",
+                                callback_data="nutrition-basis:per_100g",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "❌ Скасувати", callback_data="wait-cancel"
+                            )
+                        ],
+                    ]
+                ),
+                do_quote=False,
+            )
+            self._remember_prompt(state, prompt)
+            return
         except InputFormatError:
             reply = FORMAT_ERROR_TEXT
         except NotFoodError:

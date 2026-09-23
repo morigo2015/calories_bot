@@ -126,10 +126,9 @@ class GoogleSavedMealStore:
             )
             return
         if rows[0] in (LEGACY_SAVED_MEALS_HEADERS, PREVIOUS_SAVED_MEALS_HEADERS):
-            # Release 1.0.0 intentionally starts the saved-meal library over:
-            # historical rows may contain composite meals, while the new
-            # contract only permits one item per saved entry.  The renamed
-            # JSON column is the persistent one-time migration marker.
+            # Release 1.0.0 intentionally started the saved-meal library over.
+            # The renamed JSON column remains the persistent one-time migration
+            # marker; current entries may contain one or several components.
             if rows[0] == LEGACY_SAVED_MEALS_HEADERS:
                 self._worksheet.add_cols(1)
             self._worksheet.clear()

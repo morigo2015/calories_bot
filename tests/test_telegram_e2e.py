@@ -50,26 +50,6 @@ def test_button_callback_data_identifies_logical_sheet_row() -> None:
     assert e2e._button_callback_data(message, "Видалити") == "delete:42:2026-08-12"
 
 
-def test_response_with_terms_finds_one_composite_component() -> None:
-    responses = [
-        SimpleNamespace(raw_text="Гречка 180 г"),
-        SimpleNamespace(raw_text="Куряче філе 120 г"),
-        SimpleNamespace(raw_text="Салат 100 г"),
-    ]
-
-    assert e2e._response_with_terms(responses, ("кур", "філе")) is responses[1]
-
-
-def test_response_with_terms_rejects_ambiguous_component_match() -> None:
-    responses = [
-        SimpleNamespace(raw_text="Салат 100 г"),
-        SimpleNamespace(raw_text="Салат зі сметаною 80 г"),
-    ]
-
-    with pytest.raises(e2e.E2EFailure, match="expected one component"):
-        e2e._response_with_terms(responses, ("салат",))
-
-
 def test_expected_day_summary_supports_goal_and_no_goal_modes() -> None:
     assert e2e._expected_day_summary(319.5, None) == "Сьогодні: 320 кк"
     assert e2e._expected_day_summary(319.5, 1600) == "Сьогодні: 320 із 1600 кк"

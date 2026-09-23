@@ -24,8 +24,8 @@ from calories_bot.saved_meals import GoogleSavedMealStore
 from calories_bot.sheets import (
     DAY_COLUMN,
     HEADERS,
+    ITEMS_JSON_COLUMN,
     MEAL_KCAL_COLUMN,
-    MEAL_NAME_COLUMN,
     REQUEST_COLUMN,
     TIMESTAMP_COLUMN,
     TOTAL_WEIGHT_COLUMN,
@@ -83,24 +83,6 @@ def _button_callback_data(message: Message, expected_text: str) -> str | None:
             if data is not None:
                 return str(data)
     return None
-
-
-def _response_with_terms(
-    responses: list[Message], alternatives: tuple[str, ...]
-) -> Message:
-    matches = [
-        response
-        for response in responses
-        if any(
-            term.casefold() in _message_text(response).casefold()
-            for term in alternatives
-        )
-    ]
-    _require(
-        len(matches) == 1,
-        f"expected one component matching {alternatives}, got {len(matches)}",
-    )
-    return matches[0]
 
 
 def _expected_day_summary(today_total: float, daily_kcal_goal: int | None) -> str:
@@ -561,52 +543,61 @@ async def run_journey(
             sent, all_responses = await driver.send_text_responses(text)
             responses, summaries = _split_meal_responses(all_responses)
             _require(
-                len(responses) == 3,
-                f"exact composite returned {len(responses)} responses instead of 3",
+                len(responses) == 1,
+                "exact composite returned "
+                f"{len(responses)} meal responses instead of 1",
             )
             _require(
                 len(summaries) == 1,
                 f"exact composite returned {len(summaries)} daily totals instead of 1",
             )
-            track_created(*responses)
+            composite = responses[0]
+            track_created(composite)
             created_rows.append((sent, text))
-            grain = _response_with_terms(responses, ("греч",))
-            chicken = _response_with_terms(responses, ("кур", "філе"))
-            salad = _response_with_terms(responses, ("салат",))
-            for response, weight in ((grain, 180), (chicken, 120), (salad, 100)):
-                response_text = _message_text(response)
-                _require(f"{weight} г" in response_text, f"component lost {weight} g")
-                for button in ("Зберегти", "Змінити вагу", "Видалити"):
-                    _require(
-                        _has_button(response, button),
-                        f"component action missing: {button}",
-                    )
+            response_text = _message_text(composite).casefold()
+            for term, weight in (("греч", 180), ("кур", 120), ("салат", 100)):
+                _require(term in response_text, f"composite lost component {term!r}")
+                _require(f"{weight} г" in response_text, f"component lost {weight} г")
+            _require("400 г" in response_text, "composite total weight is missing")
+            for button in ("Зберегти", "Змінити вагу", "Видалити"):
+                _require(
+                    _has_button(composite, button),
+                    f"composite action missing: {button}",
+                )
 
             rows = await asyncio.to_thread(
                 probe.wait_for_request_count,
                 sent,
                 text,
-                3,
+                1,
                 min(timeout_seconds, 20),
             )
-            weights_by_name = {
-                str(row[MEAL_NAME_COLUMN]).casefold(): float(
-                    str(row[TOTAL_WEIGHT_COLUMN])
-                )
-                for row in rows
-            }
+            row = rows[0]
+            _require(
+                abs(float(str(row[TOTAL_WEIGHT_COLUMN])) - 400) < 0.01,
+                "composite total weight is incorrect in Sheets",
+            )
+            stored_meal = json.loads(str(row[ITEMS_JSON_COLUMN]))
+            items = stored_meal.get("items", [])
             for term, expected_weight in (("греч", 180), ("кур", 120), ("салат", 100)):
                 matching = [
-                    weight for name, weight in weights_by_name.items() if term in name
+                    float(item["weight_g"])
+                    for item in items
+                    if term in str(item["name"]).casefold()
                 ]
                 _require(
                     matching == [expected_weight],
                     f"Sheets component {term!r}: got weights {matching}",
                 )
 
-            grain = await driver.click_and_wait_for_edit_message(grain, "Зберегти")
-            track_created(grain)
-            _require(not _has_button(grain, "Зберегти"), "save button remained visible")
+            composite = await driver.click_and_wait_for_edit_message(
+                composite, "Зберегти"
+            )
+            track_created(composite)
+            _require(
+                not _has_button(composite, "Зберегти"),
+                "save button remained visible",
+            )
             deadline = time.monotonic() + min(timeout_seconds, 20)
             saved = None
             while time.monotonic() < deadline:
@@ -620,56 +611,61 @@ async def run_journey(
                     saved = new_meals[0]
                     break
                 await asyncio.sleep(1)
-            _require(saved is not None, "saved component did not appear in storage")
+            _require(saved is not None, "saved composite did not appear in storage")
             _require(
-                saved.default_total_weight_g == 180,
-                "saved component has incorrect default weight",
+                saved.default_total_weight_g == 400,
+                "saved composite has incorrect default weight",
             )
 
             target_weight = next(
-                weight for weight in settings.meal_weight_presets if weight != 120
+                weight for weight in settings.meal_weight_presets if weight != 400
             )
-            prompt = await driver.click_and_get_response(chicken, "Змінити вагу")
+            prompt = await driver.click_and_get_response(composite, "Змінити вагу")
             _require(
                 "Обери нову вагу" in _message_text(prompt), "weight prompt mismatch"
             )
-            updated_chicken = await driver.click_and_get_response(
+            updated_composite = await driver.click_and_get_response(
                 prompt, f"{target_weight}г"
             )
-            track_created(updated_chicken)
+            track_created(updated_composite)
             _require(
-                f"{target_weight} г" in _message_text(updated_chicken),
-                "updated component reply has wrong weight",
+                f"{target_weight} г" in _message_text(updated_composite),
+                "updated composite reply has wrong weight",
             )
             _require(
-                _has_button(updated_chicken, "Видалити"),
-                "updated component cannot be deleted",
+                _has_button(updated_composite, "Видалити"),
+                "updated composite cannot be deleted",
             )
 
-            deleted = await driver.click_and_wait_for_edit(salad, "Видалити")
-            _require("Видалено" in deleted, "component deletion was not confirmed")
-            untrack_created(salad)
-            rows = await asyncio.to_thread(
+            updated_rows = await asyncio.to_thread(
                 probe.wait_for_request_count,
                 sent,
                 text,
-                2,
+                1,
                 min(timeout_seconds, 20),
             )
-            chicken_rows = [
-                row for row in rows if "кур" in str(row[MEAL_NAME_COLUMN]).casefold()
-            ]
-            _require(len(chicken_rows) == 1, "updated chicken row is missing")
             _require(
-                abs(float(str(chicken_rows[0][TOTAL_WEIGHT_COLUMN])) - target_weight)
+                abs(float(str(updated_rows[0][TOTAL_WEIGHT_COLUMN])) - target_weight)
                 < 0.01,
-                "updated component weight did not reach Sheets",
+                "updated composite weight did not reach Sheets",
+            )
+            deleted = await driver.click_and_wait_for_edit(
+                updated_composite, "Видалити"
+            )
+            _require("Видалено" in deleted, "composite deletion was not confirmed")
+            untrack_created(updated_composite)
+            await asyncio.to_thread(
+                probe.wait_for_request_count,
+                sent,
+                text,
+                0,
+                min(timeout_seconds, 20),
             )
 
             _, menu = await driver.send_text("/meals")
             _require(
                 _has_button(menu, saved.display_name),
-                "saved component is missing from /meals",
+                "saved composite is missing from /meals",
             )
             reused = await driver.click_and_get_response(menu, saved.display_name)
             track_created(reused)
@@ -715,7 +711,7 @@ async def run_journey(
 
         await _run_step(
             results,
-            "exact composite: save/change/delete/reuse",
+            "atomic composite: save/change/delete/reuse",
             exact_composite_lifecycle,
         )
 
@@ -723,48 +719,44 @@ async def run_journey(
             cases = (
                 (
                     "зїв рис курку і салат салата небагато",
-                    (1, 3),
                     (("рис",), ("кур",), ("салат",)),
                 ),
                 (
                     "борщ сметана хліб два куски ну і сала трошки",
-                    (1, 5),
                     (("борщ",), ("сметан",), ("хліб",), ("сал",)),
                 ),
             )
-            for text, count_bounds, required in cases:
+            for text, required in cases:
                 sent, all_responses = await driver.send_text_responses(text)
                 responses, summaries = _split_meal_responses(all_responses)
                 _require(
-                    count_bounds[0] <= len(responses) <= count_bounds[1],
-                    f"{text!r}: got {len(responses)} components, "
-                    f"expected {count_bounds}",
+                    len(responses) == 1,
+                    f"{text!r}: got {len(responses)} meal responses instead of 1",
                 )
                 _require(
                     len(summaries) == 1,
                     f"{text!r}: got {len(summaries)} daily totals instead of 1",
                 )
-                searchable = " ".join(_message_text(response) for response in responses)
-                searchable = searchable.casefold()
+                response = responses[0]
+                searchable = _message_text(response).casefold()
                 for alternatives in required:
                     _require(
                         any(term in searchable for term in alternatives),
                         f"{text!r}: missing named food {alternatives}",
                     )
-                for response in responses:
-                    for button in ("Зберегти", "Змінити вагу", "Видалити"):
-                        _require(
-                            _has_button(response, button),
-                            f"{text!r}: component action missing: {button}",
-                        )
+                for button in ("Зберегти", "Змінити вагу", "Видалити"):
+                    _require(
+                        _has_button(response, button),
+                        f"{text!r}: meal action missing: {button}",
+                    )
                 await asyncio.to_thread(
                     probe.wait_for_request_count,
                     sent,
                     text,
-                    len(responses),
+                    1,
                     min(timeout_seconds, 20),
                 )
-                track_created(*responses)
+                track_created(response)
                 created_rows.append((sent, text))
 
         await _run_step(
