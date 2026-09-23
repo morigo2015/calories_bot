@@ -432,6 +432,54 @@ def test_natural_nutrition_without_basis_requests_clarification() -> None:
         normalize_input("плов 350 г, 620 ккал, білки 32, жири 18, вуглеводи 82")
 
 
+LABEL_FIRST_NUTRITION = """Паста ригатоні.
+
+Калорій — 220,
+
+білків — 145,
+
+жирів — 40,
+
+вуглеводів — 45.
+
+З'їв 200 грам."""
+
+
+def test_label_first_nutrition_with_em_dash_requests_clarification() -> None:
+    with pytest.raises(NutritionBasisRequired):
+        normalize_input(LABEL_FIRST_NUTRITION)
+
+
+def test_selected_basis_normalizes_label_first_nutrition_with_em_dash() -> None:
+    normalized = normalize_input(LABEL_FIRST_NUTRITION, nutrition_basis="portion")
+
+    assert [
+        (value.kind, value.value, value.basis) for value in normalized.explicit_values
+    ] == [
+        ("kcal", 220, "portion"),
+        ("protein", 145, "portion"),
+        ("fat", 40, "portion"),
+        ("carbs", 45, "portion"),
+        ("weight", 200, None),
+    ]
+
+
+@pytest.mark.parametrize("separator", ["-", "–", "—", "−", ":"])
+def test_label_first_nutrition_accepts_common_separators(separator: str) -> None:
+    normalized = normalize_input(
+        f"паста 200 г, калорій {separator} 220, білків {separator} 14",
+        nutrition_basis="per_100g",
+    )
+
+    assert [
+        (value.kind, value.value, value.basis) for value in normalized.explicit_values
+    ] == [
+        ("weight", 200, None),
+        ("kcal", 220, "per_100g"),
+        ("protein", 14, "per_100g"),
+    ]
+
+
 @pytest.mark.parametrize("basis", ["per_100g", "portion"])
 def test_selected_basis_applies_to_ambiguous_natural_nutrition(basis: str) -> None:
     normalized = normalize_input(

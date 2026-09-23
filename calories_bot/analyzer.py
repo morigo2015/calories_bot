@@ -271,6 +271,11 @@ _PLAIN_KCAL = re.compile(
     rf"(?!\s*(?:/|на|за)\s*(?:100|сто))",
     re.IGNORECASE,
 )
+_NATURAL_KCAL = re.compile(
+    rf"(?<!\w){_KCAL_UNIT}\s*(?:[:=_-]|[–—−])?\s*"
+    rf"(?P<value>{_NUMBER})(?!\w)",
+    re.IGNORECASE,
+)
 _MACRO_LABELS = {
     "protein": "білків",
     "fat": "жирів",
@@ -285,17 +290,17 @@ _CANONICAL_MACROS = {
 }
 _NATURAL_MACROS = {
     "protein": re.compile(
-        rf"(?<!\w)(?:білк\w*|белк\w*|protein)\s*[:=_-]?\s*"
+        rf"(?<!\w)(?:білк\w*|белк\w*|protein)\s*(?:[:=_-]|[–—−])?\s*"
         rf"(?P<value>{_NUMBER})(?:\s*{_WEIGHT_UNIT})?",
         re.IGNORECASE,
     ),
     "fat": re.compile(
-        rf"(?<!\w)(?:жир\w*|fat)\s*[:=_-]?\s*"
+        rf"(?<!\w)(?:жир\w*|fat)\s*(?:[:=_-]|[–—−])?\s*"
         rf"(?P<value>{_NUMBER})(?:\s*{_WEIGHT_UNIT})?",
         re.IGNORECASE,
     ),
     "carbs": re.compile(
-        rf"(?<!\w)(?:вуглевод\w*|углевод\w*|carb\w*)\s*[:=_-]?\s*"
+        rf"(?<!\w)(?:вуглевод\w*|углевод\w*|carb\w*)\s*(?:[:=_-]|[–—−])?\s*"
         rf"(?P<value>{_NUMBER})(?:\s*{_WEIGHT_UNIT})?",
         re.IGNORECASE,
     ),
@@ -507,6 +512,7 @@ def normalize_input(
     )
     has_ambiguous_natural_nutrition = bool(
         _PLAIN_KCAL.search(normalized)
+        or _NATURAL_KCAL.search(normalized)
         or any(pattern.search(normalized) for pattern in _NATURAL_MACROS.values())
     )
     if (
@@ -556,6 +562,18 @@ def normalize_input(
         return f"{_plain_decimal(value)} ккал/100г"
 
     normalized = _TEXT_KCAL.sub(replace_text_kcal, normalized)
+
+    def replace_natural_kcal(match: re.Match[str]) -> str:
+        context = _nearby_basis_context(normalized, match.start(), match.end())
+        value = _nonnegative_number(match.group("value"), "Calories")
+        basis = (
+            "порцію"
+            if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+            else "100г"
+        )
+        return f"{_plain_decimal(value)} ккал/{basis}"
+
+    normalized = _NATURAL_KCAL.sub(replace_natural_kcal, normalized)
 
     def replace_portion_kcal(match: re.Match[str]) -> str:
         context = _nearby_basis_context(normalized, match.start(), match.end())

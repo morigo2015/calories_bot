@@ -4228,7 +4228,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.12.0"]
+    assert admin_message.replies == ["Версія: 1.12.1"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4257,7 +4257,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.12.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.12.1\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
