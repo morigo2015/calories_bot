@@ -2067,6 +2067,7 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
             self.reply_kwargs = []
             self.deleted_replies = []
             self.typing_actions = []
+            self.reactions = []
             self.chat_id = user_id if chat_id is None else chat_id
 
         def get_bot(self):
@@ -2082,6 +2083,9 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
             self.replies.append(text)
             self.reply_kwargs.append(kwargs)
             return None
+
+        async def set_reaction(self, reaction):
+            self.reactions.append(reaction)
 
     message = FakeMessage()
     return (
@@ -2219,6 +2223,7 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
     assert message.reply_kwargs[0]["reply_markup"] is not None
     assert "reply_markup" not in message.reply_kwargs[1]
     assert message.typing_actions == [(123, ChatAction.TYPING)]
+    assert message.reactions == ["👀"]
 
 
 def test_voice_is_transcribed_and_processed_as_food_text() -> None:
@@ -2267,6 +2272,7 @@ def test_voice_is_transcribed_and_processed_as_food_text() -> None:
     )
     assert message.replies == ["Сливи"]
     assert message.typing_actions == [(123, ChatAction.TYPING)]
+    assert message.reactions == ["👀"]
 
 
 def test_temporary_typing_status_stops_when_operation_fails() -> None:
@@ -2275,7 +2281,7 @@ def test_temporary_typing_status_stops_when_operation_fails() -> None:
 
     async def fail_after_status():
         with pytest.raises(RuntimeError, match="controlled"):
-            async with handlers._temporary_status(message, llm=True):
+            async with handlers._temporary_status(message):
                 assert message.typing_actions == [(123, ChatAction.TYPING)]
                 raise RuntimeError("controlled")
 
@@ -2283,6 +2289,41 @@ def test_temporary_typing_status_stops_when_operation_fails() -> None:
 
     assert message.replies == []
     assert message.typing_actions == [(123, ChatAction.TYPING)]
+
+
+def test_delayed_operation_status_is_silent_and_deleted(monkeypatch) -> None:
+    handlers = TelegramHandlers(999, FakeManager())
+    _, message = make_update()
+    status = SimpleNamespace(deleted=False)
+
+    async def delete_status():
+        status.deleted = True
+
+    status.delete = delete_status
+
+    async def reply_text(text, **kwargs):
+        message.replies.append(text)
+        message.reply_kwargs.append(kwargs)
+        return status
+
+    message.reply_text = reply_text
+    monkeypatch.setattr(bot_module, "OPERATION_STATUS_DELAY_SECONDS", 0)
+
+    async def run_slow_operation():
+        async with handlers._temporary_status(
+            message,
+            status_text="Працюю…",
+            operation="test",
+            react=True,
+        ):
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run_slow_operation())
+
+    assert message.reactions == ["👀"]
+    assert message.replies == ["Працюю…"]
+    assert message.reply_kwargs == [{"do_quote": False, "disable_notification": True}]
+    assert status.deleted is True
 
 
 def test_voice_without_transcriber_returns_clear_error() -> None:
@@ -4228,7 +4269,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.12.1"]
+    assert admin_message.replies == ["Версія: 1.12.2"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4257,7 +4298,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.12.1\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.12.2\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

@@ -256,6 +256,7 @@ class GoogleUserRegistry:
                 title=worksheet_name, rows=100, cols=len(USER_HEADERS)
             )
         self._ensure_headers()
+        self._reload_records()
 
     def _get_all_values(self) -> list[list[object]]:
         for attempt in range(GOOGLE_READ_ATTEMPTS):
@@ -365,8 +366,21 @@ class GoogleUserRegistry:
             weight_kg=parse_weight_kg(padded[WEIGHT_KG_COLUMN]),
         )
 
-    def _records(self) -> list[UserRecord]:
+    def _read_records(self) -> list[UserRecord]:
         return [self._record(index, row) for index, row in enumerate(self._rows(), 2)]
+
+    def _reload_records(self) -> list[UserRecord]:
+        records = self._read_records()
+        self._records_cache = records
+        return records
+
+    def _records(self) -> list[UserRecord]:
+        # Manual worksheet edits are intentionally picked up on bot restart;
+        # registry mutations performed by the bot call _reload_records().
+        records = getattr(self, "_records_cache", None)
+        if records is None:
+            records = self._reload_records()
+        return list(records)
 
     def get_user(self, telegram_user_id: int) -> UserRecord | None:
         with self._lock:
@@ -430,6 +444,7 @@ class GoogleUserRegistry:
                 self._worksheet.append_row(row, value_input_option=ValueInputOption.raw)
             except Exception as exc:
                 raise UserRegistryError("Could not create invite") from exc
+            self._reload_records()
             record = self.get_invite(token)
             if record is None:
                 raise UserRegistryError("Could not verify the new invite")
@@ -444,7 +459,7 @@ class GoogleUserRegistry:
             )
         except Exception as exc:
             raise UserRegistryError("Could not update the user registry") from exc
-        for record in self._records():
+        for record in self._reload_records():
             if record.row_number == row_number:
                 return record
         raise UserRegistryError("Could not verify the user registry update")
@@ -700,5 +715,6 @@ class GoogleUserRegistry:
                 self._worksheet.delete_rows(current.row_number)
             except Exception as exc:
                 raise UserRegistryError("Could not delete the registry row") from exc
+            self._reload_records()
             if self.get_user(telegram_user_id) is not None:
                 raise UserRegistryError("Could not verify registry row deletion")

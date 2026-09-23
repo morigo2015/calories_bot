@@ -88,6 +88,23 @@ def test_transient_google_read_error_is_retried(monkeypatch) -> None:
     registry._worksheet.get_all_values = original_get_all_values
 
 
+def test_registry_records_are_cached_until_a_bot_write() -> None:
+    registry = build_registry(
+        [USER_HEADERS, [123, "A", "", "active", "", "sheet", "01:00"]]
+    )
+    registry._worksheet.get_all_values = Mock(wraps=registry._worksheet.get_all_values)
+
+    assert registry.get_user(123) is not None
+    assert registry.list_users()[0].status == "active"
+    assert registry._worksheet.get_all_values.call_count == 1
+
+    updated = registry.set_status(123, "blocked")
+
+    assert updated.status == "blocked"
+    assert registry.get_user(123).status == "blocked"
+    assert registry._worksheet.get_all_values.call_count == 2
+
+
 def test_non_transient_google_read_error_is_not_retried(monkeypatch) -> None:
     registry = build_registry([USER_HEADERS])
     registry._worksheet.get_all_values = Mock(side_effect=google_api_error(403))
