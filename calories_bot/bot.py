@@ -136,16 +136,6 @@ ANALYSIS_ERROR_TEXT = "Не вдалося порахувати КБЖВ. Спр
 GOAL_ERROR_TEXT = "Не вдалося змінити денну ціль. Спробуй ще раз."
 WEEK_ERROR_TEXT = "Не вдалося сформувати тижневий підсумок. Спробуй ще раз."
 VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове повідомлення. Спробуй ще раз."
-FOOD_ANALYSIS_STATUS_TEXT = "🍽 Аналізую страву й рахую КБЖВ…"
-PHOTO_ANALYSIS_STATUS_TEXT = "📷 Розпізнаю страву на фото й рахую КБЖВ…"
-VOICE_ANALYSIS_STATUS_TEXT = "🎙 Розпізнаю голосове повідомлення й рахую КБЖВ…"
-DAY_STATUS_TEXT = "📅 Збираю підсумок за день…"
-WEEK_STATUS_TEXT = "📊 Збираю дані за тиждень і групую схожі страви…"
-WEEK_CALORIES_STATUS_TEXT = "📊 Збираю статистику за тиждень…"
-MONTH_STATUS_TEXT = "📈 Збираю дані за 30 днів і групую схожі страви…"
-BURN_SCREENSHOT_STATUS_TEXT = "🔥 Розпізнаю витрату зі скріншота…"
-SAVE_MEAL_STATUS_TEXT = "⭐ Готую страву до збереження…"
-OPERATION_STATUS_DELAY_SECONDS = 1.2
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
@@ -2223,15 +2213,10 @@ class TelegramHandlers:
     async def _temporary_status(
         message: object | None,
         *,
-        status_text: str | None = None,
         operation: str | None = None,
-        react: bool = False,
     ) -> AsyncIterator[None]:
         started_at = perf_counter()
-        status: object | None = None
         typing_task: asyncio.Task[None] | None = None
-        status_task: asyncio.Task[None] | None = None
-        reaction_task: asyncio.Task[None] | None = None
         get_bot = getattr(message, "get_bot", None)
         chat_id = getattr(message, "chat_id", None)
         if callable(get_bot) and chat_id is not None:
@@ -2256,74 +2241,18 @@ class TelegramHandlers:
                 await asyncio.sleep(0)
             except Exception:
                 LOGGER.warning("Could not start Telegram typing status", exc_info=True)
-
-        if react:
-            set_reaction = getattr(message, "set_reaction", None)
-            if callable(set_reaction):
-
-                async def acknowledge() -> None:
-                    try:
-                        await set_reaction("👀")
-                    except Exception:
-                        LOGGER.warning(
-                            "Could not acknowledge a Telegram message",
-                            exc_info=True,
-                        )
-
-                reaction_task = asyncio.create_task(acknowledge())
-
-        if status_text is not None:
-            reply_text = getattr(message, "reply_text", None)
-            if callable(reply_text):
-
-                async def show_delayed_status() -> None:
-                    nonlocal status
-                    try:
-                        await asyncio.sleep(OPERATION_STATUS_DELAY_SECONDS)
-                        status = await reply_text(
-                            status_text,
-                            do_quote=False,
-                            disable_notification=True,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        LOGGER.warning(
-                            "Could not send a temporary operation status",
-                            exc_info=True,
-                        )
-
-                status_task = asyncio.create_task(show_delayed_status())
         try:
             yield
         finally:
-            if status_task is not None and not status_task.done():
-                status_task.cancel()
-            if status_task is not None:
-                with suppress(asyncio.CancelledError):
-                    await status_task
             if typing_task is not None:
                 typing_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await typing_task
-            if status is not None:
-                try:
-                    delete = getattr(status, "delete", None)
-                    if callable(delete):
-                        await delete()
-                except Exception:
-                    LOGGER.warning(
-                        "Could not delete a temporary operation status",
-                        exc_info=True,
-                    )
-            if reaction_task is not None:
-                await reaction_task
             if operation is not None:
                 LOGGER.info(
-                    "Operation %s finished in %.0f ms; status_shown=%s",
+                    "Operation %s finished in %.0f ms",
                     operation,
                     (perf_counter() - started_at) * 1000,
-                    status is not None,
                 )
 
     @staticmethod
@@ -2783,9 +2712,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=DAY_STATUS_TEXT,
             operation="day",
-            react=True,
         ):
             try:
                 reply = await asyncio.to_thread(service.get_day_summary, message.date)
@@ -2888,9 +2815,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=WEEK_CALORIES_STATUS_TEXT,
             operation="weekly_calories",
-            react=True,
         ):
             try:
                 burned_totals = None
@@ -2924,9 +2849,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=WEEK_STATUS_TEXT,
             operation="week",
-            react=True,
         ):
             try:
                 burned_totals = None
@@ -2961,9 +2884,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=MONTH_STATUS_TEXT,
             operation="month",
-            react=True,
         ):
             try:
                 burned_totals = None
@@ -3000,9 +2921,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=WEEK_STATUS_TEXT,
             operation="weekly_meals",
-            react=True,
         ):
             try:
                 reply = await asyncio.to_thread(
@@ -3139,9 +3058,7 @@ class TelegramHandlers:
         name = " ".join(context.args or []).strip() or None
         async with self._temporary_status(
             message,
-            status_text=SAVE_MEAL_STATUS_TEXT,
             operation="save_meal",
-            react=True,
         ):
             try:
                 saved, created = await asyncio.to_thread(service.save_latest_meal, name)
@@ -3891,7 +3808,6 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             query.message,
-            status_text=SAVE_MEAL_STATUS_TEXT,
             operation="save_meal_callback",
         ):
             try:
@@ -3967,7 +3883,6 @@ class TelegramHandlers:
         try:
             async with self._temporary_status(
                 query.message,
-                status_text=FOOD_ANALYSIS_STATUS_TEXT,
                 operation="nutrition_basis_analysis",
             ):
                 result = await asyncio.to_thread(
@@ -4987,9 +4902,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=PHOTO_ANALYSIS_STATUS_TEXT,
             operation="photo_analysis",
-            react=True,
         ):
             try:
                 existing = await asyncio.to_thread(
@@ -5110,9 +5023,7 @@ class TelegramHandlers:
         reference_date = self._manager.local_date(message.date)
         async with self._temporary_status(
             message,
-            status_text=BURN_SCREENSHOT_STATUS_TEXT,
             operation="burn_screenshot_analysis",
-            react=True,
         ):
             for image_bytes in images:
                 try:
@@ -5328,9 +5239,7 @@ class TelegramHandlers:
             return
         async with self._temporary_status(
             message,
-            status_text=VOICE_ANALYSIS_STATUS_TEXT,
             operation="voice_analysis",
-            react=True,
         ):
             try:
                 existing = await asyncio.to_thread(
@@ -5563,9 +5472,7 @@ class TelegramHandlers:
         if show_status:
             async with self._temporary_status(
                 message,
-                status_text=FOOD_ANALYSIS_STATUS_TEXT,
                 operation="food_analysis",
-                react=True,
             ):
                 await self._process(
                     service,
