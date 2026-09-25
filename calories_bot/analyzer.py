@@ -62,9 +62,13 @@ Rules:
   порцію" describe the whole meal and must use portion_nutrition.
 - For supplied values, set the matching estimated flag to false and return
   its source ID. The application will set the origin to user_text.
-- On a nutrition-label photo, try to read kcal, protein, fat, and carbohydrates,
-  preferring the per-100-g column. Values read or estimated from a photo use
-  origin=image and are approximate.
+- On a nutrition-label photo, read the heading that defines the nutrition basis.
+  Never treat values headed "в продукті", "на порцію", or "per serving"
+  as values per 100 g. If a label gives whole-product nutrition and the product
+  or serving weight, use that weight and convert the nutrition to per-100-g
+  values with enough precision for the application to reconstruct the printed
+  whole-product totals. Values read or derived from a photo use origin=image
+  and are approximate.
 - For a natural portion such as "2 яйця", "1 тарілка", "жменя" or "половина",
   return a concise Ukrainian portion_display such as "2 шт." or "1 тарілка".
 - Split composite meals into useful ingredients when the user names multiple
@@ -89,6 +93,9 @@ Examples:
 - A meal photo without caption -> recognize and estimate the portion.
 - A label photo -> read the product name and all available nutrition values;
   estimate missing nutrition and portion if absent.
+- A label for a 162 g product headed "в продукті" with 475 kcal,
+  25 g protein, 29 g fat, and 29 g carbohydrates -> use weight_g=162 and
+  per-100-g values that reproduce those whole-product totals.
 - "як справи?" -> is_food=false.
 """
 
@@ -239,11 +246,6 @@ _NUMBER = r"\d+(?:[.,]\d+)?"
 _HASH_MARKER = re.compile(
     rf"(?<![\w#])(?:#(?P<prefix>{_NUMBER})|(?P<suffix>{_NUMBER})#)(?![\w#])"
 )
-_COMPACT_NUTRIENT = re.compile(
-    r"(?<!\w)(?P<marker>[кkбжвb])\s*(?:[:_·-]\s*)?"
-    r"(?P<value>\d+(?:[.,]\d+)?)(?!\w)",
-    re.IGNORECASE,
-)
 _KCAL_UNIT = (
     r"(?:[кk][кk]|[кk][кk][аa]л|kcal|"
     r"кілокалорій|кілокалорії|кілокалорія|"
@@ -255,6 +257,20 @@ _WEIGHT_UNIT = (
     r"(?:граммів|граммов|граммами|граммах|граммы|грамми|грамма|грамме|грамм|"
     r"грамів|грамами|грамом|грами|грама|граму|грам|гр|г|grams|gram|gr|g)"
 )
+_COMPACT_NUTRIENT = re.compile(
+    rf"(?<!\w)(?P<marker>[кkбжвуb])\s*(?:[:_·-]\s*)?"
+    rf"(?P<value>{_NUMBER})(?!\w)(?:\s*{_WEIGHT_UNIT})?",
+    re.IGNORECASE,
+)
+_COMPACT_KINDS = {
+    "к": "kcal",
+    "k": "kcal",
+    "б": "protein",
+    "ж": "fat",
+    "в": "carbs",
+    "у": "carbs",
+    "b": "carbs",
+}
 _TEXT_KCAL = re.compile(
     rf"(?<!\w)(?P<value>{_NUMBER})\s*{_KCAL_UNIT}\s*"
     rf"(?:/\s*(?:100|сто)|(?:на|за)\s*(?:100|сто))\s*"
@@ -313,6 +329,7 @@ _PORTION_CONTEXT = re.compile(
     r"(?:"
     r"(?:у|в|на|за|для)\s+(?:цій\s+|одній\s+)?(?:порці\w*|упаковц\w*)"
     r"|(?:на|за)\s+(?:всю|цілу)\s+(?:порці\w*|страв\w*|таріл\w*|упаков\w*)"
+    r"|(?:вся|ціла|всю|цілу)\s+(?:порці\w*|страв\w*|таріл\w*|упаков\w*)"
     r"|\b(?:всього|разом|загалом|усього)\b"
     r")",
     re.IGNORECASE,
@@ -505,10 +522,38 @@ def normalize_input(
         raise InputFormatError("Message is empty")
     normalized = _SPOKEN_NUMBER.sub(_replace_spoken_number, normalized)
 
+    compact_matches = list(_COMPACT_NUTRIENT.finditer(normalized))
+    compact_kinds = {
+        _COMPACT_KINDS[match.group("marker").casefold()] for match in compact_matches
+    }
+    natural_kinds = {
+        kind for kind, pattern in _NATURAL_MACROS.items() if pattern.search(normalized)
+    }
+    if _PLAIN_KCAL.search(normalized) or _NATURAL_KCAL.search(normalized):
+        natural_kinds.add("kcal")
+    nutrition_kinds = compact_kinds | natural_kinds
+    compact_spans = [(match.start(), match.end()) for match in compact_matches]
+    has_product_weight = any(
+        not any(start <= match.start() < end for start, end in compact_spans)
+        for match in _EXPLICIT_WEIGHT.finditer(normalized)
+    )
+
     has_explicit_basis = bool(
         _TEXT_KCAL.search(normalized)
         or _PER_100_PREFIX.search(normalized)
         or _PORTION_CONTEXT.search(normalized)
+    )
+    standalone_portion_context = any(
+        _PORTION_CONTEXT.fullmatch(line.strip(" \t:;,.!–—-")) is not None
+        for line in normalized.splitlines()
+    )
+    infer_whole_portion = (
+        not has_explicit_basis
+        and not has_product_weight
+        and {"kcal", "protein", "fat", "carbs"} <= nutrition_kinds
+    )
+    effective_nutrition_basis = nutrition_basis or (
+        "portion" if infer_whole_portion or standalone_portion_context else None
     )
     has_ambiguous_natural_nutrition = bool(
         _PLAIN_KCAL.search(normalized)
@@ -518,6 +563,7 @@ def normalize_input(
     if (
         nutrition_basis is None
         and not has_explicit_basis
+        and not infer_whole_portion
         and has_ambiguous_natural_nutrition
     ):
         raise NutritionBasisRequired("Nutrition basis is ambiguous")
@@ -535,22 +581,24 @@ def normalize_input(
         )
 
     compact_labels = {
-        "к": ("kcal", "ккал"),
-        "k": ("kcal", "ккал"),
-        "б": ("protein", "г білків"),
-        "ж": ("fat", "г жирів"),
-        "в": ("carbs", "г вуглеводів"),
-        "b": ("carbs", "г вуглеводів"),
+        "к": "ккал",
+        "k": "ккал",
+        "б": "г білків",
+        "ж": "г жирів",
+        "в": "г вуглеводів",
+        "у": "г вуглеводів",
+        "b": "г вуглеводів",
     }
 
     def replace_compact(match: re.Match[str]) -> str:
         marker = match.group("marker").casefold()
-        _kind, label = compact_labels[marker]
+        label = compact_labels[marker]
         value = _nonnegative_number(match.group("value"), label)
         context = _nearby_basis_context(normalized, match.start(), match.end())
         basis = (
             "порцію"
-            if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+            if _PORTION_CONTEXT.search(context)
+            or effective_nutrition_basis == "portion"
             else "100г"
         )
         return f"{_plain_decimal(value)} {label}/{basis}"
@@ -568,24 +616,25 @@ def normalize_input(
         value = _nonnegative_number(match.group("value"), "Calories")
         basis = (
             "порцію"
-            if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+            if _PORTION_CONTEXT.search(context)
+            or effective_nutrition_basis == "portion"
             else "100г"
         )
         return f"{_plain_decimal(value)} ккал/{basis}"
-
-    normalized = _NATURAL_KCAL.sub(replace_natural_kcal, normalized)
 
     def replace_portion_kcal(match: re.Match[str]) -> str:
         context = _nearby_basis_context(normalized, match.start(), match.end())
         value = _nonnegative_number(match.group("value"), "Calories")
         basis = (
             "порцію"
-            if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+            if _PORTION_CONTEXT.search(context)
+            or effective_nutrition_basis == "portion"
             else "100г"
         )
         return f"{_plain_decimal(value)} ккал/{basis}"
 
     normalized = _PLAIN_KCAL.sub(replace_portion_kcal, normalized)
+    normalized = _NATURAL_KCAL.sub(replace_natural_kcal, normalized)
 
     per_100_markers: list[str] = []
 
@@ -608,7 +657,8 @@ def normalize_input(
             context = _nearby_basis_context(source_text, match.start(), match.end())
             basis = (
                 "порцію"
-                if _PORTION_CONTEXT.search(context) or nutrition_basis == "portion"
+                if _PORTION_CONTEXT.search(context)
+                or effective_nutrition_basis == "portion"
                 else "100г"
             )
             return f"{_plain_decimal(value)} г {nutrient_label}/{basis}"

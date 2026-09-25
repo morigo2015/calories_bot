@@ -321,13 +321,57 @@ def test_compact_kbjv_accepts_spaces_middle_dot_and_keeps_decimals() -> None:
     normalized = normalize_input("К 250 Б 100 Ж 7,9 В · 8.1")
 
     assert normalized.text == (
-        "250 ккал/100г 100 г білків/100г 7.9 г жирів/100г 8.1 г вуглеводів/100г"
+        "250 ккал/порцію 100 г білків/порцію 7.9 г жирів/порцію 8.1 г вуглеводів/порцію"
     )
     assert [(value.kind, value.value) for value in normalized.explicit_values] == [
         ("kcal", 250),
         ("protein", 100),
         ("fat", 7.9),
         ("carbs", 8.1),
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "На порцію\n475 ккал • Б 25 г • Ж 29 г • У 29 г",
+        "475 ккал • Б 25 г • Ж 29 г • У 29 г",
+        "475 ккал  Б 25 г  Ж 29 г У 29 г",
+        "475 ккал  Б 25 г  Ж 29 г В 29 г",
+        "Мак бутер 475 ккал  Б 25 г  Ж 29 г У 29 г",
+        "Мак бутер к 475  Б 25 г  Ж 29 г У 29 г",
+        "Мак бутер к 475  Б 25 г  Ж 29 г В 29 г",
+        "Мак бутер к 475  Б 25  Ж 29 В 29",
+        "Макдональд к 475  Б 25  Ж 29 В 29 вся порція",
+    ],
+)
+def test_complete_kbjv_without_product_weight_is_whole_portion(source: str) -> None:
+    normalized = normalize_input(source)
+
+    assert [
+        (value.kind, value.value, value.basis) for value in normalized.explicit_values
+    ] == [
+        ("kcal", 475, "portion"),
+        ("protein", 25, "portion"),
+        ("fat", 29, "portion"),
+        ("carbs", 29, "portion"),
+    ]
+
+
+def test_selected_portion_basis_does_not_shift_calories_to_protein_value() -> None:
+    normalized = normalize_input(
+        "Мак бутер 162 г 475 ккал Б 25 г Ж 29 г В 29 г",
+        nutrition_basis="portion",
+    )
+
+    assert [
+        (value.kind, value.value, value.basis) for value in normalized.explicit_values
+    ] == [
+        ("weight", 162, None),
+        ("kcal", 475, "portion"),
+        ("protein", 25, "portion"),
+        ("fat", 29, "portion"),
+        ("carbs", 29, "portion"),
     ]
 
 
