@@ -59,6 +59,7 @@ from calories_bot.models import (
     parse_simple_meal_request,
     round_meal_nutrition,
 )
+from calories_bot.quality import FeedbackResult, QualityStore
 from calories_bot.sheets import (
     DayMeal,
     MealDeletion,
@@ -581,6 +582,73 @@ def test_handler_sends_meal_reply_as_rich_message_with_buttons() -> None:
     assert api_kwargs["reply_markup"]["inline_keyboard"][0][0]["text"] == (
         "⭐ Зберегти"
     )
+
+
+def test_analysis_error_button_is_separate_from_weight_correction() -> None:
+    result = MealReply(
+        "Сир",
+        42,
+        date(2026, 8, 2),
+        can_report_analysis_error=True,
+    )
+
+    rows = TelegramHandlers._meal_reply_markup(result).inline_keyboard
+
+    assert [[button.text for button in row] for row in rows] == [
+        ["⭐ Зберегти", "⚖️ Змінити вагу"],
+        ["❗ Помилка аналізу"],
+        ["🗑 Видалити"],
+    ]
+    assert rows[1][0].callback_data == "analysis-error:42:2026-08-02"
+
+
+def test_service_records_immutable_quality_case_after_successful_meal(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    quality = QualityStore(tmp_path / "statistics.sqlite3")
+    service = CaloriesService(
+        FakeAnalyzer(food_analysis()),
+        store,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        quality_store=quality,
+        telegram_user_id=123,
+    )
+    timestamp = datetime(2026, 8, 2, 9, tzinfo=UTC)
+
+    reply = service.process_message("сир 50 г", 42, timestamp)
+    case = quality.get_case(123, 42, date(2026, 8, 2))
+
+    assert isinstance(reply, MealReply)
+    assert reply.can_report_analysis_error is True
+    assert case is not None
+    assert case["original_text"] == "сир 50 г"
+    assert case["rendered_reply"] == reply.text
+    assert case["analysis"]["items"][0]["name"] == "сир"
+
+
+def test_quality_storage_failure_does_not_break_food_logging(tmp_path) -> None:
+    class BrokenQuality:
+        def record_case(self, **kwargs):
+            del kwargs
+            raise RuntimeError("disk unavailable")
+
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    service = CaloriesService(
+        FakeAnalyzer(food_analysis()),
+        store,
+        TZ,
+        time(1),
+        tmp_path / "photos",
+        quality_store=BrokenQuality(),
+        telegram_user_id=123,
+    )
+
+    reply = service.process_message("сир 50 г", 42, datetime(2026, 8, 2, 9, tzinfo=UTC))
+
+    assert isinstance(reply, MealReply)
+    assert reply.can_report_analysis_error is False
+    assert len(store.appended) == 1
 
 
 def test_handler_remembers_the_separate_daily_total_message() -> None:
@@ -2199,7 +2267,8 @@ def test_handler_resolves_user_then_passes_message_to_personal_service() -> None
         def get_existing_reply(self, *args):
             return None
 
-        def process_message(self, *args):
+        def process_message(self, *args, **kwargs):
+            assert kwargs == {}
             self.args = args
             return MealReply(
                 "reply",
@@ -2245,7 +2314,8 @@ def test_voice_is_transcribed_and_processed_as_food_text() -> None:
         def get_existing_reply(self, *args):
             return None
 
-        def process_message(self, *args):
+        def process_message(self, *args, **kwargs):
+            assert kwargs == {"input_kind": "voice"}
             self.args = args
             return MealReply("Сливи", 1, date(2026, 8, 2))
 
@@ -3001,6 +3071,92 @@ def make_callback_update(data="delete:42:2026-08-02", *, user_id=123):
     return update, query
 
 
+def test_analysis_error_callback_records_feedback_and_asks_optional_reason(
+    monkeypatch,
+) -> None:
+    class Quality:
+        def __init__(self):
+            self.reported = []
+            self.prompts = []
+
+        def report_error(self, *args):
+            self.reported.append(args)
+            return FeedbackResult("case-1", True, None)
+
+        def set_feedback_prompt(self, *args):
+            self.prompts.append(args)
+
+    class CallbackMessage:
+        def __init__(self):
+            self.reply_markup = TelegramHandlers._meal_reply_markup(
+                MealReply(
+                    "Сир",
+                    42,
+                    date(2026, 8, 2),
+                    can_report_analysis_error=True,
+                )
+            )
+            self.replies = []
+
+        async def reply_text(self, text, **kwargs):
+            self.replies.append((text, kwargs))
+            return SimpleNamespace(message_id=700)
+
+    quality = Quality()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: object()}),
+        quality_store=quality,
+    )
+    update, query = make_callback_update("analysis-error:42:2026-08-02")
+    query.message = CallbackMessage()
+    monkeypatch.setattr(bot_module, "Message", CallbackMessage)
+
+    asyncio.run(handlers.analysis_error_callback(update, SimpleNamespace()))
+
+    assert quality.reported[0][:3] == (123, 42, date(2026, 8, 2))
+    assert quality.prompts == [("case-1", 700)]
+    assert "Відповідати необов’язково" in query.message.replies[0][0]
+    assert query.answers == [("Дякую, помилку записано.", {})]
+    markup = query.markup_edits[0]["reply_markup"]
+    assert all(
+        button.text != "❗ Помилка аналізу"
+        for row in markup.inline_keyboard
+        for button in row
+    )
+
+
+def test_reply_to_feedback_prompt_is_saved_instead_of_analyzed() -> None:
+    class Quality:
+        def __init__(self):
+            self.saved = []
+
+        def save_explanation_by_prompt(self, *args):
+            self.saved.append(args)
+            return True
+
+    class Service:
+        def process_message(self, *args):
+            raise AssertionError("Feedback explanation must not be analyzed as food")
+
+    quality = Quality()
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: Service()}),
+        quality_store=quality,
+    )
+    update, message = make_update()
+    message.text = "Не помічено вагу 150 г"
+    message.reply_to_message = SimpleNamespace(message_id=700)
+
+    asyncio.run(handlers.text(update, SimpleNamespace(user_data={})))
+
+    assert quality.saved[0][:3] == (123, 700, "Не помічено вагу 150 г")
+    assert message.replies == [
+        "Дякую, пояснення збережено. Запис у журналі не змінено."
+    ]
+
+
 def test_delete_callback_cleans_stale_totals_and_sends_updated_total() -> None:
     rich_summary = "<h3>За сьогодні:</h3><details><summary>905 кк</summary></details>"
 
@@ -3379,7 +3535,8 @@ def test_photo_handler_downloads_largest_photo_and_passes_caption() -> None:
         def get_existing_reply(self, *args):
             return None
 
-        def process_message(self, *args):
+        def process_message(self, *args, **kwargs):
+            assert kwargs == {"input_kind": "photo"}
             self.args = args
             return MealReply("reply", 1, date(2026, 8, 2))
 

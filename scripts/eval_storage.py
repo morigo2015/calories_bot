@@ -8,7 +8,26 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-RANGE_FIELDS = {"item_count", "weight_g", "kcal_per_100g", "meal_kcal"}
+RANGE_FIELDS = {
+    "item_count",
+    "weight_g",
+    "total_weight_g",
+    "kcal_per_100g",
+    "protein_per_100g",
+    "fat_per_100g",
+    "carbs_per_100g",
+    "meal_kcal",
+}
+ITEM_RANGE_FIELDS = {
+    "weight_g",
+    "kcal_per_100g",
+    "protein_per_100g",
+    "fat_per_100g",
+    "carbs_per_100g",
+}
+PORTION_RANGE_FIELDS = {"kcal", "protein_g", "fat_g", "carbs_g"}
+ORIGINS = {"user_text", "deterministic_reference", "image", "model_estimate"}
+NUTRIENT_BASES = {"per_100g", "portion"}
 
 
 class DatasetValidationError(ValueError):
@@ -17,6 +36,18 @@ class DatasetValidationError(ValueError):
 
 def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _validate_range(case_id: str, path: str, bounds: object) -> None:
+    if (
+        not isinstance(bounds, list)
+        or len(bounds) != 2
+        or not all(_is_number(item) for item in bounds)
+        or bounds[0] > bounds[1]
+    ):
+        raise DatasetValidationError(
+            f"case {case_id}: {path} must be [min, max] with min <= max"
+        )
 
 
 def validate_image_relative_path(value: object) -> str:
@@ -179,16 +210,66 @@ def validate_case(case: object) -> dict[str, Any]:
     for name in RANGE_FIELDS:
         if name not in expected:
             continue
-        bounds = expected[name]
+        _validate_range(case_id, f"expected.{name}", expected[name])
+    item_expectations = expected.get("item_expectations", [])
+    if not isinstance(item_expectations, list):
+        raise DatasetValidationError(
+            f"case {case_id}: expected.item_expectations must be a list"
+        )
+    for index, item in enumerate(item_expectations):
+        if not isinstance(item, dict):
+            raise DatasetValidationError(
+                f"case {case_id}: item expectation {index + 1} must be an object"
+            )
+        terms = item.get("required_terms")
         if (
-            not isinstance(bounds, list)
-            or len(bounds) != 2
-            or not all(_is_number(item) for item in bounds)
-            or bounds[0] > bounds[1]
+            not isinstance(terms, list)
+            or not terms
+            or not all(isinstance(term, str) and term for term in terms)
         ):
             raise DatasetValidationError(
-                f"case {case_id}: expected.{name} must be [min, max] with min <= max"
+                f"case {case_id}: item expectation {index + 1} requires terms"
             )
+        for name in ITEM_RANGE_FIELDS:
+            if name in item:
+                _validate_range(
+                    case_id,
+                    f"expected.item_expectations[{index}].{name}",
+                    item[name],
+                )
+        for name in (
+            "weight_origin",
+            "kcal_origin",
+            "protein_origin",
+            "fat_origin",
+            "carbs_origin",
+        ):
+            if name in item and item[name] not in ORIGINS:
+                raise DatasetValidationError(
+                    f"case {case_id}: {name} must be a supported origin"
+                )
+        for name in (
+            "kcal_source_basis",
+            "protein_source_basis",
+            "fat_source_basis",
+            "carbs_source_basis",
+        ):
+            if name in item and item[name] not in NUTRIENT_BASES:
+                raise DatasetValidationError(
+                    f"case {case_id}: {name} must be per_100g or portion"
+                )
+    portion = expected.get("portion_nutrition")
+    if portion is not None:
+        if not isinstance(portion, dict) or not portion:
+            raise DatasetValidationError(
+                f"case {case_id}: expected.portion_nutrition must be an object"
+            )
+        for name, bounds in portion.items():
+            if name not in PORTION_RANGE_FIELDS:
+                raise DatasetValidationError(
+                    f"case {case_id}: unsupported portion_nutrition field {name}"
+                )
+            _validate_range(case_id, f"expected.portion_nutrition.{name}", bounds)
     return case
 
 

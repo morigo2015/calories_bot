@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from calories_bot.quality import QualityStore
 from scripts.eval_storage import (
     DatasetValidationError,
     prepare_dataset_case,
@@ -21,10 +22,18 @@ from scripts.eval_storage import (
     safe_image_path,
     save_dataset_case,
 )
+from scripts.manual_review import (
+    ManualReviewError,
+    create_review_batch,
+    import_review_result,
+    is_audit_candidate,
+    review_to_eval_draft,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS = ROOT / "eval-results"
 DEFAULT_DATASET = ROOT / "evals" / "cases.jsonl"
+DEFAULT_STATISTICS_DB = ROOT / "data" / "statistics.sqlite3"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_FORM_BYTES = 2_000_000
@@ -236,7 +245,8 @@ def _page(title: str, content: str) -> str:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{_escape(title)}</title><style>{STYLE}</style></head><body><main>"
         "<nav><a class='brand' href='/'>Eval dashboard</a>"
-        "<a href='/'>Runs</a><a href='/dataset'>Dataset</a></nav>"
+        "<a href='/'>Runs</a><a href='/quality'>Quality</a>"
+        "<a href='/dataset'>Dataset</a></nav>"
         f"{content}</main></body></html>"
     )
 
@@ -389,7 +399,11 @@ def _render_actual(actual: object) -> str:
         "<th>Kcal source</th><th>Kcal origin</th><th>Kcal estimated</th>"
         f"<th>Portion</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
     )
-    return header + table
+    return (
+        header
+        + table
+        + f"<details><summary>Full diagnostic analysis</summary><pre>{_json(actual)}</pre></details>"
+    )
 
 
 def _render_result(result: dict[str, Any], case: dict[str, Any] | None) -> str:
@@ -669,10 +683,107 @@ def render_dataset_editor(
     )
 
 
+def render_quality(store: QualityStore, message: str | None = None) -> str:
+    reported = store.list_cases("reported", limit=100)
+    audit = [
+        case
+        for case in store.list_cases("audit", limit=100)
+        if is_audit_candidate(case)
+    ]
+    reviews = store.list_reviews(limit=100)
+    verdict_counts = {
+        verdict: sum(review["verdict"] == verdict for review in reviews)
+        for verdict in ("correct", "minor_error", "major_error", "uncertain")
+    }
+    notice = f"<div class='notice ok'>{_escape(message)}</div>" if message else ""
+    review_rows = []
+    for review in reviews:
+        promote = urlencode({"batch": review["batch_id"], "case": review["case_id"]})
+        review_rows.append(
+            "<tr>"
+            f"<td>{_escape(review['case_id'])}</td>"
+            f"<td>{_escape(review['kind'])}</td>"
+            f"<td>{_escape(review['model'])}:{_escape(review['effort'])}</td>"
+            f"<td>{_escape(review['verdict'])}</td>"
+            f"<td>{_escape(review['issue_type'])}</td>"
+            f"<td>{_escape(review['explanation'])}</td>"
+            f"<td><a class='button secondary' href='/quality/promote?{promote}'>"
+            "Prepare eval case</a></td></tr>"
+        )
+    table = (
+        "<p class='muted'>No imported reviews yet.</p>"
+        if not review_rows
+        else "<table><thead><tr><th>Case</th><th>Queue</th><th>Model</th>"
+        "<th>Verdict</th><th>Issue</th>"
+        f"<th>Explanation</th><th>Eval</th></tr></thead><tbody>{''.join(review_rows)}</tbody></table>"
+    )
+    return _page(
+        "Quality review",
+        f"<h1>Food analysis quality</h1>{notice}"
+        "<p>Reported errors and blind audits stay in separate batches. "
+        "Copy a generated request to ChatGPT, then paste its JSON response back.</p>"
+        "<div class='grid'>"
+        f"<section class='card'><h2>Reported</h2><p><strong>{len(reported)}</strong> waiting</p>"
+        "<form method='post' action='/quality/batch' class='actions'>"
+        "<input type='hidden' name='kind' value='reported'>"
+        "<label>Cases <input name='size' type='number' min='1' max='10' value='10'></label>"
+        "<button>Create reported batch</button></form></section>"
+        f"<section class='card'><h2>Blind audit</h2><p><strong>{len(audit)}</strong> candidates</p>"
+        "<form method='post' action='/quality/batch' class='actions'>"
+        "<input type='hidden' name='kind' value='audit'>"
+        "<label>Cases <input name='size' type='number' min='1' max='10' value='10'></label>"
+        "<button>Create audit batch</button></form></section></div>"
+        "<section class='card'><h2>Imported reviews</h2>"
+        f"<p><span class='pill'>correct {verdict_counts['correct']}</span>"
+        f"<span class='pill'>minor {verdict_counts['minor_error']}</span>"
+        f"<span class='pill'>major {verdict_counts['major_error']}</span>"
+        f"<span class='pill'>uncertain {verdict_counts['uncertain']}</span></p>"
+        f"{table}</section>",
+    )
+
+
+def render_review_batch(
+    batch_id: str,
+    prompt: str,
+    *,
+    message: str | None = None,
+    error: bool = False,
+    raw_result: str = "",
+) -> str:
+    notice = ""
+    if message:
+        notice = (
+            f"<div class='notice {'bad' if error else 'ok'}>{_escape(message)}</div>"
+        )
+    return _page(
+        "Manual review batch",
+        f"<h1>{_escape(batch_id)}</h1>{notice}"
+        "<p>1. Copy this request into a new ChatGPT chat. "
+        "2. Paste the returned JSON into the second field.</p>"
+        f"<textarea readonly spellcheck='false'>{_escape(prompt)}</textarea>"
+        "<form method='post' action='/quality/import' class='card'>"
+        f"<input type='hidden' name='batch_id' value='{_escape(batch_id)}'>"
+        "<h2>ChatGPT JSON result</h2>"
+        f"<textarea name='result_json' spellcheck='false'>{_escape(raw_result)}</textarea>"
+        "<div class='actions'><button>Import result</button>"
+        "<a class='button secondary' href='/quality'>Back to quality</a></div></form>",
+    )
+
+
 class DashboardApp:
-    def __init__(self, results_dir: Path, dataset_path: Path) -> None:
+    def __init__(
+        self,
+        results_dir: Path,
+        dataset_path: Path,
+        statistics_db_path: Path | None = None,
+    ) -> None:
         self.results_dir = results_dir
         self.dataset_path = dataset_path
+        self.statistics_db_path = (
+            statistics_db_path or (self.results_dir / "statistics.sqlite3")
+        ).resolve()
+        self.quality_store = QualityStore(self.statistics_db_path)
+        self.manual_review_dir = self.results_dir / "manual-review"
 
     def reports(self) -> list[LoadedReport]:
         return load_reports(self.results_dir)
@@ -716,9 +827,73 @@ class DashboardApp:
             return render_dataset(self.dataset_path)
         if path == "/dataset/edit":
             return render_dataset_editor(self.dataset_path, _optional(query, "id"))
+        if path == "/quality":
+            return render_quality(self.quality_store)
+        if path == "/quality/batch":
+            batch_id = _required(query, "id")
+            batch = self.quality_store.get_batch(batch_id)
+            if batch is None:
+                raise KeyError("Review batch not found")
+            prompt_path = self.manual_review_dir / batch_id / "request.md"
+            return render_review_batch(
+                batch_id, prompt_path.read_text(encoding="utf-8")
+            )
+        if path == "/quality/promote":
+            review = self.quality_store.get_review(
+                _required(query, "batch"), _required(query, "case")
+            )
+            if review is None:
+                raise KeyError("Manual review not found")
+            raw_json = json.dumps(
+                review_to_eval_draft(review), ensure_ascii=False, indent=2
+            )
+            return render_dataset_editor(
+                self.dataset_path,
+                None,
+                raw_json=raw_json,
+                message="Draft only. Check expected values before saving.",
+            )
         raise KeyError("Page not found")
 
     def post_html(self, path: str, form: dict[str, list[str]]) -> str:
+        if path == "/quality/batch":
+            kind = _required(form, "kind")
+            if kind not in {"reported", "audit"}:
+                raise ManualReviewError("Invalid batch kind")
+            batch = create_review_batch(
+                self.quality_store,
+                kind,
+                int(_first(form, "size", "10")),
+                self.manual_review_dir,
+            )
+            return render_review_batch(
+                batch["batch_id"],
+                batch["prompt"],
+                message=f"Created {len(batch['cases'])} case batch.",
+            )
+        if path == "/quality/import":
+            batch_id = _required(form, "batch_id")
+            raw_result = _required(form, "result_json")
+            prompt_path = self.manual_review_dir / batch_id / "request.md"
+            try:
+                result = import_review_result(
+                    self.quality_store,
+                    batch_id,
+                    raw_result,
+                    self.manual_review_dir,
+                )
+            except ManualReviewError as exc:
+                return render_review_batch(
+                    batch_id,
+                    prompt_path.read_text(encoding="utf-8"),
+                    message=str(exc),
+                    error=True,
+                    raw_result=raw_result,
+                )
+            return render_quality(
+                self.quality_store,
+                message=f"Imported {len(result['reviews'])} reviews from {batch_id}.",
+            )
         original_id = _first(form, "original_id", "") or None
         raw_json = _required(form, "case_json")
         if path == "/dataset/validate":
@@ -857,6 +1032,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS)
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument("--statistics-db", type=Path, default=DEFAULT_STATISTICS_DB)
     return parser
 
 
@@ -864,7 +1040,11 @@ def main() -> int:
     args = build_parser().parse_args()
     if not 0 <= args.port <= 65535:
         raise SystemExit("--port must be from 0 to 65535")
-    app = DashboardApp(args.results_dir.resolve(), args.dataset.resolve())
+    app = DashboardApp(
+        args.results_dir.resolve(),
+        args.dataset.resolve(),
+        args.statistics_db.resolve(),
+    )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     host, port = server.server_address[:2]
     print(f"Eval dashboard: http://{host}:{port}/", flush=True)

@@ -25,6 +25,7 @@ from .burn_screenshots import OpenAIBurnScreenshotAnalyzer
 from .config import Settings
 from .garmin import GarminCalorieStore
 from .meal_grouping import OpenAIMealGrouper
+from .quality import QualityStore
 from .users import GoogleUserRegistry
 from .workspace import GoogleWorkspace
 
@@ -127,6 +128,7 @@ def main() -> None:
             timeout_seconds=min(settings.openai_timeout_seconds, 15),
         ),
     )
+    quality_store = QualityStore(settings.statistics_db_path)
     analyzer = OpenAIAnalyzer(
         settings.openai_api_key,
         settings.openai_model,
@@ -182,6 +184,7 @@ def main() -> None:
         settings.default_day_start,
         settings.photo_storage_dir,
         settings.nutrition_mismatch_threshold_percent,
+        quality_store,
     )
     manager.prepare_release_storage()
     garmin_calories = GarminCalorieStore(
@@ -199,6 +202,7 @@ def main() -> None:
         transcriber,
         meal_grouper,
         burn_screenshot_analyzer,
+        quality_store,
     )
 
     application = (
@@ -279,6 +283,12 @@ def main() -> None:
     )
     application.add_handler(
         MessageHandler(message_update & filters.COMMAND, handlers.cancel_pending_input)
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handlers.analysis_error_callback,
+            pattern=r"^analysis-error:-?\d+:\d{4}-\d{2}-\d{2}$",
+        )
     )
     application.add_handler(
         CallbackQueryHandler(

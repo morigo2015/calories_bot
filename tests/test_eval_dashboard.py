@@ -131,6 +131,21 @@ def test_dashboard_escapes_report_content_and_warns_on_dataset_change(
     assert "Regressions" in comparison
 
 
+def test_dashboard_has_separate_quality_workflow(tmp_path: Path) -> None:
+    dataset = tmp_path / "cases.jsonl"
+    dataset.write_text(
+        '{"id":"one","text":"apple","expected":{"is_food":true}}\n',
+        encoding="utf-8",
+    )
+    app = DashboardApp(tmp_path / "results", dataset, tmp_path / "statistics.sqlite3")
+
+    page = app.get_html("/quality", {})
+
+    assert "Reported" in page
+    assert "Blind audit" in page
+    assert "Quality" in page
+
+
 def _dataset(path: Path) -> None:
     path.write_text(
         "// keep this comment\n"

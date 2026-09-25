@@ -36,6 +36,7 @@ from calories_bot.meal_grouping import (
     OpenAIMealGrouper,
 )
 from calories_bot.models import FoodAnalysis, LLMMetadata, calculate_meal
+from calories_bot.quality import serialize_food_analysis
 from scripts.eval_storage import (
     DatasetValidationError,
     atomic_write_json,
@@ -213,25 +214,7 @@ def _normalized_input_dict(normalized: NormalizedInput) -> dict[str, Any]:
 
 def serialize_analysis(analysis: FoodAnalysis) -> dict[str, Any]:
     """Serialize diagnostic fields, including Pydantic-excluded source IDs."""
-    return {
-        "is_food": analysis.is_food,
-        "meal_name": analysis.meal_name,
-        "items": [
-            {
-                "name": item.name,
-                "weight_g": item.weight_g,
-                "weight_estimated": item.weight_estimated,
-                "weight_origin": item.weight_origin,
-                "weight_source_id": item.weight_source_id,
-                "kcal_per_100g": item.kcal_per_100g,
-                "kcal_estimated": item.kcal_estimated,
-                "kcal_origin": item.kcal_origin,
-                "kcal_source_id": item.kcal_source_id,
-                "portion_display": item.portion_display,
-            }
-            for item in analysis.items
-        ],
-    }
+    return serialize_food_analysis(analysis)
 
 
 def serialize_burn_screenshot_analysis(
@@ -364,6 +347,40 @@ def grade_analysis(
                 item.kcal_per_100g,
                 kcal_bounds,
             )
+        for nutrient in ("protein", "fat", "carbs"):
+            field = f"{nutrient}_per_100g"
+            bounds = component.get(field)
+            if bounds is not None:
+                actual = getattr(item, field)
+                _check(
+                    checks,
+                    f"item_{index}_{field}",
+                    actual is not None and _in_range(actual, bounds),
+                    actual,
+                    bounds,
+                )
+            for suffix in ("origin", "source_basis"):
+                expected_value = component.get(f"{nutrient}_{suffix}")
+                if expected_value is not None:
+                    actual_value = getattr(item, f"{nutrient}_{suffix}")
+                    _check(
+                        checks,
+                        f"item_{index}_{nutrient}_{suffix}",
+                        actual_value == expected_value,
+                        actual_value,
+                        expected_value,
+                    )
+        for field in ("weight_origin", "kcal_origin", "kcal_source_basis"):
+            expected_value = component.get(field)
+            if expected_value is not None:
+                actual_value = getattr(item, field)
+                _check(
+                    checks,
+                    f"item_{index}_{field}",
+                    actual_value == expected_value,
+                    actual_value,
+                    expected_value,
+                )
         component_portions = component.get("portion_terms")
         if component_portions:
             portion = (item.portion_display or "").casefold()
@@ -396,6 +413,42 @@ def grade_analysis(
                 item.kcal_per_100g,
                 kcal_bounds,
             )
+        for nutrient in ("protein", "fat", "carbs"):
+            field = f"{nutrient}_per_100g"
+            bounds = expected.get(field)
+            if bounds is not None:
+                actual = getattr(item, field)
+                _check(
+                    checks,
+                    field,
+                    actual is not None and _in_range(actual, bounds),
+                    actual,
+                    bounds,
+                )
+
+    portion_expected = expected.get("portion_nutrition")
+    if portion_expected is not None:
+        portion = analysis.portion_nutrition
+        _check(
+            checks,
+            "portion_nutrition_present",
+            portion is not None,
+            portion is not None,
+            True,
+        )
+        if portion is not None:
+            for field in ("kcal", "protein_g", "fat_g", "carbs_g"):
+                bounds = portion_expected.get(field)
+                if bounds is None:
+                    continue
+                actual = getattr(portion, field)
+                _check(
+                    checks,
+                    f"portion_{field}",
+                    actual is not None and _in_range(actual, bounds),
+                    actual,
+                    bounds,
+                )
 
     total_weight_bounds = expected.get("total_weight_g")
     meal_bounds = expected.get("meal_kcal")
@@ -532,14 +585,39 @@ def check_explicit_sources(analysis: FoodAnalysis, text: str) -> list[CheckResul
                 and item.weight_origin == "user_text"
             ]
         else:
-            matches = [
-                item
-                for item in analysis.items
-                if item.kcal_source_id == source.source_id
-                and item.kcal_per_100g == source.value
-                and not item.kcal_estimated
-                and item.kcal_origin == "user_text"
-            ]
+            item_field = (
+                "kcal_per_100g" if source.kind == "kcal" else f"{source.kind}_per_100g"
+            )
+            source_field = f"{source.kind}_source_id"
+            origin_field = f"{source.kind}_origin"
+            basis_field = f"{source.kind}_source_basis"
+            estimated_field = f"{source.kind}_estimated"
+            matches = []
+            for item in analysis.items:
+                if getattr(item, source_field) != source.source_id:
+                    continue
+                expected_density = source.value
+                if source.basis == "portion":
+                    expected_density = source.value / item.weight_g * 100
+                if (
+                    getattr(item, item_field) == expected_density
+                    and getattr(item, origin_field) == "user_text"
+                    and getattr(item, basis_field) == (source.basis or "per_100g")
+                    and (
+                        source.basis == "portion" or not getattr(item, estimated_field)
+                    )
+                ):
+                    matches.append(item)
+            portion = analysis.portion_nutrition
+            if source.basis == "portion" and portion is not None:
+                portion_value_field = (
+                    "kcal" if source.kind == "kcal" else f"{source.kind}_g"
+                )
+                if (
+                    getattr(portion, source_field) == source.source_id
+                    and getattr(portion, portion_value_field) == source.value
+                ):
+                    matches.append(portion)
         _check(
             checks,
             f"explicit_{source.source_id}",

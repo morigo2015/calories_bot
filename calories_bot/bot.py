@@ -17,13 +17,21 @@ from time import perf_counter
 from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import (
+    Bot,
+    ForceReply,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import ContextTypes
 
 from . import __version__
 from .analytics import BotStatistics
 from .analyzer import (
+    SYSTEM_PROMPT,
     AnalysisError,
     Analyzer,
     InputFormatError,
@@ -71,6 +79,7 @@ from .models import (
     round_whole,
     scale_meal,
 )
+from .quality import InputKind, QualityStore
 from .saved_meals import (
     SavedMealsReadError,
     SavedMealStore,
@@ -139,6 +148,7 @@ VOICE_ERROR_TEXT = "Не вдалося розпізнати голосове п
 DELETE_ERROR_TEXT = "Не вдалося видалити запис. Спробуй ще раз."
 DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
+ANALYSIS_ERROR_CALLBACK_PREFIX = "analysis-error:"
 DAY_VIEW_CALLBACK_PREFIX = "day-view:"
 ADMIN_DELETE_CALLBACK_PREFIX = "admin-delete:"
 ADMIN_CANCEL_CALLBACK_PREFIX = "admin-cancel:"
@@ -199,6 +209,7 @@ class MealReply:
     can_save: bool = True
     can_change_weight: bool = True
     daily_total_text: str | None = None
+    can_report_analysis_error: bool = False
 
 
 def _load_content(path: Path, fallback: str) -> str:
@@ -1204,6 +1215,8 @@ class CaloriesService:
         daily_protein_goal: int | None = None,
         nutrition_mismatch_threshold_percent: float = 20.0,
         burned_store: BurnedCalorieStore | None = None,
+        quality_store: QualityStore | None = None,
+        telegram_user_id: int | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._store = store
@@ -1218,6 +1231,8 @@ class CaloriesService:
         )
         self._saved_store = saved_store
         self._burned_store = burned_store
+        self._quality_store = quality_store
+        self._telegram_user_id = telegram_user_id
         # A message analysis can take long enough for a deletion callback to be
         # handled in between its first read and the eventual append.  Keep the
         # read/append and deletion operations mutually exclusive, while doing
@@ -1500,12 +1515,21 @@ class CaloriesService:
                 ),
                 telegram_message_id=source_message_id,
                 accounting_day=day,
+                can_report_analysis_error=False,
                 daily_total_text=daily_summary,
             )
         components = self._store.get_component_meals(day, source_message_id)
         if len(components) != marker.component_count:
             return None
         replies = []
+        can_report = False
+        if self._quality_store is not None and self._telegram_user_id is not None:
+            try:
+                can_report = self._quality_store.can_report_case(
+                    self._telegram_user_id, source_message_id, day
+                )
+            except Exception:
+                LOGGER.exception("Could not check quality-case availability")
         for index, (message_id, stored) in enumerate(components):
             replies.append(
                 MealReply(
@@ -1514,6 +1538,7 @@ class CaloriesService:
                     ),
                     telegram_message_id=message_id,
                     accounting_day=day,
+                    can_report_analysis_error=(can_report and index == 0),
                     daily_total_text=(
                         daily_summary if index == len(components) - 1 else None
                     ),
@@ -1543,6 +1568,7 @@ class CaloriesService:
         image_bytes: bytes | None = None,
         *,
         nutrition_basis: Literal["per_100g", "portion"] | None = None,
+        input_kind: InputKind = "text",
     ) -> MealReply | list[MealReply]:
         timestamp = self._local_timestamp(timestamp)
         day = self._accounting_day(timestamp)
@@ -1613,12 +1639,40 @@ class CaloriesService:
                     self._delete_photo(photo_path)
                 raise
             daily_summary = self._format_day_summary(day)
+            rendered_reply = format_reply(
+                stored.meal, self._nutrition_mismatch_threshold_percent
+            )
+            can_report_analysis_error = False
+            if self._quality_store is not None and self._telegram_user_id is not None:
+                try:
+                    self._quality_store.record_case(
+                        recorded_at=timestamp,
+                        telegram_user_id=self._telegram_user_id,
+                        source_message_id=telegram_message_id,
+                        accounting_day=day,
+                        input_kind=input_kind,
+                        original_text=text,
+                        normalized=normalized,
+                        analysis=result.analysis,
+                        meal=stored.meal,
+                        rendered_reply=rendered_reply,
+                        photo_path=photo_path,
+                        image_bytes=image_bytes,
+                        model=result.metadata.model,
+                        effort=result.metadata.effort,
+                        prompt_sha256=hashlib.sha256(
+                            SYSTEM_PROMPT.encode("utf-8")
+                        ).hexdigest(),
+                        app_version=__version__,
+                    )
+                    can_report_analysis_error = True
+                except Exception:
+                    LOGGER.exception("Could not record food-analysis quality case")
             return MealReply(
-                text=format_reply(
-                    stored.meal, self._nutrition_mismatch_threshold_percent
-                ),
+                text=rendered_reply,
                 telegram_message_id=telegram_message_id,
                 accounting_day=day,
+                can_report_analysis_error=can_report_analysis_error,
                 daily_total_text=daily_summary,
             )
 
@@ -1986,6 +2040,7 @@ class UserManager:
         default_day_start: time,
         photo_storage_dir: Path,
         nutrition_mismatch_threshold_percent: float = 20.0,
+        quality_store: QualityStore | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._registry = registry
@@ -1996,6 +2051,7 @@ class UserManager:
         self._nutrition_mismatch_threshold_percent = (
             nutrition_mismatch_threshold_percent
         )
+        self._quality_store = quality_store
         self._photo_storage_dir.mkdir(parents=True, exist_ok=True)
         self._services: dict[tuple[int, str, time], CaloriesService] = {}
         self._lock = threading.RLock()
@@ -2053,6 +2109,8 @@ class UserManager:
                     user.daily_protein_goal,
                     self._nutrition_mismatch_threshold_percent,
                     self._workspace.open_burned_calorie_store(user.spreadsheet_id),
+                    self._quality_store,
+                    user.telegram_user_id,
                 )
                 self._services[key] = service
             else:
@@ -2157,6 +2215,8 @@ class UserManager:
                 raise UserRegistryError(
                     "Could not delete personal photo directory"
                 ) from exc
+            if self._quality_store is not None:
+                self._quality_store.delete_user(telegram_user_id)
             self._registry.delete_user(telegram_user_id)
             for key in list(self._services):
                 if key[0] == telegram_user_id:
@@ -2197,6 +2257,7 @@ class TelegramHandlers:
         transcriber: Transcriber | None = None,
         meal_grouper: MealGrouper | None = None,
         burn_screenshot_analyzer: BurnScreenshotAnalyzer | None = None,
+        quality_store: QualityStore | None = None,
     ) -> None:
         self._admin_user_id = admin_user_id
         self._manager = manager
@@ -2206,6 +2267,7 @@ class TelegramHandlers:
         self._transcriber = transcriber
         self._meal_grouper = meal_grouper
         self._burn_screenshot_analyzer = burn_screenshot_analyzer
+        self._quality_store = quality_store
         self._burn_albums: dict[tuple[int, str], _PendingBurnAlbum] = {}
 
     @staticmethod
@@ -3836,6 +3898,15 @@ class TelegramHandlers:
                 f"{'Збережено' if created else 'Вже збережено'}: {saved.display_name}"
             )
             try:
+                existing_markup = getattr(query.message, "reply_markup", None)
+                existing_rows = getattr(existing_markup, "inline_keyboard", ())
+                can_report = any(
+                    (button.callback_data or "").startswith(
+                        ANALYSIS_ERROR_CALLBACK_PREFIX
+                    )
+                    for row in existing_rows
+                    for button in row
+                )
                 await query.edit_message_reply_markup(
                     reply_markup=self._meal_reply_markup(
                         MealReply(
@@ -3843,6 +3914,7 @@ class TelegramHandlers:
                             telegram_message_id=message_id,
                             accounting_day=day,
                             can_save=False,
+                            can_report_analysis_error=can_report,
                         )
                     )
                 )
@@ -3872,6 +3944,7 @@ class TelegramHandlers:
             timestamp = datetime.fromisoformat(str(state["timestamp"]))
             image_value = state.get("image_bytes")
             image_bytes = bytes(image_value) if image_value is not None else None
+            stored_input_kind = state.get("input_kind")
         except (KeyError, TypeError, ValueError):
             self._clear_pending_input(context)
             await query.answer("Не вдалося відновити опис страви.", show_alert=True)
@@ -3885,14 +3958,25 @@ class TelegramHandlers:
                 query.message,
                 operation="nutrition_basis_analysis",
             ):
-                result = await asyncio.to_thread(
-                    service.process_message,
-                    text,
-                    message_id,
-                    timestamp,
-                    image_bytes,
-                    nutrition_basis=basis,
-                )
+                if stored_input_kind in {"text", "photo", "voice"}:
+                    result = await asyncio.to_thread(
+                        service.process_message,
+                        text,
+                        message_id,
+                        timestamp,
+                        image_bytes,
+                        nutrition_basis=basis,
+                        input_kind=cast(InputKind, stored_input_kind),
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        service.process_message,
+                        text,
+                        message_id,
+                        timestamp,
+                        image_bytes,
+                        nutrition_basis=basis,
+                    )
         except NotFoodError:
             reply = PHOTO_NOT_FOOD_TEXT if image_bytes is not None else NOT_FOOD_TEXT
         except InputFormatError:
@@ -4425,6 +4509,8 @@ class TelegramHandlers:
         service = await self._active_service(update)
         if service is None:
             return
+        if await self._capture_feedback_explanation(update, context, message):
+            return
         settings_state = self._user_state(context).get(SETTINGS_WAITING_KEY)
         if isinstance(settings_state, dict):
             await self._handle_settings_text(
@@ -4929,6 +5015,7 @@ class TelegramHandlers:
                 image_bytes,
                 context=context,
                 show_status=False,
+                input_kind="photo",
             )
 
     async def _handle_burn_screenshot_photo(
@@ -5267,8 +5354,133 @@ class TelegramHandlers:
                 await message.reply_text(VOICE_ERROR_TEXT, do_quote=False)
                 return
             await self._process(
-                service, message, transcript, context=context, show_status=False
+                service,
+                message,
+                transcript,
+                context=context,
+                show_status=False,
+                input_kind="voice",
             )
+
+    async def analysis_error_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        query = update.callback_query
+        if query is None:
+            return
+        user = await self._active_user(update, callback=True)
+        if user is None:
+            return
+        if self._quality_store is None:
+            await query.answer("Збір відгуків тимчасово недоступний.", show_alert=True)
+            return
+        try:
+            raw = (query.data or "").removeprefix(ANALYSIS_ERROR_CALLBACK_PREFIX)
+            message_raw, day_raw = raw.split(":", maxsplit=1)
+            message_id = int(message_raw)
+            day = date.fromisoformat(day_raw)
+            if not (query.data or "").startswith(ANALYSIS_ERROR_CALLBACK_PREFIX):
+                raise ValueError
+        except ValueError:
+            await query.answer("Некоректна кнопка.", show_alert=True)
+            return
+        try:
+            feedback = await asyncio.to_thread(
+                self._quality_store.report_error,
+                cast(int, user.telegram_user_id),
+                message_id,
+                day,
+                datetime.now(UTC),
+            )
+        except Exception:
+            LOGGER.exception("Could not record analysis-error feedback")
+            await query.answer("Не вдалося зберегти відгук.", show_alert=True)
+            return
+        if feedback is None:
+            await query.answer("Цей аналіз уже недоступний.", show_alert=True)
+            return
+
+        await query.answer("Дякую, помилку записано.")
+        await self._remove_analysis_error_button(query)
+        if feedback.feedback_prompt_message_id is not None or not feedback.created:
+            return
+        if not isinstance(query.message, Message):
+            return
+        try:
+            prompt = await query.message.reply_text(
+                "Що саме було розібрано неправильно? Наприклад: не помічено "
+                "вагу, КБЖВ або основу «на 100 г». Відповідати необов’язково. "
+                "Запис у журналі не змінено.",
+                reply_markup=ForceReply(
+                    selective=True,
+                    input_field_placeholder="Необов’язкове пояснення",
+                ),
+                do_quote=False,
+            )
+            await asyncio.to_thread(
+                self._quality_store.set_feedback_prompt,
+                feedback.case_id,
+                prompt.message_id,
+            )
+        except Exception:
+            LOGGER.warning("Could not send or link feedback prompt", exc_info=True)
+
+    @staticmethod
+    async def _remove_analysis_error_button(query: object) -> None:
+        message = getattr(query, "message", None)
+        markup = getattr(message, "reply_markup", None)
+        rows = getattr(markup, "inline_keyboard", None)
+        if not rows:
+            return
+        filtered = [
+            [
+                button
+                for button in row
+                if not (button.callback_data or "").startswith(
+                    ANALYSIS_ERROR_CALLBACK_PREFIX
+                )
+            ]
+            for row in rows
+        ]
+        filtered = [row for row in filtered if row]
+        try:
+            await query.edit_message_reply_markup(  # type: ignore[attr-defined]
+                reply_markup=InlineKeyboardMarkup(filtered)
+            )
+        except Exception:
+            LOGGER.warning("Could not hide analysis-error button", exc_info=True)
+
+    async def _capture_feedback_explanation(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        message: Message,
+    ) -> bool:
+        if self._quality_store is None or update.effective_user is None:
+            return False
+        reply_to = message.reply_to_message
+        if reply_to is None:
+            return False
+        try:
+            saved = await asyncio.to_thread(
+                self._quality_store.save_explanation_by_prompt,
+                update.effective_user.id,
+                reply_to.message_id,
+                message.text or "",
+                message.date,
+            )
+        except Exception:
+            LOGGER.exception("Could not save analysis-error explanation")
+            return False
+        if not saved:
+            return False
+        self._clear_pending_input(context)
+        await message.reply_text(
+            "Дякую, пояснення збережено. Запис у журналі не змінено.",
+            do_quote=False,
+        )
+        return True
 
     @staticmethod
     def _meal_reply_markup(result: MealReply) -> InlineKeyboardMarkup:
@@ -5298,6 +5510,19 @@ class TelegramHandlers:
                 )
             )
         rows = [first_row] if first_row else []
+        if result.can_report_analysis_error:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "❗ Помилка аналізу",
+                        callback_data=(
+                            f"{ANALYSIS_ERROR_CALLBACK_PREFIX}"
+                            f"{result.telegram_message_id}:"
+                            f"{result.accounting_day.isoformat()}"
+                        ),
+                    )
+                ]
+            )
         rows.append([InlineKeyboardButton("🗑 Видалити", callback_data=delete_callback)])
         return InlineKeyboardMarkup(rows)
 
@@ -5468,6 +5693,7 @@ class TelegramHandlers:
         *,
         context: ContextTypes.DEFAULT_TYPE | object | None = None,
         show_status: bool = True,
+        input_kind: InputKind = "text",
     ) -> None:
         if show_status:
             async with self._temporary_status(
@@ -5481,16 +5707,27 @@ class TelegramHandlers:
                     image_bytes,
                     context=context,
                     show_status=False,
+                    input_kind=input_kind,
                 )
             return
         try:
-            result = await asyncio.to_thread(
-                service.process_message,
-                text,
-                message.message_id,
-                message.date,
-                image_bytes,
-            )
+            if input_kind == "text":
+                result = await asyncio.to_thread(
+                    service.process_message,
+                    text,
+                    message.message_id,
+                    message.date,
+                    image_bytes,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    service.process_message,
+                    text,
+                    message.message_id,
+                    message.date,
+                    image_bytes,
+                    input_kind=input_kind,
+                )
         except NutritionBasisRequired:
             if context is None:
                 await message.reply_text(
@@ -5503,6 +5740,7 @@ class TelegramHandlers:
                 "message_id": message.message_id,
                 "timestamp": message.date.isoformat(),
                 "image_bytes": image_bytes,
+                "input_kind": input_kind,
             }
             self._start_waiting(context, NUTRITION_BASIS_WAITING_KEY, state)
             prompt = await message.reply_text(

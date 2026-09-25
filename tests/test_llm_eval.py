@@ -15,7 +15,7 @@ from calories_bot.burn_screenshots import (
     BurnScreenshotResult,
 )
 from calories_bot.meal_grouping import MealGroupingResult
-from calories_bot.models import FoodAnalysis, FoodItem, LLMMetadata
+from calories_bot.models import FoodAnalysis, FoodItem, LLMMetadata, PortionNutrition
 from scripts import eval_llm
 from scripts.eval_llm import (
     build_dataset_snapshot,
@@ -224,6 +224,132 @@ def test_serialize_analysis_keeps_explicit_source_ids() -> None:
 
     assert serialized["items"][0]["weight_source_id"] == "W1"
     assert serialized["items"][0]["kcal_source_id"] == "K1"
+
+
+def test_serialize_analysis_keeps_macros_basis_and_portion_nutrition() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="Плов",
+        items=[
+            FoodItem(
+                name="Плов",
+                weight_g=350,
+                weight_estimated=False,
+                weight_origin="user_text",
+                kcal_per_100g=177.14,
+                kcal_estimated=True,
+                kcal_origin="model_estimate",
+                protein_per_100g=9.14,
+                protein_estimated=False,
+                protein_origin="user_text",
+                protein_source_basis="portion",
+                protein_source_id="P1",
+            )
+        ],
+        portion_nutrition=PortionNutrition(
+            kcal=620,
+            kcal_source_id="K1",
+        ),
+    )
+
+    serialized = serialize_analysis(analysis)
+
+    assert serialized["items"][0]["protein_per_100g"] == 9.14
+    assert serialized["items"][0]["protein_source_basis"] == "portion"
+    assert serialized["items"][0]["protein_source_id"] == "P1"
+    assert serialized["portion_nutrition"] == {
+        "kcal": 620.0,
+        "protein_g": None,
+        "fat_g": None,
+        "carbs_g": None,
+        "kcal_source_id": "K1",
+        "protein_source_id": None,
+        "fat_source_id": None,
+        "carbs_source_id": None,
+    }
+
+
+def test_explicit_source_checks_all_macros_and_whole_portion() -> None:
+    text = "плов 350 г, на всю порцію К620 Б32 Ж18 В82"
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="Плов",
+        items=[
+            FoodItem(
+                name="Плов",
+                weight_g=350,
+                weight_estimated=False,
+                weight_origin="user_text",
+                weight_source_id="W1",
+                kcal_per_100g=177,
+                kcal_estimated=True,
+                protein_per_100g=9,
+                fat_per_100g=5,
+                carbs_per_100g=23,
+            )
+        ],
+        portion_nutrition=PortionNutrition(
+            kcal=620,
+            protein_g=32,
+            fat_g=18,
+            carbs_g=82,
+            kcal_source_id="K1",
+            protein_source_id="P1",
+            fat_source_id="F1",
+            carbs_source_id="C1",
+        ),
+    )
+
+    checks = eval_llm.check_explicit_sources(analysis, text)
+
+    assert len(checks) == 5
+    assert all(check.passed for check in checks)
+
+
+def test_grade_analysis_checks_item_macros_basis_and_portion_values() -> None:
+    analysis = FoodAnalysis(
+        is_food=True,
+        meal_name="Йогурт",
+        items=[
+            FoodItem(
+                name="Йогурт",
+                weight_g=150,
+                weight_estimated=False,
+                weight_origin="user_text",
+                kcal_per_100g=72.5,
+                kcal_estimated=False,
+                kcal_origin="user_text",
+                kcal_source_basis="per_100g",
+                protein_per_100g=4.2,
+                protein_estimated=False,
+                protein_origin="user_text",
+                protein_source_basis="per_100g",
+                fat_per_100g=2.5,
+                carbs_per_100g=8.1,
+            )
+        ],
+        portion_nutrition=PortionNutrition(kcal=108.75),
+    )
+
+    checks = grade_analysis(
+        analysis,
+        {
+            "is_food": True,
+            "item_expectations": [
+                {
+                    "required_terms": ["йогурт"],
+                    "protein_per_100g": [4.2, 4.2],
+                    "protein_origin": "user_text",
+                    "protein_source_basis": "per_100g",
+                    "kcal_source_basis": "per_100g",
+                }
+            ],
+            "portion_nutrition": {"kcal": [108.75, 108.75]},
+        },
+    )
+
+    assert checks
+    assert all(check.passed for check in checks)
 
 
 def test_dataset_snapshot_hashes_images_and_is_independent(tmp_path: Path) -> None:
