@@ -596,7 +596,7 @@ def test_analysis_error_button_is_separate_from_weight_correction() -> None:
 
     assert [[button.text for button in row] for row in rows] == [
         ["⭐ Зберегти", "⚖️ Змінити вагу"],
-        ["❗ Помилка аналізу"],
+        ["📝 Повідомити про помилку"],
         ["🗑 Видалити"],
     ]
     assert rows[1][0].callback_data == "analysis-error:42:2026-08-02"
@@ -1404,6 +1404,26 @@ def test_weekly_reply_combines_meals_macros_and_consumed_calories() -> None:
     assert "Баланс калорій" not in reply
 
 
+def test_weekly_reply_shows_average_weight_daily_values_and_period_change() -> None:
+    end_day = date(2026, 8, 14)
+    start_day = end_day - timedelta(days=13)
+    weights = {
+        start_day + timedelta(days=offset): 81.0 if offset < 7 else 80.0
+        for offset in range(14)
+    }
+
+    reply = format_weekly_reply(
+        end_day,
+        {},
+        [],
+        daily_weights=weights,
+    )
+
+    assert "<summary>⚖️ Середня вага: <b><u>80.0 кг</u></b>" in reply
+    assert "Зміна до попереднього періоду: <b><u>−1.0 кг</u></b>" in reply
+    assert "<b>пт 14.08</b>: 80.0 кг" in reply
+
+
 def test_weekly_reply_averages_balance_only_over_days_with_burned_data() -> None:
     end_day = date(2026, 8, 8)
     covered = [date(2026, 8, 7), date(2026, 8, 8)]
@@ -1710,7 +1730,7 @@ def test_weekly_period_crossing_tracking_start_ignores_old_missing_macros() -> N
     assert "<summary>🍞 В <b><u>80</u></b> г</summary>" in reply
 
 
-def test_weekly_service_uses_short_history_for_heading_and_averages(tmp_path) -> None:
+def test_weekly_service_always_uses_seven_completed_days(tmp_path) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     store.first_meal_day = date(2026, 8, 6)
     store.period_meals = [
@@ -1733,25 +1753,27 @@ def test_weekly_service_uses_short_history_for_heading_and_averages(tmp_path) ->
 
     reply = service.get_weekly(datetime(2026, 8, 9, 12, tzinfo=TZ))
 
-    assert store.range == (date(2026, 8, 6), date(2026, 8, 8))
-    assert reply.startswith("<h3>Попередні 3 дні (без сьогодні):</h3>")
-    assert "<sub>історія повного тижня ще не накопичена</sub>" in reply
-    assert "<summary>🔥 К <b><u>300</u></b> кк</summary>" in reply
+    assert store.range == (date(2026, 8, 2), date(2026, 8, 8))
+    assert reply.startswith("<h3>Попередні 7 днів (без сьогодні):</h3>")
+    assert "історія повного тижня ще не накопичена" not in reply
+    assert "<summary>🔥 К <b><u>129</u></b> кк</summary>" in reply
     assert "<summary>🥩 Б <b><u>—</u></b> г</summary>" in reply
     daily_details = reply.split("<details><summary>КБЖВ по дням</summary>", maxsplit=1)[
         1
     ]
-    assert daily_details.count("<li><b>") == 3
+    assert daily_details.count("<li><b>") == 7
 
 
-def test_weekly_service_uses_one_completed_day_when_history_is_empty(tmp_path) -> None:
+def test_weekly_service_uses_seven_completed_days_when_history_is_empty(
+    tmp_path,
+) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
 
     reply = service.get_weekly(datetime(2026, 8, 9, 12, tzinfo=TZ))
 
-    assert store.range == (date(2026, 8, 8), date(2026, 8, 8))
-    assert reply.startswith("<h3>Попередні 1 день (без сьогодні):</h3>")
+    assert store.range == (date(2026, 8, 2), date(2026, 8, 8))
+    assert reply.startswith("<h3>Попередні 7 днів (без сьогодні):</h3>")
 
 
 def test_monthly_service_uses_thirty_completed_days_and_cached_grouper(
@@ -1775,15 +1797,39 @@ def test_monthly_service_uses_thirty_completed_days_and_cached_grouper(
         )
     )
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+    end_day = date(2026, 8, 8)
+    weight_start = end_day - timedelta(days=59)
+    weights = {
+        weight_start + timedelta(days=offset): 82.0 if offset < 30 else 81.0
+        for offset in range(60)
+    }
 
     reply = service.get_monthly(
-        datetime(2026, 8, 9, 12, tzinfo=TZ), meal_grouper=grouper
+        datetime(2026, 8, 9, 12, tzinfo=TZ),
+        meal_grouper=grouper,
+        daily_weights=weights,
     )
 
     assert store.range == (date(2026, 7, 10), date(2026, 8, 8))
     assert reply.startswith("<h3>Попередні 30 днів (без сьогодні):</h3>")
     assert grouped == [("сир",)]
     assert reply.count("<li><b>") >= 30
+    assert "⚖️ Середня вага: <b><u>81.0 кг</u></b>" in reply
+    assert "Зміна до попереднього періоду: <b><u>−1.0 кг</u></b>" in reply
+
+
+def test_service_builds_an_explicit_previous_period(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    reply = service.get_period_summary_for(
+        date(2026, 8, 1),
+        datetime(2026, 8, 9, 12, tzinfo=TZ),
+        7,
+    )
+
+    assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
+    assert "Період: 26.07.2026–01.08.2026" in reply
 
 
 def test_weekly_meals_never_exceeds_twenty_rows() -> None:
@@ -2588,6 +2634,48 @@ def test_day_navigation_shows_previous_and_next_for_historical_day() -> None:
     ]
 
 
+def test_period_navigation_moves_by_the_full_report_length() -> None:
+    markup = TelegramHandlers._period_navigation_markup(
+        7, date(2026, 8, 7), date(2026, 8, 14)
+    )
+
+    buttons = markup.inline_keyboard[0]
+    assert [(button.text, button.callback_data) for button in buttons] == [
+        ("⬅️ Попередній", "period-view:7:2026-07-31"),
+        ("Наступний ➡️", "period-view:7:2026-08-14"),
+    ]
+
+
+def test_period_navigation_edits_the_report() -> None:
+    class Service:
+        def __init__(self):
+            self.args = None
+
+        def last_completed_day(self, timestamp):
+            assert timestamp.tzinfo == UTC
+            return date(2026, 8, 14)
+
+        def get_period_summary_for(self, *args):
+            self.args = args
+            return "<h3>Попередні 7 днів</h3><p>Період</p>"
+
+    service = Service()
+    handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
+    update, query = make_callback_update("period-view:7:2026-08-07")
+    query.message = SimpleNamespace()
+
+    asyncio.run(handlers.period_callback(update, SimpleNamespace()))
+
+    assert service.args[0] == date(2026, 8, 7)
+    assert service.args[2:] == (7, None, None, None)
+    assert query.answers == [(None, {})]
+    markup = query.edits[0][1]["reply_markup"].inline_keyboard[0]
+    assert [(button.text, button.callback_data) for button in markup] == [
+        ("⬅️ Попередній", "period-view:7:2026-07-31"),
+        ("Наступний ➡️", "period-view:7:2026-08-14"),
+    ]
+
+
 def test_day_handler_maps_read_error_to_user_message() -> None:
     class FailingService:
         def get_day_summary(self, timestamp):
@@ -2661,8 +2749,12 @@ def test_weekly_admin_falls_back_to_consumed_when_garmin_is_unavailable() -> Non
     class Service:
         burned_totals = "unset"
 
-        def get_weekly(self, timestamp, burned_totals, meal_grouper):
-            del timestamp, meal_grouper
+        def last_completed_day(self, timestamp):
+            del timestamp
+            return date(2026, 8, 1)
+
+        def get_weekly(self, timestamp, burned_totals, meal_grouper, daily_weights):
+            del timestamp, meal_grouper, daily_weights
             self.burned_totals = burned_totals
             return "<h3>Статистика за тиждень</h3><p>Спожито: 700 ккал</p>"
 
@@ -2692,8 +2784,12 @@ def test_weekly_admin_uses_preserved_cache_when_garmin_refresh_fails() -> None:
     class Service:
         burned_totals = None
 
-        def get_weekly(self, timestamp, burned_totals, meal_grouper):
-            del timestamp, meal_grouper
+        def last_completed_day(self, timestamp):
+            del timestamp
+            return date(2026, 8, 1)
+
+        def get_weekly(self, timestamp, burned_totals, meal_grouper, daily_weights):
+            del timestamp, meal_grouper, daily_weights
             self.burned_totals = burned_totals
             return "<h3>Статистика за тиждень</h3>"
 
@@ -3120,7 +3216,7 @@ def test_analysis_error_callback_records_feedback_and_asks_optional_reason(
     assert query.answers == [("Дякую, помилку записано.", {})]
     markup = query.markup_edits[0]["reply_markup"]
     assert all(
-        button.text != "❗ Помилка аналізу"
+        button.text != "📝 Повідомити про помилку"
         for row in markup.inline_keyboard
         for button in row
     )
@@ -4385,7 +4481,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.12.3"]
+    assert admin_message.replies == ["Версія: 1.13.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4414,7 +4510,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.12.3\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.13.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:

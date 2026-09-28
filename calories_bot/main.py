@@ -303,6 +303,12 @@ def main() -> None:
     )
     application.add_handler(
         CallbackQueryHandler(
+            handlers.period_callback,
+            pattern=r"^period-view:(?:7|30):\d{4}-\d{2}-\d{2}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
             handlers.help_callback, pattern=r"^help-(?:main|more|examples|admin)$"
         )
     )

@@ -15,9 +15,10 @@ from garminconnect import Garmin
 from .sheets import accounting_date
 
 LOGGER = logging.getLogger(__name__)
-GARMIN_CACHE_SCHEMA_VERSION = 2
+GARMIN_CACHE_SCHEMA_VERSION = 3
 GARMIN_CACHE_DAYS = 30
 GARMIN_WEEK_DAYS = 7
+GARMIN_WEIGHT_HISTORY_START = date(2000, 1, 1)
 GARMIN_RECENT_DAY_RECHECK_INTERVAL = timedelta(hours=1)
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
@@ -41,10 +42,18 @@ class GarminDailyCalories:
 
 
 @dataclass(frozen=True)
+class GarminDailyWeight:
+    day: str
+    weight_kg: float
+
+
+@dataclass(frozen=True)
 class GarminCalorieSnapshot:
     refresh_day: str
     refreshed_at: str
     days: tuple[GarminDailyCalories, ...]
+    weights: tuple[GarminDailyWeight, ...]
+    weight_history_imported: bool = True
 
 
 class GarminCalorieStore:
@@ -84,6 +93,7 @@ class GarminCalorieStore:
                 existing is not None
                 and existing.refresh_day == refresh_day.isoformat()
                 and len(existing.days) == GARMIN_CACHE_DAYS
+                and existing.weight_history_imported
             ):
                 refreshed_at = datetime.fromisoformat(existing.refreshed_at).astimezone(
                     self._timezone
@@ -132,6 +142,31 @@ class GarminCalorieStore:
             date.fromisoformat(entry.day): entry.total_kcal for entry in snapshot.days
         }
 
+    def get_daily_weights(self) -> dict[date, float]:
+        """Return daily average weights, carrying the latest value forward."""
+
+        snapshot = self._read_snapshot()
+        if snapshot is None:
+            raise GarminCacheError("Garmin cache has not been created yet")
+        if not snapshot.weights:
+            return {}
+
+        recorded = {
+            date.fromisoformat(entry.day): entry.weight_kg for entry in snapshot.weights
+        }
+        first_day = min(recorded)
+        last_day = date.fromisoformat(snapshot.refresh_day) - timedelta(days=1)
+        result: dict[date, float] = {}
+        latest: float | None = None
+        day = first_day
+        while day <= last_day:
+            if day in recorded:
+                latest = recorded[day]
+            if latest is not None:
+                result[day] = latest
+            day += timedelta(days=1)
+        return result
+
     def _fetch_snapshot(
         self,
         refresh_day: date,
@@ -148,25 +183,66 @@ class GarminCalorieStore:
             first_day + timedelta(days=offset) for offset in range(GARMIN_CACHE_DAYS)
         )
         missing_days = tuple(day for day in requested_days if day not in cached)
-        if missing_days:
+        needs_full_weight_history = (
+            existing is None or not existing.weight_history_imported
+        )
+        if needs_full_weight_history:
+            weight_start = GARMIN_WEIGHT_HISTORY_START
+        else:
+            assert existing is not None
+            weight_start = date.fromisoformat(existing.refresh_day)
+        needs_weights = weight_start <= last_day
+        client: Garmin | None = None
+        if missing_days or needs_weights:
             client = self._connect()
+        if missing_days:
+            assert client is not None
             cached.update({day: self._fetch_day(client, day) for day in missing_days})
         days = tuple(cached[day] for day in requested_days)
+
+        existing_weights = {
+            date.fromisoformat(entry.day): entry
+            for entry in (() if existing is None else existing.weights)
+        }
+        if needs_weights:
+            assert client is not None
+            fetched_weights = self._fetch_weights(client, weight_start, last_day)
+            existing_weights = {
+                day: entry
+                for day, entry in existing_weights.items()
+                if not weight_start <= day <= last_day
+            }
+            existing_weights.update(
+                {date.fromisoformat(entry.day): entry for entry in fetched_weights}
+            )
+        weights = tuple(existing_weights[day] for day in sorted(existing_weights))
         return GarminCalorieSnapshot(
             refresh_day=refresh_day.isoformat(),
             refreshed_at=refreshed_at.isoformat(),
             days=days,
+            weights=weights,
         )
 
     def _recheck_latest_day(
         self, snapshot: GarminCalorieSnapshot, refreshed_at: datetime
     ) -> GarminCalorieSnapshot:
         latest_day = date.fromisoformat(snapshot.refresh_day) - timedelta(days=1)
-        latest = self._fetch_day(self._connect(), latest_day)
+        client = self._connect()
+        latest = self._fetch_day(client, latest_day)
+        latest_weights = self._fetch_weights(client, latest_day, latest_day)
+        weights = {
+            date.fromisoformat(entry.day): entry
+            for entry in snapshot.weights
+            if entry.day != latest_day.isoformat()
+        }
+        weights.update(
+            {date.fromisoformat(entry.day): entry for entry in latest_weights}
+        )
         return GarminCalorieSnapshot(
             refresh_day=snapshot.refresh_day,
             refreshed_at=refreshed_at.isoformat(),
             days=(*snapshot.days[:-1], latest),
+            weights=tuple(weights[day] for day in sorted(weights)),
         )
 
     def _connect(self) -> Garmin:
@@ -179,6 +255,55 @@ class GarminCalorieStore:
         return GarminDailyCalories(
             day=day.isoformat(),
             total_kcal=self._parse_total_kcal(summary, day),
+        )
+
+    def _fetch_weights(
+        self, client: Garmin, start_day: date, end_day: date
+    ) -> tuple[GarminDailyWeight, ...]:
+        payload = client.get_body_composition(
+            start_day.isoformat(), end_day.isoformat()
+        )
+        return self._parse_daily_weights(payload, start_day, end_day)
+
+    @staticmethod
+    def _parse_daily_weights(
+        payload: Any, start_day: date, end_day: date
+    ) -> tuple[GarminDailyWeight, ...]:
+        if not isinstance(payload, dict):
+            raise GarminDataError("Garmin weight response is not an object")
+        raw_entries = payload.get("dateWeightList")
+        if not isinstance(raw_entries, list):
+            raise GarminDataError("Garmin weight response has no measurement list")
+
+        grouped: dict[date, list[float]] = {}
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                raise GarminDataError("Garmin weight measurement is not an object")
+            try:
+                day = date.fromisoformat(str(item["calendarDate"]))
+            except (KeyError, ValueError) as exc:
+                raise GarminDataError(
+                    "Garmin weight measurement has no valid date"
+                ) from exc
+            value = item.get("weight")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+            ):
+                raise GarminDataError(
+                    f"Garmin weight measurement for {day} has no valid weight"
+                )
+            if start_day <= day <= end_day:
+                # Garmin returns body weight in grams.
+                grouped.setdefault(day, []).append(float(value) / 1000)
+
+        return tuple(
+            GarminDailyWeight(
+                day=day.isoformat(),
+                weight_kg=round(sum(values) / len(values), 3),
+            )
+            for day, values in sorted(grouped.items())
         )
 
     @staticmethod
@@ -201,7 +326,7 @@ class GarminCalorieStore:
             raise GarminCacheError("Could not read Garmin calorie cache") from exc
         try:
             schema_version = raw["schema_version"]
-            if schema_version not in {1, GARMIN_CACHE_SCHEMA_VERSION}:
+            if schema_version not in {1, 2, GARMIN_CACHE_SCHEMA_VERSION}:
                 raise ValueError("unsupported schema version")
             refresh_day = date.fromisoformat(raw["refresh_day"]).isoformat()
             refreshed_at = datetime.fromisoformat(raw["refreshed_at"]).isoformat()
@@ -228,17 +353,45 @@ class GarminCalorieStore:
                 raise ValueError("snapshot days are not consecutive")
             if parsed_days[-1] != date.fromisoformat(refresh_day) - timedelta(days=1):
                 raise ValueError("snapshot does not end on the latest completed day")
+            weights = (
+                tuple(
+                    GarminDailyWeight(
+                        day=date.fromisoformat(item["day"]).isoformat(),
+                        weight_kg=self._validate_cached_weight(item["weight_kg"]),
+                    )
+                    for item in raw["weights"]
+                )
+                if schema_version == GARMIN_CACHE_SCHEMA_VERSION
+                else ()
+            )
+            weight_days = tuple(date.fromisoformat(entry.day) for entry in weights)
+            if weight_days != tuple(sorted(set(weight_days))):
+                raise ValueError("weight days must be unique and sorted")
+            if weight_days and weight_days[-1] >= date.fromisoformat(refresh_day):
+                raise ValueError("weight history includes an unfinished day")
         except (KeyError, TypeError, ValueError) as exc:
             raise GarminCacheError(
                 "Garmin calorie cache has an invalid schema"
             ) from exc
-        return GarminCalorieSnapshot(refresh_day, refreshed_at, days)
+        return GarminCalorieSnapshot(
+            refresh_day,
+            refreshed_at,
+            days,
+            weights,
+            weight_history_imported=schema_version == GARMIN_CACHE_SCHEMA_VERSION,
+        )
 
     @staticmethod
     def _validate_cached_kcal(value: object) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("invalid cached calorie value")
         return value
+
+    @staticmethod
+    def _validate_cached_weight(value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("invalid cached weight value")
+        return float(value)
 
     def _write_snapshot(self, snapshot: GarminCalorieSnapshot) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +400,7 @@ class GarminCalorieStore:
             "refresh_day": snapshot.refresh_day,
             "refreshed_at": snapshot.refreshed_at,
             "days": [asdict(entry) for entry in snapshot.days],
+            "weights": [asdict(entry) for entry in snapshot.weights],
         }
         temporary = self._cache_path.with_name(f".{self._cache_path.name}.tmp")
         try:

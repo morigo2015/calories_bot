@@ -18,6 +18,7 @@ class FakeGarmin:
         self.retry_attempts = retry_attempts
         self.login_path = None
         self.requested_days = []
+        self.requested_weight_ranges = []
         self.__class__.instances.append(self)
 
     def login(self, path):
@@ -29,6 +30,10 @@ class FakeGarmin:
             "calendarDate": day,
             "totalKilocalories": 2000 + len(self.requested_days),
         }
+
+    def get_body_composition(self, start_day, end_day):
+        self.requested_weight_ranges.append((start_day, end_day))
+        return {"dateWeightList": []}
 
 
 def build_store(tmp_path):
@@ -53,6 +58,9 @@ def test_refreshes_thirty_completed_days_and_formats_latest_week(monkeypatch, tm
     assert len(FakeGarmin.instances[0].requested_days) == 30
     assert FakeGarmin.instances[0].requested_days[0] == "2026-07-15"
     assert FakeGarmin.instances[0].requested_days[-1] == "2026-08-13"
+    assert FakeGarmin.instances[0].requested_weight_ranges == [
+        ("2000-01-01", "2026-08-13")
+    ]
     report = store.format_weekly_report()
     assert report.startswith("🔥 Витрата калорій за останні 7 днів (Garmin):")
     assert "• 07.08, пт — 2 024 ккал" in report
@@ -96,7 +104,7 @@ def test_upgrades_legacy_week_cache_by_fetching_only_missing_days(
     assert FakeGarmin.instances[0].requested_days[0] == "2026-07-15"
     assert FakeGarmin.instances[0].requested_days[-1] == "2026-08-06"
     assert store.get_daily_calories()[datetime(2026, 8, 13).date()] == 1913
-    assert json.loads(cache_path.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["schema_version"] == 3
 
 
 def test_next_day_refresh_reuses_archive_and_fetches_one_new_day(monkeypatch, tmp_path):
@@ -110,7 +118,43 @@ def test_next_day_refresh_reuses_archive_and_fetches_one_new_day(monkeypatch, tm
 
     assert len(FakeGarmin.instances) == 1
     assert FakeGarmin.instances[0].requested_days == ["2026-08-14"]
+    assert FakeGarmin.instances[0].requested_weight_ranges == [
+        ("2026-08-14", "2026-08-14")
+    ]
     assert len(store.get_daily_calories()) == 30
+
+
+def test_imports_all_weights_averages_each_day_and_fills_gaps(monkeypatch, tmp_path):
+    class WeightGarmin(FakeGarmin):
+        def get_body_composition(self, start_day, end_day):
+            self.requested_weight_ranges.append((start_day, end_day))
+            return {
+                "dateWeightList": [
+                    {"calendarDate": "2026-08-09", "weight": 80_000},
+                    {"calendarDate": "2026-08-09", "weight": 81_000},
+                    {"calendarDate": "2026-08-12", "weight": 79_500},
+                ]
+            }
+
+    WeightGarmin.instances.clear()
+    monkeypatch.setattr(garmin_module, "Garmin", WeightGarmin)
+    store = build_store(tmp_path)
+
+    store.refresh_if_due(datetime(2026, 8, 14, 1, tzinfo=TZ))
+
+    assert WeightGarmin.instances[0].requested_weight_ranges == [
+        ("2000-01-01", "2026-08-13")
+    ]
+    assert store.get_daily_weights() == {
+        datetime(2026, 8, day).date(): weight
+        for day, weight in (
+            (9, 80.5),
+            (10, 80.5),
+            (11, 80.5),
+            (12, 79.5),
+            (13, 79.5),
+        )
+    }
 
 
 def test_rechecks_latest_completed_day_hourly(monkeypatch, tmp_path):

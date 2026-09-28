@@ -150,6 +150,7 @@ DELETE_CALLBACK_PREFIX = "delete:"
 SAVE_CALLBACK_PREFIX = "save:"
 ANALYSIS_ERROR_CALLBACK_PREFIX = "analysis-error:"
 DAY_VIEW_CALLBACK_PREFIX = "day-view:"
+PERIOD_VIEW_CALLBACK_PREFIX = "period-view:"
 ADMIN_DELETE_CALLBACK_PREFIX = "admin-delete:"
 ADMIN_CANCEL_CALLBACK_PREFIX = "admin-cancel:"
 GOAL_DISABLE_CALLBACK_PREFIX = "goal-disable:"
@@ -183,6 +184,8 @@ class GarminCalories(Protocol):
     def format_weekly_report(self) -> str: ...
 
     def get_daily_calories(self) -> dict[date, int]: ...
+
+    def get_daily_weights(self) -> dict[date, float]: ...
 
 
 class NotFoodError(ValueError):
@@ -910,6 +913,49 @@ def _format_weekly_meals_body(
     )
 
 
+def _average_weight(
+    days: list[date], daily_weights: Mapping[date, float]
+) -> float | None:
+    values = [daily_weights[day] for day in days if day in daily_weights]
+    return sum(values) / len(values) if values else None
+
+
+def _format_weight_change(value: float) -> str:
+    return f"{value:+.1f}".replace("-", "−")
+
+
+def _format_period_weight_details(
+    end_day: date,
+    period_days: int,
+    daily_weights: Mapping[date, float],
+) -> str:
+    start_day = end_day - timedelta(days=period_days - 1)
+    days = [start_day + timedelta(days=offset) for offset in range(period_days)]
+    previous_days = [
+        start_day - timedelta(days=period_days) + timedelta(days=offset)
+        for offset in range(period_days)
+    ]
+    average = _average_weight(days, daily_weights)
+    previous_average = _average_weight(previous_days, daily_weights)
+    average_text = "—" if average is None else f"{average:.1f} кг"
+    change_text = (
+        "—"
+        if average is None or previous_average is None
+        else f"{_format_weight_change(average - previous_average)} кг"
+    )
+    rows = [
+        f"<li><b>{UKRAINIAN_WEEKDAYS[day.weekday()]} {day:%d.%m}</b>: "
+        f"{f'{daily_weights[day]:.1f} кг' if day in daily_weights else '—'}</li>"
+        for day in days
+    ]
+    return (
+        "<details><summary>⚖️ Середня вага: "
+        f"<b><u>{average_text}</u></b><br/>"
+        f"Зміна до попереднього періоду: <b><u>{change_text}</u></b>"
+        f"</summary><ul>{''.join(rows)}</ul></details>"
+    )
+
+
 def format_weekly_reply(
     end_day: date,
     totals: Mapping[date, float | NutritionSummary],
@@ -920,6 +966,7 @@ def format_weekly_reply(
     daily_protein_goal: int | None = None,
     period_days: int = WEEK_DAYS,
     expected_period_days: int = WEEK_DAYS,
+    daily_weights: Mapping[date, float] | None = None,
 ) -> str:
     _weekly_period_text(period_days)
     _weekly_period_text(expected_period_days)
@@ -1021,6 +1068,11 @@ def format_weekly_reply(
         "<details><summary>КБЖВ по дням</summary>"
         f"<ul>{''.join(day_rows)}</ul></details>"
     )
+    weight_details = (
+        ""
+        if daily_weights is None
+        else _format_period_weight_details(end_day, period_days, daily_weights)
+    )
 
     balance_details = ""
     if burned_totals is not None:
@@ -1089,8 +1141,9 @@ def format_weekly_reply(
     )
     return (
         f"<h3>Попередні {period_days} {day_word} (без сьогодні):</h3>"
+        f"<p><sub>Період: {start_day:%d.%m.%Y}–{end_day:%d.%m.%Y}</sub></p>"
         f"{history_note}<p><sub>КБЖВ в середньому за день:</sub></p>"
-        f"{''.join(progress_blocks)}{daily_macros}{balance_details}"
+        f"{''.join(progress_blocks)}{daily_macros}{weight_details}{balance_details}"
     )
 
 
@@ -1417,9 +1470,14 @@ class CaloriesService:
         timestamp: datetime,
         burned_totals: dict[date, int] | None = None,
         meal_grouper: MealGrouper | None = None,
+        daily_weights: Mapping[date, float] | None = None,
     ) -> str:
         return self._get_period_summary(
-            timestamp, WEEK_DAYS, burned_totals, meal_grouper
+            self.last_completed_day(timestamp),
+            WEEK_DAYS,
+            burned_totals,
+            meal_grouper,
+            daily_weights,
         )
 
     def get_monthly(
@@ -1427,27 +1485,45 @@ class CaloriesService:
         timestamp: datetime,
         burned_totals: dict[date, int] | None = None,
         meal_grouper: MealGrouper | None = None,
+        daily_weights: Mapping[date, float] | None = None,
     ) -> str:
         return self._get_period_summary(
-            timestamp, MONTH_DAYS, burned_totals, meal_grouper
+            self.last_completed_day(timestamp),
+            MONTH_DAYS,
+            burned_totals,
+            meal_grouper,
+            daily_weights,
+        )
+
+    def get_period_summary_for(
+        self,
+        end_day: date,
+        timestamp: datetime,
+        period_days: int,
+        burned_totals: dict[date, int] | None = None,
+        meal_grouper: MealGrouper | None = None,
+        daily_weights: Mapping[date, float] | None = None,
+    ) -> str:
+        if period_days not in {WEEK_DAYS, MONTH_DAYS}:
+            raise ValueError("Unsupported report period")
+        if end_day > self.last_completed_day(timestamp):
+            raise ValueError("Cannot show an unfinished report period")
+        return self._get_period_summary(
+            end_day,
+            period_days,
+            burned_totals,
+            meal_grouper,
+            daily_weights,
         )
 
     def _get_period_summary(
         self,
-        timestamp: datetime,
-        maximum_days: int,
+        end_day: date,
+        period_days: int,
         burned_totals: dict[date, int] | None = None,
         meal_grouper: MealGrouper | None = None,
+        daily_weights: Mapping[date, float] | None = None,
     ) -> str:
-        end_day = self._accounting_day(timestamp) - timedelta(days=1)
-        full_start_day = end_day - timedelta(days=maximum_days - 1)
-        first_meal_day = self._store.get_first_meal_day()
-        if first_meal_day is None:
-            period_days = 1
-        elif first_meal_day <= full_start_day:
-            period_days = maximum_days
-        else:
-            period_days = max(1, min(maximum_days, (end_day - first_meal_day).days + 1))
         start_day = end_day - timedelta(days=period_days - 1)
         meals = self._store.get_period_meals(start_day, end_day)
 
@@ -1489,7 +1565,8 @@ class CaloriesService:
             self._daily_kcal_goal,
             self._daily_protein_goal,
             period_days,
-            maximum_days,
+            period_days,
+            daily_weights,
         )
 
     @staticmethod
@@ -2419,6 +2496,34 @@ class TelegramHandlers:
             )
         return InlineKeyboardMarkup([buttons])
 
+    @staticmethod
+    def _period_navigation_markup(
+        period_days: int, selected_end_day: date, latest_end_day: date
+    ) -> InlineKeyboardMarkup:
+        buttons = [
+            InlineKeyboardButton(
+                "⬅️ Попередній",
+                callback_data=(
+                    f"{PERIOD_VIEW_CALLBACK_PREFIX}{period_days}:"
+                    f"{(selected_end_day - timedelta(days=period_days)).isoformat()}"
+                ),
+            )
+        ]
+        if selected_end_day < latest_end_day:
+            next_end_day = min(
+                selected_end_day + timedelta(days=period_days), latest_end_day
+            )
+            buttons.append(
+                InlineKeyboardButton(
+                    "Наступний ➡️",
+                    callback_data=(
+                        f"{PERIOD_VIEW_CALLBACK_PREFIX}{period_days}:"
+                        f"{next_end_day.isoformat()}"
+                    ),
+                )
+            )
+        return InlineKeyboardMarkup([buttons])
+
     async def track_interaction(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2460,18 +2565,33 @@ class TelegramHandlers:
             and update.effective_user.id == self._admin_user_id
         )
 
-    async def _get_current_garmin_calories(self) -> dict[date, int] | None:
+    async def _get_current_garmin_data(
+        self,
+    ) -> tuple[dict[date, int] | None, dict[date, float] | None]:
         if self._garmin_calories is None:
-            return None
+            return None, None
         try:
             await asyncio.to_thread(self._garmin_calories.refresh_if_due)
         except Exception:
-            LOGGER.exception("Could not refresh Garmin calories for /week")
+            LOGGER.exception("Could not refresh Garmin data for a report")
         try:
-            return await asyncio.to_thread(self._garmin_calories.get_daily_calories)
+            calories = await asyncio.to_thread(self._garmin_calories.get_daily_calories)
         except Exception:
-            LOGGER.exception("Garmin calories are unavailable for /week")
-            return None
+            LOGGER.exception("Garmin calories are unavailable for a report")
+            calories = None
+        get_weights = getattr(self._garmin_calories, "get_daily_weights", None)
+        if not callable(get_weights):
+            return calories, None
+        try:
+            weights = await asyncio.to_thread(get_weights)
+        except Exception:
+            LOGGER.exception("Garmin weights are unavailable for a report")
+            weights = None
+        return calories, weights
+
+    async def _get_current_garmin_calories(self) -> dict[date, int] | None:
+        calories, _weights = await self._get_current_garmin_data()
+        return calories
 
     @staticmethod
     def _user_state(
@@ -2913,15 +3033,21 @@ class TelegramHandlers:
             message,
             operation="week",
         ):
+            end_day: date | None = None
             try:
                 burned_totals = None
+                daily_weights = None
                 if self._is_admin(update):
-                    burned_totals = await self._get_current_garmin_calories()
+                    burned_totals, daily_weights = await self._get_current_garmin_data()
+                end_day = await asyncio.to_thread(
+                    service.last_completed_day, message.date
+                )
                 reply = await asyncio.to_thread(
                     service.get_weekly,
                     message.date,
                     burned_totals,
                     self._meal_grouper,
+                    daily_weights,
                 )
             except Exception:
                 LOGGER.exception("Could not build /week")
@@ -2931,6 +3057,11 @@ class TelegramHandlers:
                     message,
                     context,
                     reply,
+                    reply_markup=(
+                        self._period_navigation_markup(WEEK_DAYS, end_day, end_day)
+                        if end_day is not None
+                        else None
+                    ),
                     operation="/week report",
                 )
             else:
@@ -2948,15 +3079,21 @@ class TelegramHandlers:
             message,
             operation="month",
         ):
+            end_day: date | None = None
             try:
                 burned_totals = None
+                daily_weights = None
                 if self._is_admin(update):
-                    burned_totals = await self._get_current_garmin_calories()
+                    burned_totals, daily_weights = await self._get_current_garmin_data()
+                end_day = await asyncio.to_thread(
+                    service.last_completed_day, message.date
+                )
                 reply = await asyncio.to_thread(
                     service.get_monthly,
                     message.date,
                     burned_totals,
                     self._meal_grouper,
+                    daily_weights,
                 )
             except Exception:
                 LOGGER.exception("Could not build /month")
@@ -2966,10 +3103,82 @@ class TelegramHandlers:
                     message,
                     context,
                     reply,
+                    reply_markup=(
+                        self._period_navigation_markup(MONTH_DAYS, end_day, end_day)
+                        if end_day is not None
+                        else None
+                    ),
                     operation="/month report",
                 )
             else:
                 await message.reply_text(reply, do_quote=False)
+
+    async def period_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        service = await self._active_service(update, callback=True)
+        if service is None:
+            return
+        try:
+            callback_data = query.data or ""
+            if not callback_data.startswith(PERIOD_VIEW_CALLBACK_PREFIX):
+                raise ValueError
+            raw_period, raw_end_day = callback_data.removeprefix(
+                PERIOD_VIEW_CALLBACK_PREFIX
+            ).split(":", maxsplit=1)
+            period_days = int(raw_period)
+            if period_days not in {WEEK_DAYS, MONTH_DAYS}:
+                raise ValueError
+            selected_end_day = date.fromisoformat(raw_end_day)
+        except ValueError:
+            await query.answer("Некоректна кнопка.", show_alert=True)
+            return
+
+        now = datetime.now(UTC)
+        try:
+            latest_end_day = await asyncio.to_thread(service.last_completed_day, now)
+            burned_totals = None
+            daily_weights = None
+            if self._is_admin(update):
+                burned_totals, daily_weights = await self._get_current_garmin_data()
+            reply = await asyncio.to_thread(
+                service.get_period_summary_for,
+                selected_end_day,
+                now,
+                period_days,
+                burned_totals,
+                self._meal_grouper,
+                daily_weights,
+            )
+        except ValueError:
+            await query.answer("Цей період ще не завершився.", show_alert=True)
+            return
+        except SheetsReadError:
+            LOGGER.exception("Could not read data for report navigation")
+            await query.answer(READ_ERROR_TEXT, show_alert=True)
+            return
+        except Exception:
+            LOGGER.exception("Could not navigate period reports")
+            await query.answer(READ_ERROR_TEXT, show_alert=True)
+            return
+
+        try:
+            await self._edit_rich_html(
+                query,
+                context,
+                reply,
+                self._period_navigation_markup(
+                    period_days, selected_end_day, latest_end_day
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Could not edit a period report")
+            await query.answer(READ_ERROR_TEXT, show_alert=True)
+            return
+        await query.answer()
 
     async def weekly_meals(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -5514,7 +5723,7 @@ class TelegramHandlers:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "❗ Помилка аналізу",
+                        "📝 Повідомити про помилку",
                         callback_data=(
                             f"{ANALYSIS_ERROR_CALLBACK_PREFIX}"
                             f"{result.telegram_message_id}:"

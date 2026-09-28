@@ -107,6 +107,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         tips=lambda: None,
         day=lambda: None,
         day_callback=lambda: None,
+        period_callback=lambda: None,
         weekly=lambda: None,
         monthly=lambda: None,
         weekly_calories=lambda: None,
@@ -184,7 +185,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 38
+    assert len(app.handlers) == 39
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
