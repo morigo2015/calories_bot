@@ -1829,7 +1829,7 @@ def test_service_builds_an_explicit_previous_period(tmp_path) -> None:
     )
 
     assert store.range == (date(2026, 7, 26), date(2026, 8, 1))
-    assert "Період: 26.07.2026–01.08.2026" in reply
+    assert "<b>Період: 26.07.2026–01.08.2026</b>" in reply
 
 
 def test_weekly_meals_never_exceeds_twenty_rows() -> None:
@@ -2179,6 +2179,7 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
         def __init__(self):
             self.replies = []
             self.reply_kwargs = []
+            self.photo_replies = []
             self.deleted_replies = []
             self.typing_actions = []
             self.chat_id = user_id if chat_id is None else chat_id
@@ -2195,6 +2196,10 @@ def make_update(*, user_id=123, chat_id=None, chat_type=ChatType.PRIVATE):
         async def reply_text(self, text, **kwargs):
             self.replies.append(text)
             self.reply_kwargs.append(kwargs)
+            return None
+
+        async def reply_photo(self, **kwargs):
+            self.photo_replies.append(kwargs)
             return None
 
     message = FakeMessage()
@@ -2662,12 +2667,26 @@ def test_period_navigation_edits_the_report() -> None:
     service = Service()
     handlers = TelegramHandlers(999, FakeManager({123: user_record()}, {123: service}))
     update, query = make_callback_update("period-view:7:2026-08-07")
-    query.message = SimpleNamespace()
+    typing_actions = []
+
+    class CallbackMessage:
+        chat_id = 123
+
+        @staticmethod
+        def get_bot():
+            class Bot:
+                async def send_chat_action(self, *, chat_id, action):
+                    typing_actions.append((chat_id, action))
+
+            return Bot()
+
+    query.message = CallbackMessage()
 
     asyncio.run(handlers.period_callback(update, SimpleNamespace()))
 
     assert service.args[0] == date(2026, 8, 7)
     assert service.args[2:] == (7, None, None, None)
+    assert typing_actions == [(123, ChatAction.TYPING)]
     assert query.answers == [(None, {})]
     markup = query.edits[0][1]["reply_markup"].inline_keyboard[0]
     assert [(button.text, button.callback_data) for button in markup] == [
@@ -2812,6 +2831,101 @@ def test_weekly_admin_uses_preserved_cache_when_garmin_refresh_fails() -> None:
     asyncio.run(handlers.weekly(update, SimpleNamespace(user_data={})))
 
     assert service.burned_totals == burned
+
+
+def test_chart_points_group_twelve_week_data_into_seven_day_averages(
+    tmp_path,
+) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    first_week = [date(2026, 8, 1) + timedelta(days=offset) for offset in range(7)]
+    second_week = [date(2026, 8, 8) + timedelta(days=offset) for offset in range(7)]
+    store.daily_totals = {
+        **{day: 2000 for day in first_week},
+        **{day: 2600 for day in second_week},
+    }
+    burned = {
+        **{day: 2500 for day in first_week},
+        **{day: 2400 for day in second_week},
+    }
+    weights = {
+        **{day: 80.0 for day in first_week},
+        **{day: 79.0 for day in second_week},
+    }
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    points = service.get_chart_points(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, weeks=2
+    )
+
+    assert [(point.start_day, point.end_day) for point in points] == [
+        (date(2026, 8, 1), date(2026, 8, 7)),
+        (date(2026, 8, 8), date(2026, 8, 14)),
+    ]
+    assert [point.average_balance_kcal for point in points] == [-500, 200]
+    assert [point.average_weight_kg for point in points] == [80.0, 79.0]
+
+
+def test_chart_is_available_to_non_admin_with_personal_garmin(
+    monkeypatch,
+) -> None:
+    class Service:
+        args = None
+
+        def get_chart_points(self, *args):
+            self.args = args
+            return [SimpleNamespace()]
+
+    class Provider:
+        requested = None
+
+        def __init__(self, store):
+            self.store = store
+
+        def store_for(self, telegram_user_id, day_start):
+            self.requested = (telegram_user_id, day_start)
+            return self.store
+
+    service = Service()
+    burned = {date(2026, 8, 1): 2400}
+    weights = {date(2026, 8, 1): 79.5}
+    refreshes = []
+    garmin = SimpleNamespace(
+        refresh_if_due=lambda: refreshes.append(True) or False,
+        get_daily_calories=lambda: burned,
+        get_daily_weights=lambda: weights,
+    )
+    provider = Provider(garmin)
+    monkeypatch.setattr(bot_module, "render_weekly_chart", lambda points: b"png")
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: service}),
+        garmin_calories=provider,
+    )
+    update, message = make_update(user_id=123)
+
+    asyncio.run(handlers.chart(update, SimpleNamespace(user_data={})))
+
+    assert provider.requested == (123, time(1))
+    assert service.args == (message.date, burned, weights, 12)
+    assert refreshes == [True]
+    assert len(message.photo_replies) == 1
+    assert message.photo_replies[0]["photo"].filename == "calorie-weight-chart.png"
+    assert message.typing_actions == [(123, ChatAction.TYPING)]
+
+
+def test_chart_requires_a_personal_garmin_integration() -> None:
+    provider = SimpleNamespace(store_for=lambda telegram_user_id, day_start: None)
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({123: user_record()}, {123: SimpleNamespace()}),
+        garmin_calories=provider,
+    )
+    update, message = make_update(user_id=123)
+
+    asyncio.run(handlers.chart(update, SimpleNamespace(user_data={})))
+
+    assert message.replies == [bot_module.GARMIN_NOT_CONNECTED_TEXT]
+    assert message.photo_replies == []
 
 
 def test_weekly_meals_uses_same_completed_week(tmp_path) -> None:
@@ -4481,7 +4595,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.13.0"]
+    assert admin_message.replies == ["Версія: 1.14.0"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4510,12 +4624,19 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.13.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.14.0\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
-    garmin = SimpleNamespace(format_weekly_report=lambda: "Garmin report")
-    handlers = TelegramHandlers(999, FakeManager(), garmin_calories=garmin)
+    garmin = SimpleNamespace(
+        refresh_if_due=lambda: False,
+        format_weekly_report=lambda: "Garmin report",
+    )
+    handlers = TelegramHandlers(
+        999,
+        FakeManager({999: user_record(999)}),
+        garmin_calories=garmin,
+    )
     admin_update, admin_message = make_update(user_id=999)
     user_update, user_message = make_update(user_id=123)
 

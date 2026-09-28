@@ -10,7 +10,6 @@ from telegram.constants import ChatType
 
 from calories_bot import main as main_module
 from calories_bot.analyzer import ModelPricing
-from calories_bot.garmin import GarminCalorieStore
 
 
 def test_configure_logging_suppresses_network_request_urls() -> None:
@@ -43,6 +42,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         statistics_db_path=tmp_path / "statistics.sqlite3",
         garmin_tokenstore=tmp_path / "garmin-tokens",
         garmin_calorie_cache_path=tmp_path / "garmin-calories.json",
+        garmin_user_data_dir=tmp_path / "garmin-users",
         timezone=ZoneInfo("Europe/Kyiv"),
         default_day_start=time(1),
         meal_weight_presets=(50, 100, 150, 200),
@@ -97,8 +97,10 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     )
     monkeypatch.setattr(
         main_module,
-        "GarminCalorieStore",
-        lambda *args: created.setdefault("garmin", SimpleNamespace()),
+        "GarminStoreProvider",
+        lambda *args, **kwargs: created.setdefault(
+            "garmin_provider", SimpleNamespace(args=args, kwargs=kwargs)
+        ),
     )
     handlers = SimpleNamespace(
         start=lambda: None,
@@ -110,6 +112,7 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
         period_callback=lambda: None,
         weekly=lambda: None,
         monthly=lambda: None,
+        chart=lambda: None,
         weekly_calories=lambda: None,
         weekly_meals=lambda: None,
         goal=lambda: None,
@@ -185,16 +188,17 @@ def test_main_wires_dependencies_and_starts_polling(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module.Application, "builder", lambda: FakeBuilder())
 
     main_module.main()
-    assert len(app.handlers) == 39
+    assert len(app.handlers) == 40
     assert app.polling == {"drop_pending_updates": False}
     assert created["post_init"].func is main_module.configure_bot_commands
     assert created["post_init"].keywords["admin_user_id"] == 999
-    assert created["post_init"].keywords["garmin_calories"] is created["garmin"]
+    assert created["garmin_provider"].args[:2] == (
+        settings.garmin_user_data_dir,
+        settings.timezone,
+    )
+    assert created["garmin_provider"].kwargs["fallback_user_id"] == 999
     assert created["meal_grouper"].init_args[1:3] == ("group-model", "medium")
     assert created["burn_screenshot_analyzer"] is not None
-    assert created["post_init"].keywords["garmin_refresh_time"] == time(
-        1, tzinfo=ZoneInfo("Europe/Kyiv")
-    )
 
     message = Message(
         message_id=1,
@@ -267,6 +271,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("day", "📅 за день"),
         ("week", "📊 за тиждень"),
         ("month", "📈 за місяць"),
+        ("chart", "📉 графік за 12 тижнів"),
         ("goal", "🎯 ціль калорій"),
         ("protein_goal", "🥩 ціль білка"),
         ("burn", "🔥 витрата калорій"),
@@ -279,6 +284,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         "day",
         "week",
         "month",
+        "chart",
         "goal",
         "protein_goal",
         "burn",
@@ -295,9 +301,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
     assert bot.calls[1][1]["scope"].chat_id == 999
 
 
-def test_configure_bot_commands_retries_garmin_refresh_hourly(
-    monkeypatch, tmp_path
-) -> None:
+def test_configure_bot_commands_does_not_schedule_garmin_polling() -> None:
     class FakeBot:
         async def set_my_commands(self, commands, **kwargs):
             del commands, kwargs
@@ -309,40 +313,13 @@ def test_configure_bot_commands_retries_garmin_refresh_hourly(
         def run_repeating(self, callback, **kwargs):
             self.calls.append((callback, kwargs))
 
-    store = GarminCalorieStore(
-        tmp_path / "tokens",
-        tmp_path / "cache.json",
-        ZoneInfo("Europe/Kyiv"),
-        time(1),
-    )
-    refreshes = []
-    monkeypatch.setattr(store, "refresh_if_due", lambda: refreshes.append(True) or True)
-
-    async def run_inline(function, *args):
-        return function(*args)
-
-    monkeypatch.setattr(main_module.asyncio, "to_thread", run_inline)
     queue = FakeJobQueue()
-    refresh_time = time(1, tzinfo=ZoneInfo("Europe/Kyiv"))
 
     asyncio.run(
         main_module.configure_bot_commands(
             SimpleNamespace(bot=FakeBot(), job_queue=queue),
             admin_user_id=999,
-            garmin_calories=store,
-            garmin_refresh_time=refresh_time,
         )
     )
 
-    assert refreshes == [True]
-    assert queue.calls == [
-        (
-            main_module.refresh_garmin_calories,
-            {
-                "interval": 60 * 60,
-                "first": refresh_time,
-                "data": store,
-                "name": "garmin-calorie-refresh",
-            },
-        )
-    ]
+    assert queue.calls == []

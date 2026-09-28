@@ -44,6 +44,7 @@ class Settings:
     statistics_db_path: Path
     garmin_tokenstore: Path
     garmin_calorie_cache_path: Path
+    garmin_user_data_dir: Path
     timezone: ZoneInfo
     default_day_start: time
     meal_weight_presets: tuple[int, ...]
@@ -228,6 +229,11 @@ class Settings:
                     "GARMIN_CALORIE_CACHE_PATH",
                     "./data/garmin_calories.json",
                 )
+            )
+            .expanduser()
+            .resolve(),
+            garmin_user_data_dir=Path(
+                os.getenv("GARMIN_USER_DATA_DIR", "./data/garmin")
             )
             .expanduser()
             .resolve(),

@@ -5,3 +5,5 @@ pydantic>=2.10,<3
 python-dotenv>=1,<2
 tzdata>=2025,<2027
 garminconnect==0.3.10
+matplotlib>=3.9,<4
+numpy>=1.26,<2.3

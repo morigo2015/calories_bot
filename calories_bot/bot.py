@@ -22,6 +22,7 @@ from telegram import (
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     Message,
     Update,
 )
@@ -54,6 +55,7 @@ from .burned import (
     build_burned_entry,
     calculate_resting_kcal,
 )
+from .charts import WeeklyChartPoint, render_weekly_chart
 from .meal_grouping import MAX_WEEKLY_MEAL_GROUPS, MealGrouper, MealGroupingError
 from .models import (
     MAX_SAVED_MEAL_NAME_LENGTH,
@@ -172,8 +174,12 @@ GARMIN_READ_ERROR_TEXT = (
     "Не вдалося прочитати локальні дані Garmin. "
     "Перевір журнал оновлення або спробуй після наступного оновлення доби."
 )
+GARMIN_NOT_CONNECTED_TEXT = (
+    "Garmin не підключено. Звернися до адміністратора для налаштування інтеграції."
+)
 WEEK_DAYS = 7
 MONTH_DAYS = 30
+CHART_WEEKS = 12
 MACRO_TRACKING_START_DATE = date(2026, 8, 17)
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
 
@@ -186,6 +192,12 @@ class GarminCalories(Protocol):
     def get_daily_calories(self) -> dict[date, int]: ...
 
     def get_daily_weights(self) -> dict[date, float]: ...
+
+
+class GarminProvider(Protocol):
+    def store_for(
+        self, telegram_user_id: int, day_start: time
+    ) -> GarminCalories | None: ...
 
 
 class NotFoodError(ValueError):
@@ -1141,7 +1153,7 @@ def format_weekly_reply(
     )
     return (
         f"<h3>Попередні {period_days} {day_word} (без сьогодні):</h3>"
-        f"<p><sub>Період: {start_day:%d.%m.%Y}–{end_day:%d.%m.%Y}</sub></p>"
+        f"<p><b>Період: {start_day:%d.%m.%Y}–{end_day:%d.%m.%Y}</b></p>"
         f"{history_note}<p><sub>КБЖВ в середньому за день:</sub></p>"
         f"{''.join(progress_blocks)}{daily_macros}{weight_details}{balance_details}"
     )
@@ -1494,6 +1506,47 @@ class CaloriesService:
             meal_grouper,
             daily_weights,
         )
+
+    def get_chart_points(
+        self,
+        timestamp: datetime,
+        burned_totals: dict[date, int],
+        daily_weights: Mapping[date, float],
+        weeks: int = CHART_WEEKS,
+    ) -> list[WeeklyChartPoint]:
+        if weeks <= 0:
+            raise ValueError("Chart must contain at least one week")
+        end_day = self.last_completed_day(timestamp)
+        start_day = end_day - timedelta(days=weeks * WEEK_DAYS - 1)
+        totals = self._store.get_daily_totals(start_day, end_day)
+        burned = self._merged_burned_totals(start_day, end_day, burned_totals) or {}
+        points: list[WeeklyChartPoint] = []
+        for week_index in range(weeks):
+            week_start = start_day + timedelta(days=week_index * WEEK_DAYS)
+            week_days = [
+                week_start + timedelta(days=offset) for offset in range(WEEK_DAYS)
+            ]
+            covered_days = [day for day in week_days if day in burned]
+            average_balance = (
+                None
+                if not covered_days
+                else sum(
+                    _as_summary(totals[day]).kcal - burned[day]
+                    if day in totals
+                    else -burned[day]
+                    for day in covered_days
+                )
+                / len(covered_days)
+            )
+            points.append(
+                WeeklyChartPoint(
+                    start_day=week_start,
+                    end_day=week_days[-1],
+                    average_balance_kcal=average_balance,
+                    average_weight_kg=_average_weight(week_days, daily_weights),
+                )
+            )
+        return points
 
     def get_period_summary_for(
         self,
@@ -2330,7 +2383,7 @@ class TelegramHandlers:
             300,
         ),
         statistics: BotStatistics | None = None,
-        garmin_calories: GarminCalories | None = None,
+        garmin_calories: GarminProvider | GarminCalories | None = None,
         transcriber: Transcriber | None = None,
         meal_grouper: MealGrouper | None = None,
         burn_screenshot_analyzer: BurnScreenshotAnalyzer | None = None,
@@ -2340,7 +2393,7 @@ class TelegramHandlers:
         self._manager = manager
         self._meal_weight_presets = meal_weight_presets
         self._statistics = statistics
-        self._garmin_calories = garmin_calories
+        self._garmin_source = garmin_calories
         self._transcriber = transcriber
         self._meal_grouper = meal_grouper
         self._burn_screenshot_analyzer = burn_screenshot_analyzer
@@ -2565,32 +2618,58 @@ class TelegramHandlers:
             and update.effective_user.id == self._admin_user_id
         )
 
-    async def _get_current_garmin_data(
-        self,
+    async def _garmin_store_for(self, user: UserRecord) -> GarminCalories | None:
+        source = self._garmin_source
+        if source is None or user.telegram_user_id is None:
+            return None
+        store_for = getattr(source, "store_for", None)
+        if callable(store_for):
+            return cast(
+                GarminCalories | None,
+                await asyncio.to_thread(
+                    store_for, user.telegram_user_id, user.day_start
+                ),
+            )
+        # Compatibility for the previous single-account configuration.
+        return (
+            cast(GarminCalories, source)
+            if user.telegram_user_id == self._admin_user_id
+            else None
+        )
+
+    async def _get_garmin_data(
+        self, user: UserRecord
     ) -> tuple[dict[date, int] | None, dict[date, float] | None]:
-        if self._garmin_calories is None:
+        store = await self._garmin_store_for(user)
+        if store is None:
             return None, None
         try:
-            await asyncio.to_thread(self._garmin_calories.refresh_if_due)
+            await asyncio.to_thread(store.refresh_if_due)
         except Exception:
-            LOGGER.exception("Could not refresh Garmin data for a report")
+            LOGGER.exception(
+                "Could not refresh Garmin data for user %s", user.telegram_user_id
+            )
         try:
-            calories = await asyncio.to_thread(self._garmin_calories.get_daily_calories)
+            calories = await asyncio.to_thread(store.get_daily_calories)
         except Exception:
-            LOGGER.exception("Garmin calories are unavailable for a report")
+            LOGGER.exception(
+                "Garmin calories are unavailable for user %s", user.telegram_user_id
+            )
             calories = None
-        get_weights = getattr(self._garmin_calories, "get_daily_weights", None)
+        get_weights = getattr(store, "get_daily_weights", None)
         if not callable(get_weights):
             return calories, None
         try:
             weights = await asyncio.to_thread(get_weights)
         except Exception:
-            LOGGER.exception("Garmin weights are unavailable for a report")
+            LOGGER.exception(
+                "Garmin weights are unavailable for user %s", user.telegram_user_id
+            )
             weights = None
         return calories, weights
 
-    async def _get_current_garmin_calories(self) -> dict[date, int] | None:
-        calories, _weights = await self._get_current_garmin_data()
+    async def _get_garmin_calories(self, user: UserRecord) -> dict[date, int] | None:
+        calories, _weights = await self._get_garmin_data(user)
         return calories
 
     @staticmethod
@@ -2682,12 +2761,26 @@ class TelegramHandlers:
         user = await self._active_user(update, callback=callback)
         if user is None:
             return None
+        return await self._service_for_user(update, user, callback=callback)
+
+    async def _service_for_user(
+        self, update: Update, user: UserRecord, *, callback: bool = False
+    ) -> CaloriesService | None:
         try:
             return await asyncio.to_thread(self._manager.service_for, user)
         except Exception:
             LOGGER.exception("Could not build current user context")
             await self._send_access_text(update, ACCESS_ERROR_TEXT, callback)
             return None
+
+    async def _active_context(
+        self, update: Update, *, callback: bool = False
+    ) -> tuple[UserRecord, CaloriesService] | None:
+        user = await self._active_user(update, callback=callback)
+        if user is None:
+            return None
+        service = await self._service_for_user(update, user, callback=callback)
+        return None if service is None else (user, service)
 
     async def _active_user(
         self, update: Update, *, callback: bool = False
@@ -2871,14 +2964,15 @@ class TelegramHandlers:
         if not self._is_admin(update) or message is None:
             await self._reject_admin_command(update)
             return
-        if self._garmin_calories is None:
+        user = await self._active_user(update)
+        store = None if user is None else await self._garmin_store_for(user)
+        if store is None:
             await message.reply_text(GARMIN_READ_ERROR_TEXT, do_quote=False)
             return
         async with self._temporary_status(message):
             try:
-                report = await asyncio.to_thread(
-                    self._garmin_calories.format_weekly_report
-                )
+                await asyncio.to_thread(store.refresh_if_due)
+                report = await asyncio.to_thread(store.format_weekly_report)
             except Exception:
                 LOGGER.exception("Could not read cached Garmin calorie data")
                 report = GARMIN_READ_ERROR_TEXT
@@ -2931,9 +3025,10 @@ class TelegramHandlers:
         query = update.callback_query
         if query is None:
             return
-        service = await self._active_service(update, callback=True)
-        if service is None:
+        active = await self._active_context(update, callback=True)
+        if active is None:
             return
+        user, service = active
         try:
             callback_data = query.data or ""
             if not callback_data.startswith(DAY_VIEW_CALLBACK_PREFIX):
@@ -2949,8 +3044,8 @@ class TelegramHandlers:
         try:
             current_day = await asyncio.to_thread(service.accounting_day, now)
             fallback_burned = None
-            if self._is_admin(update) and selected_day < current_day:
-                garmin = await self._get_current_garmin_calories()
+            if selected_day < current_day:
+                garmin = await self._get_garmin_calories(user)
                 fallback_burned = (garmin or {}).get(selected_day)
             if fallback_burned is None:
                 reply = await asyncio.to_thread(
@@ -2992,17 +3087,16 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None:
             return
-        service = await self._active_service(update)
-        if service is None:
+        active = await self._active_context(update)
+        if active is None:
             return
+        user, service = active
         async with self._temporary_status(
             message,
             operation="weekly_calories",
         ):
             try:
-                burned_totals = None
-                if self._is_admin(update):
-                    burned_totals = await self._get_current_garmin_calories()
+                burned_totals = await self._get_garmin_calories(user)
                 reply = await asyncio.to_thread(
                     service.get_weekly_calories,
                     message.date,
@@ -3026,9 +3120,10 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None:
             return
-        service = await self._active_service(update)
-        if service is None:
+        active = await self._active_context(update)
+        if active is None:
             return
+        user, service = active
         async with self._temporary_status(
             message,
             operation="week",
@@ -3037,8 +3132,7 @@ class TelegramHandlers:
             try:
                 burned_totals = None
                 daily_weights = None
-                if self._is_admin(update):
-                    burned_totals, daily_weights = await self._get_current_garmin_data()
+                burned_totals, daily_weights = await self._get_garmin_data(user)
                 end_day = await asyncio.to_thread(
                     service.last_completed_day, message.date
                 )
@@ -3072,9 +3166,10 @@ class TelegramHandlers:
         message = update.effective_message
         if message is None:
             return
-        service = await self._active_service(update)
-        if service is None:
+        active = await self._active_context(update)
+        if active is None:
             return
+        user, service = active
         async with self._temporary_status(
             message,
             operation="month",
@@ -3083,8 +3178,7 @@ class TelegramHandlers:
             try:
                 burned_totals = None
                 daily_weights = None
-                if self._is_admin(update):
-                    burned_totals, daily_weights = await self._get_current_garmin_data()
+                burned_totals, daily_weights = await self._get_garmin_data(user)
                 end_day = await asyncio.to_thread(
                     service.last_completed_day, message.date
                 )
@@ -3113,15 +3207,57 @@ class TelegramHandlers:
             else:
                 await message.reply_text(reply, do_quote=False)
 
+    async def chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._clear_pending_input(context)
+        message = update.effective_message
+        if message is None:
+            return
+        active = await self._active_context(update)
+        if active is None:
+            return
+        user, service = active
+        async with self._temporary_status(message, operation="chart"):
+            store = await self._garmin_store_for(user)
+            if store is None:
+                await message.reply_text(GARMIN_NOT_CONNECTED_TEXT, do_quote=False)
+                return
+            try:
+                burned_totals, daily_weights = await self._get_garmin_data(user)
+                if burned_totals is None or daily_weights is None:
+                    raise RuntimeError("Garmin chart data is unavailable")
+                points = await asyncio.to_thread(
+                    service.get_chart_points,
+                    message.date,
+                    burned_totals,
+                    daily_weights,
+                    CHART_WEEKS,
+                )
+                image = await asyncio.to_thread(render_weekly_chart, points)
+                await message.reply_photo(
+                    photo=InputFile(image, filename="calorie-weight-chart.png"),
+                    caption=(
+                        "12 завершених 7-денних періодів. "
+                        "Стовпчики — середньодобовий баланс калорій, "
+                        "лінія — середня вага."
+                    ),
+                )
+            except Exception:
+                LOGGER.exception("Could not build /chart")
+                await message.reply_text(
+                    "Не вдалося сформувати графік. Спробуй ще раз.",
+                    do_quote=False,
+                )
+
     async def period_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         query = update.callback_query
         if query is None:
             return
-        service = await self._active_service(update, callback=True)
-        if service is None:
+        active = await self._active_context(update, callback=True)
+        if active is None:
             return
+        user, service = active
         try:
             callback_data = query.data or ""
             if not callback_data.startswith(PERIOD_VIEW_CALLBACK_PREFIX):
@@ -3138,46 +3274,49 @@ class TelegramHandlers:
             return
 
         now = datetime.now(UTC)
-        try:
-            latest_end_day = await asyncio.to_thread(service.last_completed_day, now)
-            burned_totals = None
-            daily_weights = None
-            if self._is_admin(update):
-                burned_totals, daily_weights = await self._get_current_garmin_data()
-            reply = await asyncio.to_thread(
-                service.get_period_summary_for,
-                selected_end_day,
-                now,
-                period_days,
-                burned_totals,
-                self._meal_grouper,
-                daily_weights,
-            )
-        except ValueError:
-            await query.answer("Цей період ще не завершився.", show_alert=True)
-            return
-        except SheetsReadError:
-            LOGGER.exception("Could not read data for report navigation")
-            await query.answer(READ_ERROR_TEXT, show_alert=True)
-            return
-        except Exception:
-            LOGGER.exception("Could not navigate period reports")
-            await query.answer(READ_ERROR_TEXT, show_alert=True)
-            return
+        async with self._temporary_status(
+            query.message,
+            operation="period_navigation",
+        ):
+            try:
+                latest_end_day = await asyncio.to_thread(
+                    service.last_completed_day, now
+                )
+                burned_totals, daily_weights = await self._get_garmin_data(user)
+                reply = await asyncio.to_thread(
+                    service.get_period_summary_for,
+                    selected_end_day,
+                    now,
+                    period_days,
+                    burned_totals,
+                    self._meal_grouper,
+                    daily_weights,
+                )
+            except ValueError:
+                await query.answer("Цей період ще не завершився.", show_alert=True)
+                return
+            except SheetsReadError:
+                LOGGER.exception("Could not read data for report navigation")
+                await query.answer(READ_ERROR_TEXT, show_alert=True)
+                return
+            except Exception:
+                LOGGER.exception("Could not navigate period reports")
+                await query.answer(READ_ERROR_TEXT, show_alert=True)
+                return
 
-        try:
-            await self._edit_rich_html(
-                query,
-                context,
-                reply,
-                self._period_navigation_markup(
-                    period_days, selected_end_day, latest_end_day
-                ),
-            )
-        except Exception:
-            LOGGER.exception("Could not edit a period report")
-            await query.answer(READ_ERROR_TEXT, show_alert=True)
-            return
+            try:
+                await self._edit_rich_html(
+                    query,
+                    context,
+                    reply,
+                    self._period_navigation_markup(
+                        period_days, selected_end_day, latest_end_day
+                    ),
+                )
+            except Exception:
+                LOGGER.exception("Could not edit a period report")
+                await query.answer(READ_ERROR_TEXT, show_alert=True)
+                return
         await query.answer()
 
     async def weekly_meals(

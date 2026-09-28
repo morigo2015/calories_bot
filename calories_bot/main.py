@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import time
 from functools import partial
 from typing import Any
 
@@ -12,7 +10,6 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
     TypeHandler,
     filters,
@@ -23,7 +20,7 @@ from .analyzer import OpenAIAnalyzer, OpenAITranscriber
 from .bot import TelegramHandlers, UserManager
 from .burn_screenshots import OpenAIBurnScreenshotAnalyzer
 from .config import Settings
-from .garmin import GarminCalorieStore
+from .garmin import GarminStoreProvider
 from .meal_grouping import OpenAIMealGrouper
 from .quality import QualityStore
 from .users import GoogleUserRegistry
@@ -33,8 +30,6 @@ from .workspace import GoogleWorkspace
 async def configure_bot_commands(
     application: Application[Any, Any, Any, Any, Any, Any],
     admin_user_id: int,
-    garmin_calories: GarminCalorieStore | None = None,
-    garmin_refresh_time: time | None = None,
 ) -> None:
     user_commands = [
         BotCommand("saved", "⭐ мої страви"),
@@ -42,6 +37,7 @@ async def configure_bot_commands(
         BotCommand("day", "📅 за день"),
         BotCommand("week", "📊 за тиждень"),
         BotCommand("month", "📈 за місяць"),
+        BotCommand("chart", "📉 графік за 12 тижнів"),
         BotCommand("goal", "🎯 ціль калорій"),
         BotCommand("protein_goal", "🥩 ціль білка"),
         BotCommand("burn", "🔥 витрата калорій"),
@@ -63,36 +59,6 @@ async def configure_bot_commands(
         admin_commands,
         scope=BotCommandScopeChat(chat_id=admin_user_id),
     )
-    if garmin_calories is not None:
-        if application.job_queue is None or garmin_refresh_time is None:
-            raise RuntimeError("Garmin refresh requires JobQueue and a refresh time")
-        application.job_queue.run_repeating(
-            refresh_garmin_calories,
-            interval=60 * 60,
-            first=garmin_refresh_time,
-            data=garmin_calories,
-            name="garmin-calorie-refresh",
-        )
-        await _refresh_garmin_calories(garmin_calories)
-
-
-async def refresh_garmin_calories(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job = context.job
-    store = job.data if job is not None else None
-    if not isinstance(store, GarminCalorieStore):
-        logging.getLogger(__name__).error("Garmin refresh job has no calorie store")
-        return
-    await _refresh_garmin_calories(store)
-
-
-async def _refresh_garmin_calories(store: GarminCalorieStore) -> None:
-    try:
-        refreshed = await asyncio.to_thread(store.refresh_if_due)
-    except Exception:
-        logging.getLogger(__name__).exception("Could not refresh Garmin calorie cache")
-        return
-    if refreshed:
-        logging.getLogger(__name__).info("Garmin calorie cache refreshed")
 
 
 def configure_logging() -> None:
@@ -187,18 +153,19 @@ def main() -> None:
         quality_store,
     )
     manager.prepare_release_storage()
-    garmin_calories = GarminCalorieStore(
-        settings.garmin_tokenstore,
-        settings.garmin_calorie_cache_path,
+    garmin_provider = GarminStoreProvider(
+        settings.garmin_user_data_dir,
         settings.timezone,
-        settings.default_day_start,
+        fallback_user_id=settings.admin_telegram_user_id,
+        fallback_tokenstore=settings.garmin_tokenstore,
+        fallback_cache_path=settings.garmin_calorie_cache_path,
     )
     handlers = TelegramHandlers(
         settings.admin_telegram_user_id,
         manager,
         settings.meal_weight_presets,
         statistics,
-        garmin_calories,
+        garmin_provider,
         transcriber,
         meal_grouper,
         burn_screenshot_analyzer,
@@ -213,10 +180,6 @@ def main() -> None:
             partial(
                 configure_bot_commands,
                 admin_user_id=settings.admin_telegram_user_id,
-                garmin_calories=garmin_calories,
-                garmin_refresh_time=settings.default_day_start.replace(
-                    tzinfo=settings.timezone
-                ),
             )
         )
         .build()
@@ -238,6 +201,9 @@ def main() -> None:
     )
     application.add_handler(
         CommandHandler("month", handlers.monthly, filters=message_update)
+    )
+    application.add_handler(
+        CommandHandler("chart", handlers.chart, filters=message_update)
     )
     application.add_handler(
         CommandHandler("goal", handlers.goal, filters=message_update)
