@@ -53,13 +53,38 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         for point in points
     ]
     colors = [
-        missing
+        "none"
         if point.average_balance_kcal is None
         else deficit
         if point.average_balance_kcal < 0
         else surplus
         for point in points
     ]
+    for index, point in enumerate(points):
+        if point.average_balance_kcal is not None:
+            continue
+        axis.axvspan(
+            index - 0.42,
+            index + 0.42,
+            facecolor=missing,
+            edgecolor="#AAB3C2",
+            hatch="///",
+            alpha=0.22,
+            linewidth=0,
+            zorder=0,
+        )
+        axis.text(
+            index,
+            0.96,
+            "НЕМАЄ\nДАНИХ",
+            transform=axis.get_xaxis_transform(),
+            ha="center",
+            va="top",
+            color=muted,
+            fontsize=7.5,
+            fontweight="bold",
+            zorder=4,
+        )
     bars = axis.bar(
         x_values,
         balances,
@@ -69,6 +94,7 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         linewidth=1.2,
         zorder=3,
     )
+    axis.margins(y=0.16)
 
     axis.axhline(0, color="#8792A5", linewidth=1.3, zorder=2)
     axis.grid(axis="y", color=grid, linewidth=0.9, alpha=0.9, zorder=1)
@@ -88,16 +114,6 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
     for bar, point in zip(bars, points, strict=True):
         value = point.average_balance_kcal
         if value is None:
-            axis.text(
-                bar.get_x() + bar.get_width() / 2,
-                annotation_offset,
-                "—",
-                ha="center",
-                va="bottom",
-                color=muted,
-                fontsize=9,
-                fontweight="bold",
-            )
             continue
         axis.text(
             bar.get_x() + bar.get_width() / 2,
@@ -119,13 +135,13 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         x_values,
         weights,
         color=weight_color,
-        linewidth=2.8,
+        linewidth=4.2,
         marker="o",
-        markersize=7,
+        markersize=9,
         markerfacecolor=background,
         markeredgecolor=weight_color,
-        markeredgewidth=2.2,
-        zorder=5,
+        markeredgewidth=3,
+        zorder=7,
     )
     weight_axis.spines[["top", "right", "left", "bottom"]].set_visible(False)
     weight_axis.tick_params(axis="y", colors=weight_color, length=0, labelsize=9)
@@ -173,7 +189,7 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         fontweight="bold",
     )
     axis.set_title(
-        "12 завершених 7-денних періодів · дефіцит нижче нуля",
+        "12 завершених 7-денних періодів · сірий період — немає обох даних",
         loc="left",
         color=muted,
         fontsize=10.5,
@@ -182,12 +198,19 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
     legend = [
         Patch(facecolor=deficit, label="Дефіцит"),
         Patch(facecolor=surplus, label="Профіцит"),
+        Patch(
+            facecolor=missing,
+            edgecolor="#AAB3C2",
+            hatch="///",
+            alpha=0.35,
+            label="Немає intake + outtake",
+        ),
         Line2D(
             [0],
             [0],
             color=weight_color,
             marker="o",
-            linewidth=2.8,
+            linewidth=4.2,
             label="Середня вага",
         ),
     ]
@@ -195,7 +218,7 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         handles=legend,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.08),
-        ncols=3,
+        ncols=4,
         frameon=False,
         labelcolor=text,
         fontsize=9.5,

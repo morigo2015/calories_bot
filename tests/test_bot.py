@@ -2833,7 +2833,7 @@ def test_weekly_admin_uses_preserved_cache_when_garmin_refresh_fails() -> None:
     assert service.burned_totals == burned
 
 
-def test_chart_points_group_twelve_week_data_into_seven_day_averages(
+def test_chart_points_group_complete_weeks_into_seven_day_averages(
     tmp_path,
 ) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
@@ -2863,6 +2863,24 @@ def test_chart_points_group_twelve_week_data_into_seven_day_averages(
     ]
     assert [point.average_balance_kcal for point in points] == [-500, 200]
     assert [point.average_weight_kg for point in points] == [80.0, 79.0]
+
+
+def test_chart_omits_balance_without_complete_intake_and_outtake_but_keeps_weight(
+    tmp_path,
+) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    week = [date(2026, 8, 8) + timedelta(days=offset) for offset in range(7)]
+    store.daily_totals = {day: 2000 for day in week[1:]}
+    burned = {day: 2500 for day in week}
+    weights = {day: 79.0 for day in week}
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    point = service.get_chart_points(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, weeks=1
+    )[0]
+
+    assert point.average_balance_kcal is None
+    assert point.average_weight_kg == 79.0
 
 
 def test_chart_is_available_to_non_admin_with_personal_garmin(
@@ -4595,7 +4613,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.14.0"]
+    assert admin_message.replies == ["Версія: 1.14.1"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4624,7 +4642,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.14.0\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.14.1\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
