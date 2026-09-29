@@ -1529,7 +1529,7 @@ class CaloriesService:
             covered_days = [day for day in week_days if day in totals and day in burned]
             average_balance = (
                 None
-                if len(covered_days) != WEEK_DAYS
+                if not covered_days
                 else sum(
                     _as_summary(totals[day]).kcal - burned[day] for day in covered_days
                 )
@@ -3235,8 +3235,8 @@ class TelegramHandlers:
                     caption=(
                         "12 завершених 7-денних періодів. "
                         "Стовпчики — середньодобовий баланс калорій, "
-                        "лінія — середня вага. Сірі періоди не мають "
-                        "повних даних intake та outtake за всі 7 днів."
+                        "лінія — середня вага. Сірий маркер означає, що "
+                        "за тиждень немає жодної пари intake + outtake."
                     ),
                 )
             except Exception:

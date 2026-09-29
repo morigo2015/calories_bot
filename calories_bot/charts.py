@@ -18,7 +18,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MATPLOTLIB_CONFIG_DIR))
 from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.patches import Patch  # noqa: E402
+from matplotlib.patches import Patch, Rectangle  # noqa: E402
 from matplotlib.ticker import FuncFormatter  # noqa: E402
 
 
@@ -48,6 +48,14 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
     axis = figure.add_subplot(111)
     axis.set_facecolor(background)
     x_values = list(range(len(points)))
+    known_balances = [
+        point.average_balance_kcal
+        for point in points
+        if point.average_balance_kcal is not None
+    ]
+    missing_balance_level = (
+        sum(known_balances) / len(known_balances) if known_balances else 0
+    )
     balances = [
         0 if point.average_balance_kcal is None else point.average_balance_kcal
         for point in points
@@ -60,31 +68,6 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         else surplus
         for point in points
     ]
-    for index, point in enumerate(points):
-        if point.average_balance_kcal is not None:
-            continue
-        axis.axvspan(
-            index - 0.42,
-            index + 0.42,
-            facecolor=missing,
-            edgecolor="#AAB3C2",
-            hatch="///",
-            alpha=0.22,
-            linewidth=0,
-            zorder=0,
-        )
-        axis.text(
-            index,
-            0.96,
-            "НЕМАЄ\nДАНИХ",
-            transform=axis.get_xaxis_transform(),
-            ha="center",
-            va="top",
-            color=muted,
-            fontsize=7.5,
-            fontweight="bold",
-            zorder=4,
-        )
     bars = axis.bar(
         x_values,
         balances,
@@ -95,6 +78,37 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         zorder=3,
     )
     axis.margins(y=0.16)
+    if not known_balances:
+        axis.set_ylim(-100, 100)
+    y_min, y_max = axis.get_ylim()
+    axis.set_ylim(y_min, y_max)
+    placeholder_height = (y_max - y_min) * 0.045
+    for index, point in enumerate(points):
+        if point.average_balance_kcal is not None:
+            continue
+        axis.add_patch(
+            Rectangle(
+                (index - 0.31, missing_balance_level - placeholder_height / 2),
+                0.62,
+                placeholder_height,
+                facecolor=missing,
+                edgecolor="#AAB3C2",
+                hatch="///",
+                linewidth=1,
+                zorder=3,
+            )
+        )
+        axis.text(
+            index,
+            missing_balance_level,
+            "НЕМАЄ\nДАНИХ",
+            ha="center",
+            va="center",
+            color=muted,
+            fontsize=6.3,
+            fontweight="bold",
+            zorder=8,
+        )
 
     axis.axhline(0, color="#8792A5", linewidth=1.3, zorder=2)
     axis.grid(axis="y", color=grid, linewidth=0.9, alpha=0.9, zorder=1)
@@ -189,7 +203,7 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
         fontweight="bold",
     )
     axis.set_title(
-        "12 завершених 7-денних періодів · сірий період — немає обох даних",
+        "12 завершених 7-денних періодів · сірий маркер — немає жодної пари даних",
         loc="left",
         color=muted,
         fontsize=10.5,
@@ -203,7 +217,7 @@ def render_weekly_chart(points: list[WeeklyChartPoint]) -> bytes:
             edgecolor="#AAB3C2",
             hatch="///",
             alpha=0.35,
-            label="Немає intake + outtake",
+            label="Немає жодної пари",
         ),
         Line2D(
             [0],

@@ -2865,12 +2865,30 @@ def test_chart_points_group_complete_weeks_into_seven_day_averages(
     assert [point.average_weight_kg for point in points] == [80.0, 79.0]
 
 
-def test_chart_omits_balance_without_complete_intake_and_outtake_but_keeps_weight(
+def test_chart_averages_days_with_intake_and_outtake_and_keeps_weight(
     tmp_path,
 ) -> None:
     store = FakeStore(SheetState(today_total=0, existing=None))
     week = [date(2026, 8, 8) + timedelta(days=offset) for offset in range(7)]
     store.daily_totals = {day: 2000 for day in week[1:]}
+    burned = {day: 2500 for day in week}
+    weights = {day: 79.0 for day in week}
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    point = service.get_chart_points(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, weeks=1
+    )[0]
+
+    assert point.average_balance_kcal == -500
+    assert point.average_weight_kg == 79.0
+
+
+def test_chart_omits_balance_only_when_week_has_no_intake_outtake_pairs(
+    tmp_path,
+) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    week = [date(2026, 8, 8) + timedelta(days=offset) for offset in range(7)]
+    store.daily_totals = {}
     burned = {day: 2500 for day in week}
     weights = {day: 79.0 for day in week}
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
@@ -4613,7 +4631,7 @@ def test_info_shows_release_to_admin_only() -> None:
     asyncio.run(handlers.info(admin_update, SimpleNamespace(user_data={})))
     asyncio.run(handlers.info(user_update, SimpleNamespace(user_data={})))
 
-    assert admin_message.replies == ["Версія: 1.14.1"]
+    assert admin_message.replies == ["Версія: 1.14.2"]
     assert user_message.replies == ["Недоступно."]
 
 
@@ -4642,7 +4660,7 @@ def test_tracking_records_incoming_interaction_and_extended_info() -> None:
         "User 999",
         "user999",
     )
-    assert message.replies == ["Версія: 1.14.1\nЗапити за 24 години:\n• разом: 7"]
+    assert message.replies == ["Версія: 1.14.2\nЗапити за 24 години:\n• разом: 7"]
 
 
 def test_only_admin_can_read_cached_garmin_calories() -> None:
