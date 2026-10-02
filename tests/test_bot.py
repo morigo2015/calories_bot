@@ -2939,11 +2939,8 @@ def test_chart_report_covers_90_days_and_calculates_weight_and_reliable_stats(
     assert [month.trend_weight_kg for month in report.monthly_weights] == pytest.approx(
         [81.988, 81.264, 80.070, 79.365], abs=0.001
     )
-    monthly_changes = [
-        month.change_from_previous_kg for month in report.monthly_weights
-    ]
-    assert monthly_changes[0] is None
-    assert monthly_changes[1:] == pytest.approx([-0.724, -1.194, -0.705], abs=0.001)
+    monthly_changes = [month.change_during_month_kg for month in report.monthly_weights]
+    assert monthly_changes == pytest.approx([-0.235, -1.135, -1.174, -0.157], abs=0.001)
     assert report.weight_trend is not None
     assert report.weight_trend.monthly_change_kg == pytest.approx(-1.192, abs=0.001)
     assert report.weight_trend.change_kg == pytest.approx(-2.819, abs=0.001)
@@ -2968,6 +2965,8 @@ def test_chart_report_covers_90_days_and_calculates_weight_and_reliable_stats(
     assert "Тренд: <b>−1,2 кг/міс.</b>" in formatted
     assert "Зміна за трендом: <b>−2,8 кг за 2,4 міс.</b>" in formatted
     assert "<h4>По місяцях (за трендом)</h4>" in formatted
+    assert "травень 2026 (з 25.05) — <b>82,0 кг</b> · <b>−0,2 кг</b>" in formatted
+    assert "серпень 2026 (до 05.08) — <b>79,4 кг</b> · <b>−0,2 кг</b>" in formatted
     assert "<h4>Вага/дефіцит (де достатньо даних)</h4>" in formatted
     assert "Баланс: дефіцит <b>300 ккал</b>" in formatted
     assert "<b>Зміна ваги загалом відповідає" in formatted

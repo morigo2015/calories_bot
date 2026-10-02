@@ -234,7 +234,9 @@ class NotFoodError(ValueError):
 class MonthlyWeightStats:
     month: date
     trend_weight_kg: float | None
-    change_from_previous_kg: float | None
+    change_during_month_kg: float | None
+    coverage_start: date | None
+    coverage_end: date | None
 
 
 @dataclass(frozen=True)
@@ -1093,11 +1095,26 @@ def format_chart_report(report: ChartReport) -> str:
         if month.trend_weight_kg is None:
             month_rows.append(f"<li>{label} — <b>немає даних</b></li>")
             continue
+        assert month.coverage_start is not None
+        assert month.coverage_end is not None
+        next_month = (
+            month.month.replace(year=month.month.year + 1, month=1)
+            if month.month.month == 12
+            else month.month.replace(month=month.month.month + 1)
+        )
+        calendar_month_end = next_month - timedelta(days=1)
+        if (
+            month.coverage_start > month.month
+            and month.coverage_end < calendar_month_end
+        ):
+            label += f" ({month.coverage_start:%d.%m}–{month.coverage_end:%d.%m})"
+        elif month.coverage_start > month.month:
+            label += f" (з {month.coverage_start:%d.%m})"
+        elif month.coverage_end < calendar_month_end:
+            label += f" (до {month.coverage_end:%d.%m})"
         average = _format_chart_number(month.trend_weight_kg, decimals=1)
-        if month.change_from_previous_kg is None:
-            change = "—"
-        else:
-            change = f"<b>{_format_chart_change(month.change_from_previous_kg)} кг</b>"
+        assert month.change_during_month_kg is not None
+        change = f"<b>{_format_chart_change(month.change_during_month_kg)} кг</b>"
         month_rows.append(f"<li>{label} — <b>{average} кг</b> · {change}</li>")
 
     if report.weight_trend is None:
@@ -1775,7 +1792,6 @@ class CaloriesService:
         weight_trend = _weight_trend(daily_weights, start_day, end_day)
         monthly_weights: list[MonthlyWeightStats] = []
         month = start_day.replace(day=1)
-        previous_average: float | None = None
         while month <= end_day:
             next_month = (
                 month.replace(year=month.year + 1, month=1)
@@ -1797,12 +1813,19 @@ class CaloriesService:
                 else None
             )
             change = (
-                average - previous_average
-                if average is not None and previous_average is not None
+                weight_trend.weight_on(month_end) - weight_trend.weight_on(month_start)
+                if average is not None and weight_trend is not None
                 else None
             )
-            monthly_weights.append(MonthlyWeightStats(month, average, change))
-            previous_average = average
+            monthly_weights.append(
+                MonthlyWeightStats(
+                    month=month,
+                    trend_weight_kg=average,
+                    change_during_month_kg=change,
+                    coverage_start=month_start if average is not None else None,
+                    coverage_end=month_end if average is not None else None,
+                )
+            )
             month = next_month
 
         reliable = self._chart_reliable_stats(
