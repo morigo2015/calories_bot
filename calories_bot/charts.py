@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 _MATPLOTLIB_CONFIG_DIR = (
     Path(tempfile.gettempdir()) / f"calories-bot-matplotlib-{os.getuid()}"
@@ -33,6 +34,8 @@ def render_weekly_chart(
     points: list[WeeklyChartPoint],
     reliable_start: date | None = None,
     reliable_end: date | None = None,
+    weight_trend: tuple[date, float, date, float] | None = None,
+    show_balance: bool = True,
 ) -> bytes:
     if not points:
         raise ValueError("Chart requires at least one weekly point")
@@ -44,6 +47,7 @@ def render_weekly_chart(
     deficit = "#35A77A"
     surplus = "#E66B5B"
     weight_color = "#3867D6"
+    trend_color = "#7C3AED"
     missing = "#C9D0DB"
     reliable = "#F4C95D"
 
@@ -52,23 +56,31 @@ def render_weekly_chart(
     axis = figure.add_subplot(111)
     axis.set_facecolor(background)
     x_values = list(range(len(points)))
+
+    def day_boundary_x(day: date, *, after: bool = False) -> float:
+        for index, point in enumerate(points):
+            if point.start_day <= day <= point.end_day:
+                period_days = (point.end_day - point.start_day).days + 1
+                day_offset = (day - point.start_day).days + int(after)
+                return index - 0.5 + day_offset / period_days
+        return -0.5 if day < points[0].start_day else len(points) - 0.5
+
+    def day_center_x(day: date) -> float:
+        for point in points:
+            if point.start_day <= day <= point.end_day:
+                period_days = (point.end_day - point.start_day).days + 1
+                return day_boundary_x(day) + 0.5 / period_days
+        return day_boundary_x(day)
+
     has_reliable_period = (
-        reliable_start is not None
+        show_balance
+        and reliable_start is not None
         and reliable_end is not None
         and reliable_start <= reliable_end
     )
     if has_reliable_period:
         assert reliable_start is not None
         assert reliable_end is not None
-
-        def day_boundary_x(day: date, *, after: bool = False) -> float:
-            for index, point in enumerate(points):
-                if point.start_day <= day <= point.end_day:
-                    period_days = (point.end_day - point.start_day).days + 1
-                    day_offset = (day - point.start_day).days + int(after)
-                    return index - 0.5 + day_offset / period_days
-            return -0.5 if day < points[0].start_day else len(points) - 0.5
-
         axis.axvspan(
             day_boundary_x(reliable_start),
             day_boundary_x(reliable_end, after=True),
@@ -79,7 +91,7 @@ def render_weekly_chart(
     known_balances = [
         point.average_balance_kcal
         for point in points
-        if point.average_balance_kcal is not None
+        if show_balance and point.average_balance_kcal is not None
     ]
     missing_balance_level = (
         sum(known_balances) / len(known_balances) if known_balances else 0
@@ -88,31 +100,33 @@ def render_weekly_chart(
         0 if point.average_balance_kcal is None else point.average_balance_kcal
         for point in points
     ]
-    colors = [
-        "none"
-        if point.average_balance_kcal is None
-        else deficit
-        if point.average_balance_kcal < 0
-        else surplus
-        for point in points
-    ]
-    bars = axis.bar(
-        x_values,
-        balances,
-        width=0.62,
-        color=colors,
-        edgecolor="white",
-        linewidth=1.2,
-        zorder=3,
-    )
+    bars: Any = []
+    if show_balance:
+        colors = [
+            "none"
+            if point.average_balance_kcal is None
+            else deficit
+            if point.average_balance_kcal < 0
+            else surplus
+            for point in points
+        ]
+        bars = axis.bar(
+            x_values,
+            balances,
+            width=0.62,
+            color=colors,
+            edgecolor="white",
+            linewidth=1.2,
+            zorder=3,
+        )
     axis.margins(y=0.16)
-    if not known_balances:
+    if show_balance and not known_balances:
         axis.set_ylim(-100, 100)
     y_min, y_max = axis.get_ylim()
     axis.set_ylim(y_min, y_max)
     placeholder_height = (y_max - y_min) * 0.045
     for index, point in enumerate(points):
-        if point.average_balance_kcal is not None:
+        if not show_balance or point.average_balance_kcal is not None:
             continue
         axis.add_patch(
             Rectangle(
@@ -138,14 +152,18 @@ def render_weekly_chart(
             zorder=8,
         )
 
-    axis.axhline(0, color="#8792A5", linewidth=1.3, zorder=2)
-    axis.grid(axis="y", color=grid, linewidth=0.9, alpha=0.9, zorder=1)
+    if show_balance:
+        axis.axhline(0, color="#8792A5", linewidth=1.3, zorder=2)
+        axis.grid(axis="y", color=grid, linewidth=0.9, alpha=0.9, zorder=1)
     axis.spines[["top", "right", "left", "bottom"]].set_visible(False)
     axis.tick_params(axis="both", colors=muted, length=0, labelsize=9)
-    axis.set_ylabel("Баланс, ккал/день", color=text, fontsize=11, labelpad=12)
-    axis.yaxis.set_major_formatter(
-        FuncFormatter(lambda value, _position: f"{value:,.0f}".replace(",", " "))
-    )
+    if show_balance:
+        axis.set_ylabel("Баланс, ккал/день", color=text, fontsize=11, labelpad=12)
+        axis.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, _position: f"{value:,.0f}".replace(",", " "))
+        )
+    else:
+        axis.set_yticks([])
     labels = [f"{point.start_day:%d.%m}\n{point.end_day:%d.%m}" for point in points]
     axis.set_xticks(x_values, labels)
     axis.set_xlabel("Початок і кінець періоду", color=muted, labelpad=12)
@@ -153,20 +171,21 @@ def render_weekly_chart(
     balance_values = [value for value in balances if value != 0]
     balance_span = max((abs(value) for value in balance_values), default=100)
     annotation_offset = max(balance_span * 0.035, 18)
-    for bar, point in zip(bars, points, strict=True):
-        value = point.average_balance_kcal
-        if value is None:
-            continue
-        axis.text(
-            bar.get_x() + bar.get_width() / 2,
-            value + (annotation_offset if value >= 0 else -annotation_offset),
-            f"{value:+.0f}",
-            ha="center",
-            va="bottom" if value >= 0 else "top",
-            color=text,
-            fontsize=8.5,
-            fontweight="bold",
-        )
+    if show_balance:
+        for bar, point in zip(bars, points, strict=True):
+            value = point.average_balance_kcal
+            if value is None:
+                continue
+            axis.text(
+                bar.get_x() + bar.get_width() / 2,
+                value + (annotation_offset if value >= 0 else -annotation_offset),
+                f"{value:+.0f}",
+                ha="center",
+                va="bottom" if value >= 0 else "top",
+                color=text,
+                fontsize=8.5,
+                fontweight="bold",
+            )
 
     weight_axis = axis.twinx()
     weight_points = [
@@ -186,6 +205,18 @@ def render_weekly_chart(
         markeredgewidth=3,
         zorder=7,
     )
+    if weight_trend is not None:
+        trend_start_day, trend_start_weight, trend_end_day, trend_end_weight = (
+            weight_trend
+        )
+        weight_axis.plot(
+            [day_center_x(trend_start_day), day_center_x(trend_end_day)],
+            [trend_start_weight, trend_end_weight],
+            color=trend_color,
+            linewidth=3.2,
+            linestyle="--",
+            zorder=8,
+        )
     weight_axis.spines[["top", "right", "left", "bottom"]].set_visible(False)
     weight_axis.tick_params(axis="y", colors=weight_color, length=0, labelsize=9)
     weight_axis.set_ylabel(
@@ -202,6 +233,8 @@ def render_weekly_chart(
         for point in points
         if point.average_weight_kg is not None
     ]
+    if weight_trend is not None:
+        known_weights.extend((weight_trend[1], weight_trend[3]))
     if known_weights:
         low = min(known_weights)
         high = max(known_weights)
@@ -223,7 +256,7 @@ def render_weekly_chart(
 
     chart_days = (points[-1].end_day - points[0].start_day).days + 1
     figure.suptitle(
-        "Баланс калорій і середня вага",
+        "Вага і баланс калорій" if show_balance else f"Вага за {chart_days} днів",
         x=0.075,
         y=0.965,
         ha="left",
@@ -231,9 +264,9 @@ def render_weekly_chart(
         fontsize=20,
         fontweight="bold",
     )
-    subtitle = f"Останні {chart_days} завершених днів"
+    subtitle = f"Вага: останні {chart_days} завершених днів"
     if has_reliable_period:
-        subtitle += " · жовтий фон — період із достатньою кількістю даних"
+        subtitle += " · жовтий фон — вага/дефіцит (де достатньо даних)"
     axis.set_title(
         subtitle,
         loc="left",
@@ -241,16 +274,22 @@ def render_weekly_chart(
         fontsize=10.5,
         pad=24,
     )
-    legend = [
-        Patch(facecolor=deficit, label="Дефіцит"),
-        Patch(facecolor=surplus, label="Профіцит"),
-        Patch(
-            facecolor=missing,
-            edgecolor="#AAB3C2",
-            hatch="///",
-            alpha=0.35,
-            label="Немає жодної пари",
-        ),
+    legend: list[Any] = []
+    if show_balance:
+        legend.extend(
+            (
+                Patch(facecolor=deficit, label="Дефіцит"),
+                Patch(facecolor=surplus, label="Профіцит"),
+                Patch(
+                    facecolor=missing,
+                    edgecolor="#AAB3C2",
+                    hatch="///",
+                    alpha=0.35,
+                    label="Немає пари даних",
+                ),
+            )
+        )
+    legend.append(
         Line2D(
             [0],
             [0],
@@ -258,10 +297,21 @@ def render_weekly_chart(
             marker="o",
             linewidth=4.2,
             label="Середня вага",
-        ),
-    ]
+        )
+    )
+    if weight_trend is not None:
+        legend.append(
+            Line2D(
+                [0],
+                [0],
+                color=trend_color,
+                linewidth=3.2,
+                linestyle="--",
+                label="Тренд ваги",
+            )
+        )
     if has_reliable_period:
-        legend.append(Patch(facecolor=reliable, alpha=0.3, label="Надійний період"))
+        legend.append(Patch(facecolor=reliable, alpha=0.3, label="Вага/дефіцит"))
     axis.legend(
         handles=legend,
         loc="upper center",

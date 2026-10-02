@@ -19,6 +19,7 @@ def test_render_weekly_chart_returns_png_with_deficit_surplus_and_weight() -> No
         points,
         reliable_start=date(2026, 6, 15),
         reliable_end=date(2026, 8, 10),
+        weight_trend=(date(2026, 6, 1), 82.0, date(2026, 8, 23), 79.0),
     )
 
     assert image.startswith(b"\x89PNG\r\n\x1a\n")
@@ -27,7 +28,9 @@ def test_render_weekly_chart_returns_png_with_deficit_surplus_and_weight() -> No
 
 def test_render_weekly_chart_handles_missing_values() -> None:
     image = render_weekly_chart(
-        [WeeklyChartPoint(date(2026, 8, 1), date(2026, 8, 7), None, None)]
+        [WeeklyChartPoint(date(2026, 8, 1), date(2026, 8, 7), None, 80.0)],
+        weight_trend=(date(2026, 8, 1), 80.0, date(2026, 8, 7), 79.8),
+        show_balance=False,
     )
 
     assert image.startswith(b"\x89PNG\r\n\x1a\n")

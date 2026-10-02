@@ -233,8 +233,32 @@ class NotFoodError(ValueError):
 @dataclass(frozen=True)
 class MonthlyWeightStats:
     month: date
-    average_weight_kg: float | None
+    trend_weight_kg: float | None
     change_from_previous_kg: float | None
+
+
+@dataclass(frozen=True)
+class WeightTrend:
+    start_day: date
+    end_day: date
+    start_weight_kg: float
+    end_weight_kg: float
+    monthly_change_kg: float
+
+    @property
+    def change_kg(self) -> float:
+        return self.end_weight_kg - self.start_weight_kg
+
+    @property
+    def months(self) -> float:
+        return (self.end_day - self.start_day).days / AVERAGE_MONTH_DAYS
+
+    def weight_on(self, day: date) -> float:
+        elapsed_days = (self.end_day - self.start_day).days
+        if elapsed_days <= 0:
+            return self.start_weight_kg
+        progress = (day - self.start_day).days / elapsed_days
+        return self.start_weight_kg + self.change_kg * progress
 
 
 @dataclass(frozen=True)
@@ -246,7 +270,7 @@ class ReliableChartStats:
     average_outtake_kcal: float
     average_balance_kcal: float
     monthly_weight_change_kg: float
-    actual_weight_change_kg: float
+    weight_trend_change_kg: float
     expected_weight_change_kg: float
     required_balance_kcal: float
     relationship_conclusion: str
@@ -258,8 +282,7 @@ class ChartReport:
     end_day: date
     points: tuple[WeeklyChartPoint, ...]
     monthly_weights: tuple[MonthlyWeightStats, ...]
-    total_weight_change_kg: float | None
-    monthly_weight_change_kg: float | None
+    weight_trend: WeightTrend | None
     reliable: ReliableChartStats | None
 
 
@@ -995,6 +1018,46 @@ def _format_weight_change(value: float) -> str:
     return f"{value:+.1f}".replace("-", "−")
 
 
+def _weight_trend(
+    daily_weights: Mapping[date, float], start_day: date, end_day: date
+) -> WeightTrend | None:
+    entries = sorted(
+        (day, weight)
+        for day, weight in daily_weights.items()
+        if start_day <= day <= end_day
+    )
+    if len(entries) < 2:
+        return None
+    first_day = entries[0][0]
+    last_day = entries[-1][0]
+    elapsed_days = (last_day - first_day).days
+    if elapsed_days <= 0:
+        return None
+
+    x_values = [(day - first_day).days for day, _weight in entries]
+    y_values = [weight for _day, weight in entries]
+    x_mean = sum(x_values) / len(x_values)
+    y_mean = sum(y_values) / len(y_values)
+    denominator = sum((value - x_mean) ** 2 for value in x_values)
+    if denominator == 0:
+        return None
+    slope = (
+        sum(
+            (x_value - x_mean) * (y_value - y_mean)
+            for x_value, y_value in zip(x_values, y_values, strict=True)
+        )
+        / denominator
+    )
+    intercept = y_mean - slope * x_mean
+    return WeightTrend(
+        start_day=first_day,
+        end_day=last_day,
+        start_weight_kg=intercept,
+        end_weight_kg=intercept + slope * elapsed_days,
+        monthly_change_kg=slope * AVERAGE_MONTH_DAYS,
+    )
+
+
 def _format_chart_number(value: float, *, decimals: int = 0) -> str:
     return f"{value:,.{decimals}f}".replace(",", " ").replace(".", ",")
 
@@ -1027,82 +1090,73 @@ def format_chart_report(report: ChartReport) -> str:
     month_rows: list[str] = []
     for month in report.monthly_weights:
         label = f"{UKRAINIAN_MONTHS[month.month.month - 1]} {month.month.year}"
-        if month.average_weight_kg is None:
-            month_rows.append(f"<li>{label}: <b>немає вимірювань</b></li>")
+        if month.trend_weight_kg is None:
+            month_rows.append(f"<li>{label} — <b>немає даних</b></li>")
             continue
-        average = _format_chart_number(month.average_weight_kg, decimals=1)
+        average = _format_chart_number(month.trend_weight_kg, decimals=1)
         if month.change_from_previous_kg is None:
-            change = "перша середня в цьому звіті"
+            change = "—"
         else:
-            change = (
-                "до попереднього місяця "
-                f"<b>{_format_chart_change(month.change_from_previous_kg)} кг</b>"
-            )
-        month_rows.append(f"<li>{label}: середня <b>{average} кг</b> · {change}</li>")
+            change = f"<b>{_format_chart_change(month.change_from_previous_kg)} кг</b>"
+        month_rows.append(f"<li>{label} — <b>{average} кг</b> · {change}</li>")
 
-    if report.total_weight_change_kg is None:
+    if report.weight_trend is None:
         overall_weight = (
-            "<p><b>Недостатньо вимірювань</b>, щоб порахувати зміну ваги "
-            "за 90 днів.</p>"
+            "<p><b>Недостатньо вимірювань, щоб порахувати тренд ваги.</b></p>"
         )
     else:
-        assert report.monthly_weight_change_kg is not None
+        trend = report.weight_trend
         overall_weight = (
-            "<p>Від першого до останнього вимірювання: "
-            f"<b>{_format_chart_change(report.total_weight_change_kg)} кг</b><br/>"
-            "Середньомісячна зміна: "
-            f"<b>{_format_chart_change(report.monthly_weight_change_kg)} кг/місяць</b>"
+            "<p>Тренд: "
+            f"<b>{_format_chart_change(trend.monthly_change_kg)} кг/міс.</b><br/>"
+            "Зміна за трендом: "
+            f"<b>{_format_chart_change(trend.change_kg)} кг за "
+            f"{_format_chart_number(trend.months, decimals=1)} міс.</b>"
             "</p>"
         )
 
     reliable = report.reliable
     if reliable is None:
         reliable_block = (
-            "<h4>Період із достатньою кількістю даних</h4>"
-            "<p><b>Поки що його немає.</b> Потрібно щонайменше 14 днів, "
-            "2 вимірювання ваги та 7 днів, де записані і їжа, і витрати.</p>"
+            "<h4>Вага/дефіцит (де достатньо даних)</h4>"
+            "<p><b>Недостатньо спільних даних.</b></p>"
         )
         conclusion_block = ""
     else:
         period_days = (reliable.end_day - reliable.start_day).days + 1
         reliable_block = (
-            "<h4>Період із достатньою кількістю даних</h4>"
+            "<h4>Вага/дефіцит (де достатньо даних)</h4>"
             f"<p><b>{reliable.start_day:%d.%m.%Y}–{reliable.end_day:%d.%m.%Y} "
-            f"({period_days} днів)</b><br/>"
-            "Днів, де записані і їжа, і витрати: "
-            f"<b>{reliable.paired_days}</b></p>"
-            "<p>У середньому за такий день:<br/>"
-            f"Спожито: <b>{_format_chart_number(reliable.average_intake_kcal)} "
-            "ккал</b><br/>"
+            f"({period_days} днів, {reliable.paired_days} повних)</b></p>"
+            f"<p>Спожито: <b>{_format_chart_number(reliable.average_intake_kcal)} "
+            "ккал/день</b><br/>"
             f"Витрачено: <b>{_format_chart_number(reliable.average_outtake_kcal)} "
-            "ккал</b><br/>"
-            f"Результат: {_format_balance(reliable.average_balance_kcal)}</p>"
-            "<p>Середньомісячна зміна ваги: "
+            "ккал/день</b><br/>"
+            f"Баланс: {_format_balance(reliable.average_balance_kcal)}<br/>"
+            "Тренд ваги: "
             f"<b>{_format_chart_change(reliable.monthly_weight_change_kg)} "
-            "кг/місяць</b></p>"
+            "кг/міс.</b></p>"
         )
         conclusion_block = (
-            "<h4>Що це означає</h4>"
-            f"<p><b>{reliable.relationship_conclusion}</b></p>"
-            "<p>Якби середній баланс був таким щодня, розрахункова зміна "
-            "ваги становила б "
+            "<h4>Висновок</h4>"
+            f"<p><b>{reliable.relationship_conclusion}</b><br/>"
+            "За балансом: "
             f"<b>{_format_chart_change(reliable.expected_weight_change_kg)} "
-            "кг</b>. Фактично між першим і останнім вимірюванням: "
-            f"<b>{_format_chart_change(reliable.actual_weight_change_kg)} кг</b>.</p>"
-            "<p>Щоб пояснити фактичну зміну ваги лише калоріями, середній "
-            "денний результат мав би бути: "
-            f"{_format_balance(reliable.required_balance_kcal)}."
-            "</p><p><i>Це орієнтир за правилом близько 7 700 ккал на 1 кг. "
-            "Вода, сіль, травлення й нерівномірні вимірювання можуть помітно "
-            "впливати на вагу. Висновок розраховано без LLM.</i></p>"
+            "кг</b> · за трендом ваги: "
+            f"<b>{_format_chart_change(reliable.weight_trend_change_kg)} кг</b><br/>"
+            "Для такого тренду потрібен приблизно "
+            f"{_format_balance(reliable.required_balance_kcal)}.</p>"
+            "<p><i>Орієнтир: близько 7 700 ккал на 1 кг. Вода та інші "
+            "короткочасні коливання можуть впливати на вагу.</i></p>"
         )
 
     return (
-        "<h3>За 90 днів: вага й баланс калорій</h3>"
+        "<h3>Вага за 90 днів</h3>"
         f"<p><b>{report.start_day:%d.%m.%Y}–{report.end_day:%d.%m.%Y}</b></p>"
-        "<h4>Середня вага по місяцях</h4>"
+        f"{overall_weight}"
+        "<h4>По місяцях (за трендом)</h4>"
         f"<ul>{''.join(month_rows)}</ul>"
-        f"{overall_weight}{reliable_block}{conclusion_block}"
+        f"{reliable_block}{conclusion_block}"
     )
 
 
@@ -1718,6 +1772,7 @@ class CaloriesService:
                 )
             )
 
+        weight_trend = _weight_trend(daily_weights, start_day, end_day)
         monthly_weights: list[MonthlyWeightStats] = []
         month = start_day.replace(day=1)
         previous_average: float | None = None
@@ -1727,12 +1782,20 @@ class CaloriesService:
                 if month.month == 12
                 else month.replace(month=month.month + 1)
             )
-            values = [
-                value
-                for day, value in daily_weights.items()
-                if start_day <= day <= end_day and month <= day < next_month
-            ]
-            average = sum(values) / len(values) if values else None
+            month_start = max(month, start_day)
+            month_end = min(next_month - timedelta(days=1), end_day)
+            if weight_trend is not None:
+                month_start = max(month_start, weight_trend.start_day)
+                month_end = min(month_end, weight_trend.end_day)
+            average = (
+                (
+                    weight_trend.weight_on(month_start)
+                    + weight_trend.weight_on(month_end)
+                )
+                / 2
+                if weight_trend is not None and month_start <= month_end
+                else None
+            )
             change = (
                 average - previous_average
                 if average is not None and previous_average is not None
@@ -1741,23 +1804,6 @@ class CaloriesService:
             monthly_weights.append(MonthlyWeightStats(month, average, change))
             previous_average = average
             month = next_month
-
-        weight_days = sorted(
-            day for day in daily_weights if start_day <= day <= end_day
-        )
-        total_weight_change: float | None = None
-        monthly_weight_change: float | None = None
-        if len(weight_days) >= 2:
-            first_weight_day = weight_days[0]
-            last_weight_day = weight_days[-1]
-            elapsed_days = (last_weight_day - first_weight_day).days
-            if elapsed_days > 0:
-                total_weight_change = (
-                    daily_weights[last_weight_day] - daily_weights[first_weight_day]
-                )
-                monthly_weight_change = (
-                    total_weight_change / elapsed_days * AVERAGE_MONTH_DAYS
-                )
 
         reliable = self._chart_reliable_stats(
             start_day,
@@ -1771,8 +1817,7 @@ class CaloriesService:
             end_day=end_day,
             points=tuple(points),
             monthly_weights=tuple(monthly_weights),
-            total_weight_change_kg=total_weight_change,
-            monthly_weight_change_kg=monthly_weight_change,
+            weight_trend=weight_trend,
             reliable=reliable,
         )
 
@@ -1814,25 +1859,20 @@ class CaloriesService:
         ):
             return None
 
-        first_weight_day = reliable_weight_days[0]
-        last_weight_day = reliable_weight_days[-1]
-        weight_elapsed_days = (last_weight_day - first_weight_day).days
-        if weight_elapsed_days <= 0:
+        reliable_trend = _weight_trend(daily_weights, reliable_start, reliable_end)
+        if reliable_trend is None:
             return None
+        weight_elapsed_days = (reliable_trend.end_day - reliable_trend.start_day).days
 
         intakes = [_as_summary(totals[day]).kcal for day in paired_days]
         outtakes = [burned[day] for day in paired_days]
         average_intake = sum(intakes) / len(intakes)
         average_outtake = sum(outtakes) / len(outtakes)
         average_balance = average_intake - average_outtake
-        actual_weight_change = (
-            daily_weights[last_weight_day] - daily_weights[first_weight_day]
-        )
-        monthly_weight_change = (
-            actual_weight_change / weight_elapsed_days * AVERAGE_MONTH_DAYS
-        )
+        weight_trend_change = reliable_trend.change_kg
+        monthly_weight_change = reliable_trend.monthly_change_kg
         expected_weight_change = average_balance * weight_elapsed_days / KCAL_PER_KG
-        required_balance = actual_weight_change * KCAL_PER_KG / weight_elapsed_days
+        required_balance = weight_trend_change * KCAL_PER_KG / weight_elapsed_days
         return ReliableChartStats(
             start_day=reliable_start,
             end_day=reliable_end,
@@ -1841,11 +1881,11 @@ class CaloriesService:
             average_outtake_kcal=average_outtake,
             average_balance_kcal=average_balance,
             monthly_weight_change_kg=monthly_weight_change,
-            actual_weight_change_kg=actual_weight_change,
+            weight_trend_change_kg=weight_trend_change,
             expected_weight_change_kg=expected_weight_change,
             required_balance_kcal=required_balance,
             relationship_conclusion=_chart_relationship_conclusion(
-                actual_weight_change, expected_weight_change
+                weight_trend_change, expected_weight_change
             ),
         )
 
@@ -3543,20 +3583,40 @@ class TelegramHandlers:
                     daily_weights,
                     CHART_DAYS,
                 )
+                trend_line = (
+                    None
+                    if report.weight_trend is None
+                    else (
+                        report.weight_trend.start_day,
+                        report.weight_trend.start_weight_kg,
+                        report.weight_trend.end_day,
+                        report.weight_trend.end_weight_kg,
+                    )
+                )
+                show_balance = report.reliable is not None
                 image = await asyncio.to_thread(
                     render_weekly_chart,
                     list(report.points),
                     report.reliable.start_day if report.reliable is not None else None,
                     report.reliable.end_day if report.reliable is not None else None,
+                    trend_line,
+                    show_balance,
                 )
+                if show_balance:
+                    caption = (
+                        "Вага за останні 90 завершених днів. Пунктир — тренд "
+                        "ваги; жовтим виділено період, де достатньо даних про "
+                        "вагу й баланс калорій."
+                    )
+                else:
+                    caption = (
+                        "Вага за останні 90 завершених днів. Пунктир — тренд "
+                        "ваги. Для надійного порівняння з балансом калорій "
+                        "даних поки недостатньо."
+                    )
                 await message.reply_photo(
                     photo=InputFile(image, filename="calorie-weight-chart.png"),
-                    caption=(
-                        "Останні 90 завершених днів. "
-                        "Стовпчики — середньодобовий баланс калорій, "
-                        "лінія — середня вага. Жовтим виділено період із "
-                        "достатньою кількістю даних."
-                    ),
+                    caption=caption,
                 )
                 await self._send_rich_html(
                     message,
