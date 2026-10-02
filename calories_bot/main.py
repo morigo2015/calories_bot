@@ -37,7 +37,7 @@ async def configure_bot_commands(
         BotCommand("day", "📅 за день"),
         BotCommand("week", "📊 за тиждень"),
         BotCommand("month", "📈 за місяць"),
-        BotCommand("chart", "📉 графік за 12 тижнів"),
+        BotCommand("chart", "📉 За 3 місяці"),
         BotCommand("goal", "🎯 ціль калорій"),
         BotCommand("protein_goal", "🥩 ціль білка"),
         BotCommand("burn", "🔥 витрата калорій"),

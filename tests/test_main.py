@@ -271,7 +271,7 @@ def test_configure_bot_commands_registers_user_and_admin_menus() -> None:
         ("day", "📅 за день"),
         ("week", "📊 за тиждень"),
         ("month", "📈 за місяць"),
-        ("chart", "📉 графік за 12 тижнів"),
+        ("chart", "📉 За 3 місяці"),
         ("goal", "🎯 ціль калорій"),
         ("protein_goal", "🥩 ціль білка"),
         ("burn", "🔥 витрата калорій"),

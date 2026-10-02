@@ -15,7 +15,11 @@ def test_render_weekly_chart_returns_png_with_deficit_surplus_and_weight() -> No
         for index in range(12)
     ]
 
-    image = render_weekly_chart(points)
+    image = render_weekly_chart(
+        points,
+        reliable_start=date(2026, 6, 15),
+        reliable_end=date(2026, 8, 10),
+    )
 
     assert image.startswith(b"\x89PNG\r\n\x1a\n")
     assert len(image) > 50_000

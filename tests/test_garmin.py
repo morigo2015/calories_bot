@@ -52,7 +52,7 @@ def build_store(tmp_path):
     )
 
 
-def test_refreshes_twelve_weeks_and_formats_latest_week(monkeypatch, tmp_path):
+def test_refreshes_ninety_days_and_formats_latest_week(monkeypatch, tmp_path):
     FakeGarmin.instances.clear()
     monkeypatch.setattr(garmin_module, "Garmin", FakeGarmin)
     store = build_store(tmp_path)
@@ -64,7 +64,7 @@ def test_refreshes_twelve_weeks_and_formats_latest_week(monkeypatch, tmp_path):
     assert len(FakeGarmin.instances) == 1
     assert len(FakeGarmin.instances[0].requested_days) == GARMIN_CACHE_DAYS
     assert FakeGarmin.instances[0].requested_days[0] == "2026-08-13"
-    assert FakeGarmin.instances[0].requested_days[-1] == "2026-05-22"
+    assert FakeGarmin.instances[0].requested_days[-1] == "2026-05-16"
     assert FakeGarmin.instances[0].requested_weight_ranges == [
         ("2000-01-01", "2026-08-13")
     ]
@@ -77,7 +77,7 @@ def test_refreshes_twelve_weeks_and_formats_latest_week(monkeypatch, tmp_path):
     assert "Оновлено: 14.08.2026 01:00" in report
     daily = store.get_daily_calories()
     assert len(daily) == GARMIN_CACHE_DAYS
-    assert daily[datetime(2026, 5, 22).date()] == 2084
+    assert daily[datetime(2026, 5, 16).date()] == 2090
     assert daily[datetime(2026, 8, 13).date()] == 2001
     assert (tmp_path / "garmin-calories.json").stat().st_mode & 0o777 == 0o600
 
@@ -107,9 +107,9 @@ def test_upgrades_legacy_week_cache_by_fetching_only_missing_days(
     assert store.refresh_if_due(datetime(2026, 8, 14, 1, 30, tzinfo=TZ)) is True
 
     assert len(FakeGarmin.instances) == 1
-    assert len(FakeGarmin.instances[0].requested_days) == 77
+    assert len(FakeGarmin.instances[0].requested_days) == 83
     assert FakeGarmin.instances[0].requested_days[0] == "2026-08-06"
-    assert FakeGarmin.instances[0].requested_days[-1] == "2026-05-22"
+    assert FakeGarmin.instances[0].requested_days[-1] == "2026-05-16"
     assert store.get_daily_calories()[datetime(2026, 8, 13).date()] == 1913
     assert json.loads(cache_path.read_text(encoding="utf-8"))["schema_version"] == 4
 
@@ -165,6 +165,10 @@ def test_imports_all_weights_averages_each_day_and_fills_gaps(monkeypatch, tmp_p
             (12, 79.5),
             (13, 79.5),
         )
+    }
+    assert store.get_recorded_daily_weights() == {
+        datetime(2026, 8, 9).date(): 80.5,
+        datetime(2026, 8, 12).date(): 79.5,
     }
 
 

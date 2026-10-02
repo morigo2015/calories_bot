@@ -18,7 +18,7 @@ from .sheets import accounting_date
 LOGGER = logging.getLogger(__name__)
 GARMIN_CACHE_SCHEMA_VERSION = 4
 GARMIN_LEGACY_MONTH_DAYS = 30
-GARMIN_CACHE_DAYS = 12 * 7
+GARMIN_CACHE_DAYS = 90
 GARMIN_WEEK_DAYS = 7
 GARMIN_RECENT_DAYS_TO_REFRESH = 3
 GARMIN_WEIGHT_HISTORY_START = date(2000, 1, 1)
@@ -176,6 +176,16 @@ class GarminCalorieStore:
                 result[day] = latest
             day += timedelta(days=1)
         return result
+
+    def get_recorded_daily_weights(self) -> dict[date, float]:
+        """Return only dates on which Garmin has an actual weight measurement."""
+
+        snapshot = self._read_snapshot()
+        if snapshot is None:
+            raise GarminCacheError("Garmin cache has not been created yet")
+        return {
+            date.fromisoformat(entry.day): entry.weight_kg for entry in snapshot.weights
+        }
 
     def _fetch_snapshot(
         self,

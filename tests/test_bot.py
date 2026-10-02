@@ -2853,9 +2853,9 @@ def test_chart_points_group_complete_weeks_into_seven_day_averages(
     }
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
 
-    points = service.get_chart_points(
-        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, weeks=2
-    )
+    points = service.get_chart_report(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, period_days=14
+    ).points
 
     assert [(point.start_day, point.end_day) for point in points] == [
         (date(2026, 8, 1), date(2026, 8, 7)),
@@ -2875,9 +2875,9 @@ def test_chart_averages_days_with_intake_and_outtake_and_keeps_weight(
     weights = {day: 79.0 for day in week}
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
 
-    point = service.get_chart_points(
-        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, weeks=1
-    )[0]
+    point = service.get_chart_report(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, period_days=7
+    ).points[0]
 
     assert point.average_balance_kcal == -500
     assert point.average_weight_kg == 79.0
@@ -2893,12 +2893,98 @@ def test_chart_omits_balance_only_when_week_has_no_intake_outtake_pairs(
     weights = {day: 79.0 for day in week}
     service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
 
-    point = service.get_chart_points(
-        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, weeks=1
-    )[0]
+    point = service.get_chart_report(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights, period_days=7
+    ).points[0]
 
     assert point.average_balance_kcal is None
     assert point.average_weight_kg == 79.0
+
+
+def test_chart_report_covers_90_days_and_calculates_weight_and_reliable_stats(
+    tmp_path,
+) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    intake_start = date(2026, 5, 20)
+    intake_end = date(2026, 8, 10)
+    store.daily_totals = {
+        intake_start + timedelta(days=offset): 2000
+        for offset in range((intake_end - intake_start).days + 1)
+    }
+    outtake_start = date(2026, 5, 18)
+    outtake_end = date(2026, 8, 12)
+    burned = {
+        outtake_start + timedelta(days=offset): 2300
+        for offset in range((outtake_end - outtake_start).days + 1)
+    }
+    weights = {
+        date(2026, 5, 25): 82.0,
+        date(2026, 6, 25): 81.0,
+        date(2026, 7, 25): 80.0,
+        date(2026, 8, 5): 79.0,
+    }
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    report = service.get_chart_report(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights
+    )
+
+    assert (report.start_day, report.end_day) == (
+        date(2026, 5, 17),
+        date(2026, 8, 14),
+    )
+    assert len(report.points) == 13
+    assert report.points[-1].start_day == date(2026, 8, 9)
+    assert report.points[-1].end_day == date(2026, 8, 14)
+    assert [month.average_weight_kg for month in report.monthly_weights] == [
+        82.0,
+        81.0,
+        80.0,
+        79.0,
+    ]
+    assert [month.change_from_previous_kg for month in report.monthly_weights] == [
+        None,
+        -1.0,
+        -1.0,
+        -1.0,
+    ]
+    assert report.total_weight_change_kg == -3.0
+    assert report.monthly_weight_change_kg == pytest.approx(-1.268, abs=0.001)
+    assert report.reliable is not None
+    assert (report.reliable.start_day, report.reliable.end_day) == (
+        date(2026, 5, 25),
+        date(2026, 8, 5),
+    )
+    assert report.reliable.paired_days == 73
+    assert report.reliable.average_intake_kcal == 2000
+    assert report.reliable.average_outtake_kcal == 2300
+    assert report.reliable.average_balance_kcal == -300
+    assert report.reliable.expected_weight_change_kg == pytest.approx(-2.805, abs=0.001)
+    assert report.reliable.required_balance_kcal == pytest.approx(-320.833, abs=0.001)
+
+    formatted = bot_module.format_chart_report(report)
+    assert "<h3>За 90 днів: вага й баланс калорій</h3>" in formatted
+    assert "<b>82,0 кг</b>" in formatted
+    assert "<b>−3,0 кг</b>" in formatted
+    assert "Результат: дефіцит <b>300 ккал</b>" in formatted
+    assert "<b>Зміна ваги загалом відповідає" in formatted
+    assert "Висновок розраховано без LLM" in formatted
+
+
+def test_chart_report_requires_minimum_coverage_for_reliable_period(tmp_path) -> None:
+    store = FakeStore(SheetState(today_total=0, existing=None))
+    days = [date(2026, 8, 1) + timedelta(days=offset) for offset in range(7)]
+    store.daily_totals = {day: 2000 for day in days}
+    burned = {day: 2300 for day in days}
+    weights = {days[0]: 80.0, days[-1]: 79.8}
+    service = build_service(FakeAnalyzer(food_analysis()), store, tmp_path)
+
+    report = service.get_chart_report(
+        datetime(2026, 8, 15, 9, tzinfo=TZ), burned, weights
+    )
+
+    assert report.reliable is None
+    assert "<b>Поки що його немає.</b>" in bot_module.format_chart_report(report)
 
 
 def test_chart_is_available_to_non_admin_with_personal_garmin(
@@ -2907,9 +2993,9 @@ def test_chart_is_available_to_non_admin_with_personal_garmin(
     class Service:
         args = None
 
-        def get_chart_points(self, *args):
+        def get_chart_report(self, *args):
             self.args = args
-            return [SimpleNamespace()]
+            return SimpleNamespace(points=[SimpleNamespace()], reliable=None)
 
     class Provider:
         requested = None
@@ -2931,7 +3017,14 @@ def test_chart_is_available_to_non_admin_with_personal_garmin(
         get_daily_weights=lambda: weights,
     )
     provider = Provider(garmin)
-    monkeypatch.setattr(bot_module, "render_weekly_chart", lambda points: b"png")
+    monkeypatch.setattr(
+        bot_module,
+        "render_weekly_chart",
+        lambda points, reliable_start, reliable_end: b"png",
+    )
+    monkeypatch.setattr(
+        bot_module, "format_chart_report", lambda report: "<h3>Звіт</h3>"
+    )
     handlers = TelegramHandlers(
         999,
         FakeManager({123: user_record()}, {123: service}),
@@ -2942,10 +3035,12 @@ def test_chart_is_available_to_non_admin_with_personal_garmin(
     asyncio.run(handlers.chart(update, SimpleNamespace(user_data={})))
 
     assert provider.requested == (123, time(1))
-    assert service.args == (message.date, burned, weights, 12)
+    assert service.args == (message.date, burned, weights, 90)
     assert refreshes == [True]
     assert len(message.photo_replies) == 1
     assert message.photo_replies[0]["photo"].filename == "calorie-weight-chart.png"
+    assert message.replies == ["<b>Звіт</b>"]
+    assert message.reply_kwargs[0]["parse_mode"] == ParseMode.HTML
     assert message.typing_actions == [(123, ChatAction.TYPING)]
 
 
@@ -2960,7 +3055,7 @@ def test_chart_requires_a_personal_garmin_integration() -> None:
 
     asyncio.run(handlers.chart(update, SimpleNamespace(user_data={})))
 
-    assert message.replies == [bot_module.GARMIN_NOT_CONNECTED_TEXT]
+    assert message.replies == [bot_module.CHART_GARMIN_NOT_CONNECTED_TEXT]
     assert message.photo_replies == []
 
 

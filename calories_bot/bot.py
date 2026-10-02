@@ -177,11 +177,35 @@ GARMIN_READ_ERROR_TEXT = (
 GARMIN_NOT_CONNECTED_TEXT = (
     "Garmin не підключено. Звернися до адміністратора для налаштування інтеграції."
 )
+CHART_GARMIN_NOT_CONNECTED_TEXT = (
+    "Не можу показати довгостроковий тренд ваги та дефіциту калорій, "
+    "тому що у вас не підключений Garmin."
+)
 WEEK_DAYS = 7
 MONTH_DAYS = 30
-CHART_WEEKS = 12
+CHART_DAYS = 90
+CHART_BUCKET_DAYS = 7
+CHART_RELIABLE_MIN_DAYS = 14
+CHART_RELIABLE_MIN_PAIRED_DAYS = 7
+CHART_RELIABLE_MIN_WEIGHT_POINTS = 2
+AVERAGE_MONTH_DAYS = 365.25 / 12
+KCAL_PER_KG = 7_700
 MACRO_TRACKING_START_DATE = date(2026, 8, 17)
 UKRAINIAN_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
+UKRAINIAN_MONTHS = (
+    "січень",
+    "лютий",
+    "березень",
+    "квітень",
+    "травень",
+    "червень",
+    "липень",
+    "серпень",
+    "вересень",
+    "жовтень",
+    "листопад",
+    "грудень",
+)
 
 
 class GarminCalories(Protocol):
@@ -193,6 +217,8 @@ class GarminCalories(Protocol):
 
     def get_daily_weights(self) -> dict[date, float]: ...
 
+    def get_recorded_daily_weights(self) -> dict[date, float]: ...
+
 
 class GarminProvider(Protocol):
     def store_for(
@@ -202,6 +228,39 @@ class GarminProvider(Protocol):
 
 class NotFoodError(ValueError):
     """Raised when the message does not describe consumed food."""
+
+
+@dataclass(frozen=True)
+class MonthlyWeightStats:
+    month: date
+    average_weight_kg: float | None
+    change_from_previous_kg: float | None
+
+
+@dataclass(frozen=True)
+class ReliableChartStats:
+    start_day: date
+    end_day: date
+    paired_days: int
+    average_intake_kcal: float
+    average_outtake_kcal: float
+    average_balance_kcal: float
+    monthly_weight_change_kg: float
+    actual_weight_change_kg: float
+    expected_weight_change_kg: float
+    required_balance_kcal: float
+    relationship_conclusion: str
+
+
+@dataclass(frozen=True)
+class ChartReport:
+    start_day: date
+    end_day: date
+    points: tuple[WeeklyChartPoint, ...]
+    monthly_weights: tuple[MonthlyWeightStats, ...]
+    total_weight_change_kg: float | None
+    monthly_weight_change_kg: float | None
+    reliable: ReliableChartStats | None
 
 
 class SavedMealNameError(ValueError):
@@ -936,6 +995,117 @@ def _format_weight_change(value: float) -> str:
     return f"{value:+.1f}".replace("-", "−")
 
 
+def _format_chart_number(value: float, *, decimals: int = 0) -> str:
+    return f"{value:,.{decimals}f}".replace(",", " ").replace(".", ",")
+
+
+def _format_chart_change(value: float) -> str:
+    return _format_weight_change(value).replace(".", ",")
+
+
+def _format_balance(value: float) -> str:
+    rounded = _format_chart_number(abs(value))
+    if value < -0.5:
+        return f"дефіцит <b>{rounded} ккал</b>"
+    if value > 0.5:
+        return f"профіцит <b>{rounded} ккал</b>"
+    return "баланс <b>0 ккал</b>"
+
+
+def _chart_relationship_conclusion(observed: float, expected: float) -> str:
+    tolerance = max(0.7, max(abs(observed), abs(expected)) * 0.35)
+    if abs(observed) < 0.5 and abs(expected) < 0.5:
+        return "Вага й баланс калорій не показують виразної зміни."
+    if abs(observed - expected) <= tolerance:
+        return "Зміна ваги загалом відповідає записаному балансу калорій."
+    if observed * expected < 0 and abs(observed) >= 0.5 and abs(expected) >= 0.5:
+        return "Зміна ваги й записаний баланс калорій рухаються в різні боки."
+    return "Зміна ваги помітно відрізняється від оцінки за балансом калорій."
+
+
+def format_chart_report(report: ChartReport) -> str:
+    month_rows: list[str] = []
+    for month in report.monthly_weights:
+        label = f"{UKRAINIAN_MONTHS[month.month.month - 1]} {month.month.year}"
+        if month.average_weight_kg is None:
+            month_rows.append(f"<li>{label}: <b>немає вимірювань</b></li>")
+            continue
+        average = _format_chart_number(month.average_weight_kg, decimals=1)
+        if month.change_from_previous_kg is None:
+            change = "перша середня в цьому звіті"
+        else:
+            change = (
+                "до попереднього місяця "
+                f"<b>{_format_chart_change(month.change_from_previous_kg)} кг</b>"
+            )
+        month_rows.append(f"<li>{label}: середня <b>{average} кг</b> · {change}</li>")
+
+    if report.total_weight_change_kg is None:
+        overall_weight = (
+            "<p><b>Недостатньо вимірювань</b>, щоб порахувати зміну ваги "
+            "за 90 днів.</p>"
+        )
+    else:
+        assert report.monthly_weight_change_kg is not None
+        overall_weight = (
+            "<p>Від першого до останнього вимірювання: "
+            f"<b>{_format_chart_change(report.total_weight_change_kg)} кг</b><br/>"
+            "Середньомісячна зміна: "
+            f"<b>{_format_chart_change(report.monthly_weight_change_kg)} кг/місяць</b>"
+            "</p>"
+        )
+
+    reliable = report.reliable
+    if reliable is None:
+        reliable_block = (
+            "<h4>Період із достатньою кількістю даних</h4>"
+            "<p><b>Поки що його немає.</b> Потрібно щонайменше 14 днів, "
+            "2 вимірювання ваги та 7 днів, де записані і їжа, і витрати.</p>"
+        )
+        conclusion_block = ""
+    else:
+        period_days = (reliable.end_day - reliable.start_day).days + 1
+        reliable_block = (
+            "<h4>Період із достатньою кількістю даних</h4>"
+            f"<p><b>{reliable.start_day:%d.%m.%Y}–{reliable.end_day:%d.%m.%Y} "
+            f"({period_days} днів)</b><br/>"
+            "Днів, де записані і їжа, і витрати: "
+            f"<b>{reliable.paired_days}</b></p>"
+            "<p>У середньому за такий день:<br/>"
+            f"Спожито: <b>{_format_chart_number(reliable.average_intake_kcal)} "
+            "ккал</b><br/>"
+            f"Витрачено: <b>{_format_chart_number(reliable.average_outtake_kcal)} "
+            "ккал</b><br/>"
+            f"Результат: {_format_balance(reliable.average_balance_kcal)}</p>"
+            "<p>Середньомісячна зміна ваги: "
+            f"<b>{_format_chart_change(reliable.monthly_weight_change_kg)} "
+            "кг/місяць</b></p>"
+        )
+        conclusion_block = (
+            "<h4>Що це означає</h4>"
+            f"<p><b>{reliable.relationship_conclusion}</b></p>"
+            "<p>Якби середній баланс був таким щодня, розрахункова зміна "
+            "ваги становила б "
+            f"<b>{_format_chart_change(reliable.expected_weight_change_kg)} "
+            "кг</b>. Фактично між першим і останнім вимірюванням: "
+            f"<b>{_format_chart_change(reliable.actual_weight_change_kg)} кг</b>.</p>"
+            "<p>Щоб пояснити фактичну зміну ваги лише калоріями, середній "
+            "денний результат мав би бути: "
+            f"{_format_balance(reliable.required_balance_kcal)}."
+            "</p><p><i>Це орієнтир за правилом близько 7 700 ккал на 1 кг. "
+            "Вода, сіль, травлення й нерівномірні вимірювання можуть помітно "
+            "впливати на вагу. Висновок розраховано без LLM.</i></p>"
+        )
+
+    return (
+        "<h3>За 90 днів: вага й баланс калорій</h3>"
+        f"<p><b>{report.start_day:%d.%m.%Y}–{report.end_day:%d.%m.%Y}</b></p>"
+        "<h4>Середня вага по місяцях</h4>"
+        f"<ul>{''.join(month_rows)}</ul>"
+        f"{overall_weight}{reliable_block}{conclusion_block}"
+    )
+
+
 def _format_period_weight_details(
     end_day: date,
     period_days: int,
@@ -1507,24 +1677,28 @@ class CaloriesService:
             daily_weights,
         )
 
-    def get_chart_points(
+    def get_chart_report(
         self,
         timestamp: datetime,
         burned_totals: dict[date, int],
         daily_weights: Mapping[date, float],
-        weeks: int = CHART_WEEKS,
-    ) -> list[WeeklyChartPoint]:
-        if weeks <= 0:
-            raise ValueError("Chart must contain at least one week")
+        period_days: int = CHART_DAYS,
+    ) -> ChartReport:
+        if period_days <= 0:
+            raise ValueError("Chart must contain at least one day")
         end_day = self.last_completed_day(timestamp)
-        start_day = end_day - timedelta(days=weeks * WEEK_DAYS - 1)
+        start_day = end_day - timedelta(days=period_days - 1)
         totals = self._store.get_daily_totals(start_day, end_day)
         burned = self._merged_burned_totals(start_day, end_day, burned_totals) or {}
         points: list[WeeklyChartPoint] = []
-        for week_index in range(weeks):
-            week_start = start_day + timedelta(days=week_index * WEEK_DAYS)
+        for offset in range(0, period_days, CHART_BUCKET_DAYS):
+            period_start = start_day + timedelta(days=offset)
+            period_end = min(
+                period_start + timedelta(days=CHART_BUCKET_DAYS - 1), end_day
+            )
             week_days = [
-                week_start + timedelta(days=offset) for offset in range(WEEK_DAYS)
+                period_start + timedelta(days=day_offset)
+                for day_offset in range((period_end - period_start).days + 1)
             ]
             covered_days = [day for day in week_days if day in totals and day in burned]
             average_balance = (
@@ -1537,13 +1711,143 @@ class CaloriesService:
             )
             points.append(
                 WeeklyChartPoint(
-                    start_day=week_start,
-                    end_day=week_days[-1],
+                    start_day=period_start,
+                    end_day=period_end,
                     average_balance_kcal=average_balance,
                     average_weight_kg=_average_weight(week_days, daily_weights),
                 )
             )
-        return points
+
+        monthly_weights: list[MonthlyWeightStats] = []
+        month = start_day.replace(day=1)
+        previous_average: float | None = None
+        while month <= end_day:
+            next_month = (
+                month.replace(year=month.year + 1, month=1)
+                if month.month == 12
+                else month.replace(month=month.month + 1)
+            )
+            values = [
+                value
+                for day, value in daily_weights.items()
+                if start_day <= day <= end_day and month <= day < next_month
+            ]
+            average = sum(values) / len(values) if values else None
+            change = (
+                average - previous_average
+                if average is not None and previous_average is not None
+                else None
+            )
+            monthly_weights.append(MonthlyWeightStats(month, average, change))
+            previous_average = average
+            month = next_month
+
+        weight_days = sorted(
+            day for day in daily_weights if start_day <= day <= end_day
+        )
+        total_weight_change: float | None = None
+        monthly_weight_change: float | None = None
+        if len(weight_days) >= 2:
+            first_weight_day = weight_days[0]
+            last_weight_day = weight_days[-1]
+            elapsed_days = (last_weight_day - first_weight_day).days
+            if elapsed_days > 0:
+                total_weight_change = (
+                    daily_weights[last_weight_day] - daily_weights[first_weight_day]
+                )
+                monthly_weight_change = (
+                    total_weight_change / elapsed_days * AVERAGE_MONTH_DAYS
+                )
+
+        reliable = self._chart_reliable_stats(
+            start_day,
+            end_day,
+            totals,
+            burned,
+            daily_weights,
+        )
+        return ChartReport(
+            start_day=start_day,
+            end_day=end_day,
+            points=tuple(points),
+            monthly_weights=tuple(monthly_weights),
+            total_weight_change_kg=total_weight_change,
+            monthly_weight_change_kg=monthly_weight_change,
+            reliable=reliable,
+        )
+
+    @staticmethod
+    def _chart_reliable_stats(
+        chart_start: date,
+        chart_end: date,
+        totals: Mapping[date, float | NutritionSummary],
+        burned: Mapping[date, int],
+        daily_weights: Mapping[date, float],
+    ) -> ReliableChartStats | None:
+        intake_days = sorted(day for day in totals if chart_start <= day <= chart_end)
+        outtake_days = sorted(day for day in burned if chart_start <= day <= chart_end)
+        weight_days = sorted(
+            day for day in daily_weights if chart_start <= day <= chart_end
+        )
+        if not intake_days or not outtake_days or not weight_days:
+            return None
+
+        reliable_start = max(intake_days[0], outtake_days[0], weight_days[0])
+        reliable_end = min(intake_days[-1], outtake_days[-1], weight_days[-1])
+        if reliable_end < reliable_start:
+            return None
+        reliable_days = (reliable_end - reliable_start).days + 1
+        if reliable_days < CHART_RELIABLE_MIN_DAYS:
+            return None
+
+        paired_days = sorted(
+            day
+            for day in set(totals).intersection(burned)
+            if reliable_start <= day <= reliable_end
+        )
+        reliable_weight_days = [
+            day for day in weight_days if reliable_start <= day <= reliable_end
+        ]
+        if (
+            len(paired_days) < CHART_RELIABLE_MIN_PAIRED_DAYS
+            or len(reliable_weight_days) < CHART_RELIABLE_MIN_WEIGHT_POINTS
+        ):
+            return None
+
+        first_weight_day = reliable_weight_days[0]
+        last_weight_day = reliable_weight_days[-1]
+        weight_elapsed_days = (last_weight_day - first_weight_day).days
+        if weight_elapsed_days <= 0:
+            return None
+
+        intakes = [_as_summary(totals[day]).kcal for day in paired_days]
+        outtakes = [burned[day] for day in paired_days]
+        average_intake = sum(intakes) / len(intakes)
+        average_outtake = sum(outtakes) / len(outtakes)
+        average_balance = average_intake - average_outtake
+        actual_weight_change = (
+            daily_weights[last_weight_day] - daily_weights[first_weight_day]
+        )
+        monthly_weight_change = (
+            actual_weight_change / weight_elapsed_days * AVERAGE_MONTH_DAYS
+        )
+        expected_weight_change = average_balance * weight_elapsed_days / KCAL_PER_KG
+        required_balance = actual_weight_change * KCAL_PER_KG / weight_elapsed_days
+        return ReliableChartStats(
+            start_day=reliable_start,
+            end_day=reliable_end,
+            paired_days=len(paired_days),
+            average_intake_kcal=average_intake,
+            average_outtake_kcal=average_outtake,
+            average_balance_kcal=average_balance,
+            monthly_weight_change_kg=monthly_weight_change,
+            actual_weight_change_kg=actual_weight_change,
+            expected_weight_change_kg=expected_weight_change,
+            required_balance_kcal=required_balance,
+            relationship_conclusion=_chart_relationship_conclusion(
+                actual_weight_change, expected_weight_change
+            ),
+        )
 
     def get_period_summary_for(
         self,
@@ -2635,7 +2939,7 @@ class TelegramHandlers:
         )
 
     async def _get_garmin_data(
-        self, user: UserRecord
+        self, user: UserRecord, *, recorded_weights: bool = False
     ) -> tuple[dict[date, int] | None, dict[date, float] | None]:
         store = await self._garmin_store_for(user)
         if store is None:
@@ -2653,7 +2957,13 @@ class TelegramHandlers:
                 "Garmin calories are unavailable for user %s", user.telegram_user_id
             )
             calories = None
-        get_weights = getattr(store, "get_daily_weights", None)
+        get_weights = getattr(
+            store,
+            "get_recorded_daily_weights" if recorded_weights else "get_daily_weights",
+            None,
+        )
+        if not callable(get_weights) and recorded_weights:
+            get_weights = getattr(store, "get_daily_weights", None)
         if not callable(get_weights):
             return calories, None
         try:
@@ -3216,28 +3526,43 @@ class TelegramHandlers:
         async with self._temporary_status(message, operation="chart"):
             store = await self._garmin_store_for(user)
             if store is None:
-                await message.reply_text(GARMIN_NOT_CONNECTED_TEXT, do_quote=False)
+                await message.reply_text(
+                    CHART_GARMIN_NOT_CONNECTED_TEXT, do_quote=False
+                )
                 return
             try:
-                burned_totals, daily_weights = await self._get_garmin_data(user)
+                burned_totals, daily_weights = await self._get_garmin_data(
+                    user, recorded_weights=True
+                )
                 if burned_totals is None or daily_weights is None:
                     raise RuntimeError("Garmin chart data is unavailable")
-                points = await asyncio.to_thread(
-                    service.get_chart_points,
+                report = await asyncio.to_thread(
+                    service.get_chart_report,
                     message.date,
                     burned_totals,
                     daily_weights,
-                    CHART_WEEKS,
+                    CHART_DAYS,
                 )
-                image = await asyncio.to_thread(render_weekly_chart, points)
+                image = await asyncio.to_thread(
+                    render_weekly_chart,
+                    list(report.points),
+                    report.reliable.start_day if report.reliable is not None else None,
+                    report.reliable.end_day if report.reliable is not None else None,
+                )
                 await message.reply_photo(
                     photo=InputFile(image, filename="calorie-weight-chart.png"),
                     caption=(
-                        "12 завершених 7-денних періодів. "
+                        "Останні 90 завершених днів. "
                         "Стовпчики — середньодобовий баланс калорій, "
-                        "лінія — середня вага. Сірий маркер означає, що "
-                        "за тиждень немає жодної пари intake + outtake."
+                        "лінія — середня вага. Жовтим виділено період із "
+                        "достатньою кількістю даних."
                     ),
+                )
+                await self._send_rich_html(
+                    message,
+                    context,
+                    format_chart_report(report),
+                    operation="/chart report",
                 )
             except Exception:
                 LOGGER.exception("Could not build /chart")

@@ -93,7 +93,7 @@ def _connect(settings: Settings, telegram_user_id: int) -> None:
     client.login(str(tokenstore))
     _secure_tree(provider.user_dir(telegram_user_id))
     print(f"Garmin підключено для {user.display_name} ({telegram_user_id}).")
-    print("Запускаю початкове завантаження 84 днів; воно може тривати кілька хвилин.")
+    print("Запускаю початкове завантаження 90 днів; воно може тривати кілька хвилин.")
     store = provider.store_for(telegram_user_id, user.day_start)
     if store is None:
         raise RuntimeError("Garmin-токени не були збережені.")
